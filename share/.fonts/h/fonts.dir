@@ -1,0 +1,609 @@
+608
+.HelveticaCyr_BoldInclined.otf -adobe-helvetica cyr upright-bold-i-normal--0-0-0-0-p-0-iso10646-1
+.HelveticaCyr_BoldInclined.otf -adobe-helvetica cyr upright-bold-i-normal--0-0-0-0-p-0-iso8859-5
+.HelveticaCyr_BoldInclined.otf -adobe-helvetica cyr upright-bold-i-normal--0-0-0-0-p-0-koi8-e
+.HelveticaCyr_BoldInclined.otf -adobe-helvetica cyr upright-bold-i-normal--0-0-0-0-p-0-koi8-r
+.HelveticaCyr_BoldInclined.otf -adobe-helvetica cyr upright-bold-i-normal--0-0-0-0-p-0-koi8-ru
+.HelveticaCyr_BoldInclined.otf -adobe-helvetica cyr upright-bold-i-normal--0-0-0-0-p-0-koi8-u
+.HelveticaCyr_BoldInclined.otf -adobe-helvetica cyr upright-bold-i-normal--0-0-0-0-p-0-koi8-uni
+.HelveticaCyr_Inclined.otf -adobe-helvetica cyr upright-medium-i-normal--0-0-0-0-p-0-iso10646-1
+.HelveticaCyr_Inclined.otf -adobe-helvetica cyr upright-medium-i-normal--0-0-0-0-p-0-iso8859-5
+.HelveticaCyr_Inclined.otf -adobe-helvetica cyr upright-medium-i-normal--0-0-0-0-p-0-koi8-e
+.HelveticaCyr_Inclined.otf -adobe-helvetica cyr upright-medium-i-normal--0-0-0-0-p-0-koi8-r
+.HelveticaCyr_Inclined.otf -adobe-helvetica cyr upright-medium-i-normal--0-0-0-0-p-0-koi8-ru
+.HelveticaCyr_Inclined.otf -adobe-helvetica cyr upright-medium-i-normal--0-0-0-0-p-0-koi8-u
+.HelveticaCyr_Inclined.otf -adobe-helvetica cyr upright-medium-i-normal--0-0-0-0-p-0-koi8-uni
+.Helvetica_Black.otf -adobe-helvetica black-black-r-normal--0-0-0-0-p-0-adobe-standard
+.Helvetica_Black.otf -adobe-helvetica black-black-r-normal--0-0-0-0-p-0-ascii-0
+.Helvetica_Black.otf -adobe-helvetica black-black-r-normal--0-0-0-0-p-0-iso10646-1
+.Helvetica_Black.otf -adobe-helvetica black-black-r-normal--0-0-0-0-p-0-iso8859-1
+.Helvetica_Black.otf -adobe-helvetica black-black-r-normal--0-0-0-0-p-0-iso8859-15
+.Helvetica_Black.otf -adobe-helvetica black-black-r-normal--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_BlackOblique.otf -adobe-helvetica black-black-o-normal--0-0-0-0-p-0-adobe-standard
+.Helvetica_BlackOblique.otf -adobe-helvetica black-black-o-normal--0-0-0-0-p-0-ascii-0
+.Helvetica_BlackOblique.otf -adobe-helvetica black-black-o-normal--0-0-0-0-p-0-iso10646-1
+.Helvetica_BlackOblique.otf -adobe-helvetica black-black-o-normal--0-0-0-0-p-0-iso8859-1
+.Helvetica_BlackOblique.otf -adobe-helvetica black-black-o-normal--0-0-0-0-p-0-iso8859-15
+.Helvetica_BlackOblique.otf -adobe-helvetica black-black-o-normal--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Bold.otf -adobe-helvetica-bold-r-normal--0-0-0-0-p-0-adobe-standard
+.Helvetica_Bold.otf -adobe-helvetica-bold-r-normal--0-0-0-0-p-0-ascii-0
+.Helvetica_Bold.otf -adobe-helvetica-bold-r-normal--0-0-0-0-p-0-iso10646-1
+.Helvetica_Bold.otf -adobe-helvetica-bold-r-normal--0-0-0-0-p-0-iso8859-1
+.Helvetica_Bold.otf -adobe-helvetica-bold-r-normal--0-0-0-0-p-0-iso8859-15
+.Helvetica_Bold.otf -adobe-helvetica-bold-r-normal--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_BoldOblique.otf -adobe-helvetica-bold-o-normal--0-0-0-0-p-0-adobe-standard
+.Helvetica_BoldOblique.otf -adobe-helvetica-bold-o-normal--0-0-0-0-p-0-ascii-0
+.Helvetica_BoldOblique.otf -adobe-helvetica-bold-o-normal--0-0-0-0-p-0-iso10646-1
+.Helvetica_BoldOblique.otf -adobe-helvetica-bold-o-normal--0-0-0-0-p-0-iso8859-1
+.Helvetica_BoldOblique.otf -adobe-helvetica-bold-o-normal--0-0-0-0-p-0-iso8859-15
+.Helvetica_BoldOblique.otf -adobe-helvetica-bold-o-normal--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Compressed.otf -adobe-helvetica compressed-medium-r-extracondensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Compressed.otf -adobe-helvetica compressed-medium-r-extracondensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Compressed.otf -adobe-helvetica compressed-medium-r-extracondensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Compressed.otf -adobe-helvetica compressed-medium-r-extracondensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Compressed.otf -adobe-helvetica compressed-medium-r-extracondensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Compressed.otf -adobe-helvetica compressed-medium-r-extracondensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Condensed.otf -adobe-helvetica condensed-medium-r-condensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Condensed.otf -adobe-helvetica condensed-medium-r-condensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Condensed.otf -adobe-helvetica condensed-medium-r-condensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Condensed.otf -adobe-helvetica condensed-medium-r-condensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Condensed.otf -adobe-helvetica condensed-medium-r-condensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Condensed.otf -adobe-helvetica condensed-medium-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Condensed_Black.otf -adobe-helvetica condensedblack-black-r-condensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Condensed_Black.otf -adobe-helvetica condensedblack-black-r-condensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Condensed_Black.otf -adobe-helvetica condensedblack-black-r-condensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Condensed_Black.otf -adobe-helvetica condensedblack-black-r-condensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Condensed_Black.otf -adobe-helvetica condensedblack-black-r-condensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Condensed_Black.otf -adobe-helvetica condensedblack-black-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Condensed_BlackObl.otf -adobe-helvetica condensedblack-black-i-condensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Condensed_BlackObl.otf -adobe-helvetica condensedblack-black-i-condensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Condensed_BlackObl.otf -adobe-helvetica condensedblack-black-i-condensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Condensed_BlackObl.otf -adobe-helvetica condensedblack-black-i-condensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Condensed_BlackObl.otf -adobe-helvetica condensedblack-black-i-condensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Condensed_BlackObl.otf -adobe-helvetica condensedblack-black-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Condensed_Bold.otf -adobe-helvetica condensed-bold-r-condensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Condensed_Bold.otf -adobe-helvetica condensed-bold-r-condensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Condensed_Bold.otf -adobe-helvetica condensed-bold-r-condensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Condensed_Bold.otf -adobe-helvetica condensed-bold-r-condensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Condensed_Bold.otf -adobe-helvetica condensed-bold-r-condensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Condensed_Bold.otf -adobe-helvetica condensed-bold-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Condensed_Light.otf -adobe-helvetica condensedlight-light-r-condensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Condensed_Light.otf -adobe-helvetica condensedlight-light-r-condensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Condensed_Light.otf -adobe-helvetica condensedlight-light-r-condensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Condensed_Light.otf -adobe-helvetica condensedlight-light-r-condensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Condensed_Light.otf -adobe-helvetica condensedlight-light-r-condensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Condensed_Light.otf -adobe-helvetica condensedlight-light-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Condensed_LightObl.otf -adobe-helvetica condensedlight-light-i-condensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Condensed_LightObl.otf -adobe-helvetica condensedlight-light-i-condensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Condensed_LightObl.otf -adobe-helvetica condensedlight-light-i-condensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Condensed_LightObl.otf -adobe-helvetica condensedlight-light-i-condensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Condensed_LightObl.otf -adobe-helvetica condensedlight-light-i-condensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Condensed_LightObl.otf -adobe-helvetica condensedlight-light-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Condensed_Oblique.otf -adobe-helvetica condensed-medium-o-condensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Condensed_Oblique.otf -adobe-helvetica condensed-medium-o-condensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Condensed_Oblique.otf -adobe-helvetica condensed-medium-o-condensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Condensed_Oblique.otf -adobe-helvetica condensed-medium-o-condensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Condensed_Oblique.otf -adobe-helvetica condensed-medium-o-condensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Condensed_Oblique.otf -adobe-helvetica condensed-medium-o-condensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_ExtraCompressed.otf -adobe-helvetica extracompressed-medium-r-ultracondensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_ExtraCompressed.otf -adobe-helvetica extracompressed-medium-r-ultracondensed--0-0-0-0-p-0-ascii-0
+.Helvetica_ExtraCompressed.otf -adobe-helvetica extracompressed-medium-r-ultracondensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_ExtraCompressed.otf -adobe-helvetica extracompressed-medium-r-ultracondensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_ExtraCompressed.otf -adobe-helvetica extracompressed-medium-r-ultracondensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_ExtraCompressed.otf -adobe-helvetica extracompressed-medium-r-ultracondensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Fraction.otf -adobe-helvetica fraction-medium-r-normal--0-0-0-0-p-0-adobe-fontspecific
+.Helvetica_Fraction.otf -adobe-helvetica fraction-medium-r-normal--0-0-0-0-p-0-iso10646-1
+.Helvetica_LightOblique.otf -adobe-helvetica light-light-o-normal--0-0-0-0-p-0-adobe-standard
+.Helvetica_LightOblique.otf -adobe-helvetica light-light-o-normal--0-0-0-0-p-0-ascii-0
+.Helvetica_LightOblique.otf -adobe-helvetica light-light-o-normal--0-0-0-0-p-0-iso10646-1
+.Helvetica_LightOblique.otf -adobe-helvetica light-light-o-normal--0-0-0-0-p-0-iso8859-1
+.Helvetica_LightOblique.otf -adobe-helvetica light-light-o-normal--0-0-0-0-p-0-iso8859-15
+.Helvetica_LightOblique.otf -adobe-helvetica light-light-o-normal--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Narrow.otf -adobe-helvetica narrow-medium-r-semicondensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Narrow.otf -adobe-helvetica narrow-medium-r-semicondensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Narrow.otf -adobe-helvetica narrow-medium-r-semicondensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Narrow.otf -adobe-helvetica narrow-medium-r-semicondensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Narrow.otf -adobe-helvetica narrow-medium-r-semicondensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Narrow.otf -adobe-helvetica narrow-medium-r-semicondensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Narrow_Bold.otf -adobe-helvetica narrow-bold-r-semicondensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Narrow_Bold.otf -adobe-helvetica narrow-bold-r-semicondensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Narrow_Bold.otf -adobe-helvetica narrow-bold-r-semicondensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Narrow_Bold.otf -adobe-helvetica narrow-bold-r-semicondensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Narrow_Bold.otf -adobe-helvetica narrow-bold-r-semicondensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Narrow_Bold.otf -adobe-helvetica narrow-bold-r-semicondensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Narrow_BoldOblique.otf -adobe-helvetica narrow-bold-o-semicondensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Narrow_BoldOblique.otf -adobe-helvetica narrow-bold-o-semicondensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Narrow_BoldOblique.otf -adobe-helvetica narrow-bold-o-semicondensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Narrow_BoldOblique.otf -adobe-helvetica narrow-bold-o-semicondensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Narrow_BoldOblique.otf -adobe-helvetica narrow-bold-o-semicondensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Narrow_BoldOblique.otf -adobe-helvetica narrow-bold-o-semicondensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Narrow_Oblique.otf -adobe-helvetica narrow-medium-o-semicondensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_Narrow_Oblique.otf -adobe-helvetica narrow-medium-o-semicondensed--0-0-0-0-p-0-ascii-0
+.Helvetica_Narrow_Oblique.otf -adobe-helvetica narrow-medium-o-semicondensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_Narrow_Oblique.otf -adobe-helvetica narrow-medium-o-semicondensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_Narrow_Oblique.otf -adobe-helvetica narrow-medium-o-semicondensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_Narrow_Oblique.otf -adobe-helvetica narrow-medium-o-semicondensed--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_Oblique.otf -adobe-helvetica-medium-o-normal--0-0-0-0-p-0-adobe-standard
+.Helvetica_Oblique.otf -adobe-helvetica-medium-o-normal--0-0-0-0-p-0-ascii-0
+.Helvetica_Oblique.otf -adobe-helvetica-medium-o-normal--0-0-0-0-p-0-iso10646-1
+.Helvetica_Oblique.otf -adobe-helvetica-medium-o-normal--0-0-0-0-p-0-iso8859-1
+.Helvetica_Oblique.otf -adobe-helvetica-medium-o-normal--0-0-0-0-p-0-iso8859-15
+.Helvetica_Oblique.otf -adobe-helvetica-medium-o-normal--0-0-0-0-p-0-microsoft-cp1252
+.Helvetica_UltraCompressed.otf -adobe-helvetica ultracompressed-extrabold-r-ultracondensed--0-0-0-0-p-0-adobe-standard
+.Helvetica_UltraCompressed.otf -adobe-helvetica ultracompressed-extrabold-r-ultracondensed--0-0-0-0-p-0-ascii-0
+.Helvetica_UltraCompressed.otf -adobe-helvetica ultracompressed-extrabold-r-ultracondensed--0-0-0-0-p-0-iso10646-1
+.Helvetica_UltraCompressed.otf -adobe-helvetica ultracompressed-extrabold-r-ultracondensed--0-0-0-0-p-0-iso8859-1
+.Helvetica_UltraCompressed.otf -adobe-helvetica ultracompressed-extrabold-r-ultracondensed--0-0-0-0-p-0-iso8859-15
+.Helvetica_UltraCompressed.otf -adobe-helvetica ultracompressed-extrabold-r-ultracondensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaInserat_Roman.otf -adobe-helvetica inserat-medium-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaInserat_Roman.otf -adobe-helvetica inserat-medium-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaInserat_Roman.otf -adobe-helvetica inserat-medium-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaInserat_Roman.otf -adobe-helvetica inserat-medium-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaInserat_Roman.otf -adobe-helvetica inserat-medium-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaInserat_Roman.otf -adobe-helvetica inserat-medium-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_Bd.otf -adobe-helveticaneuelt std-bold-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_Bd.otf -adobe-helveticaneuelt std-bold-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_Bd.otf -adobe-helveticaneuelt std-bold-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_Bd.otf -adobe-helveticaneuelt std-bold-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_Bd.otf -adobe-helveticaneuelt std-bold-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_Bd.otf -adobe-helveticaneuelt std-bold-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_BdCn.otf -adobe-helveticaneuelt std cn-bold-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_BdCn.otf -adobe-helveticaneuelt std cn-bold-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_BdCn.otf -adobe-helveticaneuelt std cn-bold-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_BdCn.otf -adobe-helveticaneuelt std cn-bold-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_BdCn.otf -adobe-helveticaneuelt std cn-bold-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_BdCn.otf -adobe-helveticaneuelt std cn-bold-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_BdEx.otf -adobe-helveticaneuelt std extended-bold-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_BdEx.otf -adobe-helveticaneuelt std extended-bold-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_BdEx.otf -adobe-helveticaneuelt std extended-bold-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_BdEx.otf -adobe-helveticaneuelt std extended-bold-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_BdEx.otf -adobe-helveticaneuelt std extended-bold-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_BdEx.otf -adobe-helveticaneuelt std extended-bold-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_BdIt.otf -adobe-helveticaneuelt std-bold-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_BdIt.otf -adobe-helveticaneuelt std-bold-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_BdIt.otf -adobe-helveticaneuelt std-bold-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_BdIt.otf -adobe-helveticaneuelt std-bold-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_BdIt.otf -adobe-helveticaneuelt std-bold-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_BdIt.otf -adobe-helveticaneuelt std-bold-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_Blk.otf -adobe-helveticaneuelt std blk-black-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_Blk.otf -adobe-helveticaneuelt std blk-black-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_Blk.otf -adobe-helveticaneuelt std blk-black-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_Blk.otf -adobe-helveticaneuelt std blk-black-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_Blk.otf -adobe-helveticaneuelt std blk-black-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_Blk.otf -adobe-helveticaneuelt std blk-black-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_BlkCn.otf -adobe-helveticaneuelt std blk cn-black-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_BlkCn.otf -adobe-helveticaneuelt std blk cn-black-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_BlkCn.otf -adobe-helveticaneuelt std blk cn-black-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_BlkCn.otf -adobe-helveticaneuelt std blk cn-black-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_BlkCn.otf -adobe-helveticaneuelt std blk cn-black-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_BlkCn.otf -adobe-helveticaneuelt std blk cn-black-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_BlkCnO.otf -adobe-helveticaneuelt std blk cn-black-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_BlkCnO.otf -adobe-helveticaneuelt std blk cn-black-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_BlkCnO.otf -adobe-helveticaneuelt std blk cn-black-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_BlkCnO.otf -adobe-helveticaneuelt std blk cn-black-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_BlkCnO.otf -adobe-helveticaneuelt std blk cn-black-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_BlkCnO.otf -adobe-helveticaneuelt std blk cn-black-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_BlkEx.otf -adobe-helveticaneuelt std blk ext-black-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_BlkEx.otf -adobe-helveticaneuelt std blk ext-black-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_BlkEx.otf -adobe-helveticaneuelt std blk ext-black-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_BlkEx.otf -adobe-helveticaneuelt std blk ext-black-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_BlkEx.otf -adobe-helveticaneuelt std blk ext-black-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_BlkEx.otf -adobe-helveticaneuelt std blk ext-black-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_BlkExO.otf -adobe-helveticaneuelt std blk ext-black-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_BlkExO.otf -adobe-helveticaneuelt std blk ext-black-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_BlkExO.otf -adobe-helveticaneuelt std blk ext-black-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_BlkExO.otf -adobe-helveticaneuelt std blk ext-black-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_BlkExO.otf -adobe-helveticaneuelt std blk ext-black-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_BlkExO.otf -adobe-helveticaneuelt std blk ext-black-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_BlkIt.otf -adobe-helveticaneuelt std blk-black-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_BlkIt.otf -adobe-helveticaneuelt std blk-black-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_BlkIt.otf -adobe-helveticaneuelt std blk-black-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_BlkIt.otf -adobe-helveticaneuelt std blk-black-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_BlkIt.otf -adobe-helveticaneuelt std blk-black-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_BlkIt.otf -adobe-helveticaneuelt std blk-black-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_Cn.otf -adobe-helveticaneuelt std cn-medium-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_Cn.otf -adobe-helveticaneuelt std cn-medium-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_Cn.otf -adobe-helveticaneuelt std cn-medium-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_Cn.otf -adobe-helveticaneuelt std cn-medium-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_Cn.otf -adobe-helveticaneuelt std cn-medium-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_Cn.otf -adobe-helveticaneuelt std cn-medium-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_CnO.otf -adobe-helveticaneuelt std cn-medium-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_CnO.otf -adobe-helveticaneuelt std cn-medium-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_CnO.otf -adobe-helveticaneuelt std cn-medium-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_CnO.otf -adobe-helveticaneuelt std cn-medium-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_CnO.otf -adobe-helveticaneuelt std cn-medium-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_CnO.otf -adobe-helveticaneuelt std cn-medium-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_Ex.otf -adobe-helveticaneuelt std ext-medium-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_Ex.otf -adobe-helveticaneuelt std ext-medium-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_Ex.otf -adobe-helveticaneuelt std ext-medium-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_Ex.otf -adobe-helveticaneuelt std ext-medium-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_Ex.otf -adobe-helveticaneuelt std ext-medium-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_Ex.otf -adobe-helveticaneuelt std ext-medium-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_ExO.otf -adobe-helveticaneuelt std ext-medium-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_ExO.otf -adobe-helveticaneuelt std ext-medium-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_ExO.otf -adobe-helveticaneuelt std ext-medium-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_ExO.otf -adobe-helveticaneuelt std ext-medium-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_ExO.otf -adobe-helveticaneuelt std ext-medium-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_ExO.otf -adobe-helveticaneuelt std ext-medium-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_HvCn.otf -adobe-helveticaneuelt std med cn-extrabold-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_HvCn.otf -adobe-helveticaneuelt std med cn-extrabold-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_HvCn.otf -adobe-helveticaneuelt std med cn-extrabold-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_HvCn.otf -adobe-helveticaneuelt std med cn-extrabold-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_HvCn.otf -adobe-helveticaneuelt std med cn-extrabold-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_HvCn.otf -adobe-helveticaneuelt std med cn-extrabold-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_HvCnO.otf -adobe-helveticaneuelt std med cn-extrabold-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_HvCnO.otf -adobe-helveticaneuelt std med cn-extrabold-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_HvCnO.otf -adobe-helveticaneuelt std med cn-extrabold-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_HvCnO.otf -adobe-helveticaneuelt std med cn-extrabold-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_HvCnO.otf -adobe-helveticaneuelt std med cn-extrabold-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_HvCnO.otf -adobe-helveticaneuelt std med cn-extrabold-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_HvEx.otf -adobe-helveticaneuelt std med ext-extrabold-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_HvEx.otf -adobe-helveticaneuelt std med ext-extrabold-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_HvEx.otf -adobe-helveticaneuelt std med ext-extrabold-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_HvEx.otf -adobe-helveticaneuelt std med ext-extrabold-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_HvEx.otf -adobe-helveticaneuelt std med ext-extrabold-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_HvEx.otf -adobe-helveticaneuelt std med ext-extrabold-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_HvExO.otf -adobe-helveticaneuelt std med ext-extrabold-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_HvExO.otf -adobe-helveticaneuelt std med ext-extrabold-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_HvExO.otf -adobe-helveticaneuelt std med ext-extrabold-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_HvExO.otf -adobe-helveticaneuelt std med ext-extrabold-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_HvExO.otf -adobe-helveticaneuelt std med ext-extrabold-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_HvExO.otf -adobe-helveticaneuelt std med ext-extrabold-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_HvIt.otf -adobe-helveticaneuelt std med-extrabold-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_HvIt.otf -adobe-helveticaneuelt std med-extrabold-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_HvIt.otf -adobe-helveticaneuelt std med-extrabold-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_HvIt.otf -adobe-helveticaneuelt std med-extrabold-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_HvIt.otf -adobe-helveticaneuelt std med-extrabold-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_HvIt.otf -adobe-helveticaneuelt std med-extrabold-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_It.otf -adobe-helveticaneuelt std-medium-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_It.otf -adobe-helveticaneuelt std-medium-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_It.otf -adobe-helveticaneuelt std-medium-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_It.otf -adobe-helveticaneuelt std-medium-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_It.otf -adobe-helveticaneuelt std-medium-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_It.otf -adobe-helveticaneuelt std-medium-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_Lt.otf -adobe-helveticaneuelt std lt-light-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_Lt.otf -adobe-helveticaneuelt std lt-light-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_Lt.otf -adobe-helveticaneuelt std lt-light-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_Lt.otf -adobe-helveticaneuelt std lt-light-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_Lt.otf -adobe-helveticaneuelt std lt-light-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_Lt.otf -adobe-helveticaneuelt std lt-light-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_LtCn.otf -adobe-helveticaneuelt std lt cn-light-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_LtCn.otf -adobe-helveticaneuelt std lt cn-light-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_LtCn.otf -adobe-helveticaneuelt std lt cn-light-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_LtCn.otf -adobe-helveticaneuelt std lt cn-light-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_LtCn.otf -adobe-helveticaneuelt std lt cn-light-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_LtCn.otf -adobe-helveticaneuelt std lt cn-light-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_LtCnO.otf -adobe-helveticaneuelt std lt cn-light-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_LtCnO.otf -adobe-helveticaneuelt std lt cn-light-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_LtCnO.otf -adobe-helveticaneuelt std lt cn-light-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_LtCnO.otf -adobe-helveticaneuelt std lt cn-light-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_LtCnO.otf -adobe-helveticaneuelt std lt cn-light-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_LtCnO.otf -adobe-helveticaneuelt std lt cn-light-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_LtEx.otf -adobe-helveticaneuelt std lt ext-light-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_LtEx.otf -adobe-helveticaneuelt std lt ext-light-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_LtEx.otf -adobe-helveticaneuelt std lt ext-light-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_LtEx.otf -adobe-helveticaneuelt std lt ext-light-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_LtEx.otf -adobe-helveticaneuelt std lt ext-light-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_LtEx.otf -adobe-helveticaneuelt std lt ext-light-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_LtExO.otf -adobe-helveticaneuelt std lt ext-light-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_LtExO.otf -adobe-helveticaneuelt std lt ext-light-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_LtExO.otf -adobe-helveticaneuelt std lt ext-light-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_LtExO.otf -adobe-helveticaneuelt std lt ext-light-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_LtExO.otf -adobe-helveticaneuelt std lt ext-light-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_LtExO.otf -adobe-helveticaneuelt std lt ext-light-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_LtIt.otf -adobe-helveticaneuelt std lt-light-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_LtIt.otf -adobe-helveticaneuelt std lt-light-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_LtIt.otf -adobe-helveticaneuelt std lt-light-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_LtIt.otf -adobe-helveticaneuelt std lt-light-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_LtIt.otf -adobe-helveticaneuelt std lt-light-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_LtIt.otf -adobe-helveticaneuelt std lt-light-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_Md.otf -adobe-helveticaneuelt std med-medium-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_Md.otf -adobe-helveticaneuelt std med-medium-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_Md.otf -adobe-helveticaneuelt std med-medium-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_Md.otf -adobe-helveticaneuelt std med-medium-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_Md.otf -adobe-helveticaneuelt std med-medium-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_Md.otf -adobe-helveticaneuelt std med-medium-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_MdCn.otf -adobe-helveticaneuelt std med cn-medium-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_MdCn.otf -adobe-helveticaneuelt std med cn-medium-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_MdCn.otf -adobe-helveticaneuelt std med cn-medium-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_MdCn.otf -adobe-helveticaneuelt std med cn-medium-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_MdCn.otf -adobe-helveticaneuelt std med cn-medium-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_MdCn.otf -adobe-helveticaneuelt std med cn-medium-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_MdCnO.otf -adobe-helveticaneuelt std med cn-medium-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_MdCnO.otf -adobe-helveticaneuelt std med cn-medium-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_MdCnO.otf -adobe-helveticaneuelt std med cn-medium-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_MdCnO.otf -adobe-helveticaneuelt std med cn-medium-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_MdCnO.otf -adobe-helveticaneuelt std med cn-medium-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_MdCnO.otf -adobe-helveticaneuelt std med cn-medium-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_MdEx.otf -adobe-helveticaneuelt std med ext-medium-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_MdEx.otf -adobe-helveticaneuelt std med ext-medium-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_MdEx.otf -adobe-helveticaneuelt std med ext-medium-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_MdEx.otf -adobe-helveticaneuelt std med ext-medium-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_MdEx.otf -adobe-helveticaneuelt std med ext-medium-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_MdEx.otf -adobe-helveticaneuelt std med ext-medium-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_MdExO.otf -adobe-helveticaneuelt std med ext-medium-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_MdExO.otf -adobe-helveticaneuelt std med ext-medium-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_MdExO.otf -adobe-helveticaneuelt std med ext-medium-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_MdExO.otf -adobe-helveticaneuelt std med ext-medium-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_MdExO.otf -adobe-helveticaneuelt std med ext-medium-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_MdExO.otf -adobe-helveticaneuelt std med ext-medium-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_MdIt.otf -adobe-helveticaneuelt std med-medium-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeueLTStd_MdIt.otf -adobe-helveticaneuelt std med-medium-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_MdIt.otf -adobe-helveticaneuelt std med-medium-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_MdIt.otf -adobe-helveticaneuelt std med-medium-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_MdIt.otf -adobe-helveticaneuelt std med-medium-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_MdIt.otf -adobe-helveticaneuelt std med-medium-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_Roman.otf -adobe-helveticaneuelt std-medium-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_Roman.otf -adobe-helveticaneuelt std-medium-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_Roman.otf -adobe-helveticaneuelt std-medium-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_Roman.otf -adobe-helveticaneuelt std-medium-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_Roman.otf -adobe-helveticaneuelt std-medium-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeueLTStd_XBlkCn.otf -adobe-helveticaneuelt std extblk cn-black-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeueLTStd_XBlkCn.otf -adobe-helveticaneuelt std extblk cn-black-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeueLTStd_XBlkCn.otf -adobe-helveticaneuelt std extblk cn-black-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeueLTStd_XBlkCn.otf -adobe-helveticaneuelt std extblk cn-black-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeueLTStd_XBlkCn.otf -adobe-helveticaneuelt std extblk cn-black-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_Black.otf -adobe-helvetica 95 black-black-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_Black.otf -adobe-helvetica 95 black-black-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_Black.otf -adobe-helvetica 95 black-black-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_Black.otf -adobe-helvetica 95 black-black-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_Black.otf -adobe-helvetica 95 black-black-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_Black.otf -adobe-helvetica 95 black-black-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_BlackCond.otf -adobe-helveticaneue blackcond-black-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_BlackCond.otf -adobe-helveticaneue blackcond-black-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_BlackCond.otf -adobe-helveticaneue blackcond-black-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_BlackCond.otf -adobe-helveticaneue blackcond-black-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_BlackCond.otf -adobe-helveticaneue blackcond-black-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_BlackCond.otf -adobe-helveticaneue blackcond-black-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_BlackExt.otf -adobe-helveticaneue blackext-black-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_BlackExt.otf -adobe-helveticaneue blackext-black-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_BlackExt.otf -adobe-helveticaneue blackext-black-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_BlackExt.otf -adobe-helveticaneue blackext-black-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_BlackExt.otf -adobe-helveticaneue blackext-black-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_BlackExt.otf -adobe-helveticaneue blackext-black-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_BlackExtObl.otf -adobe-helveticaneue blackext-black-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_BlackExtObl.otf -adobe-helveticaneue blackext-black-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_BlackExtObl.otf -adobe-helveticaneue blackext-black-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_BlackExtObl.otf -adobe-helveticaneue blackext-black-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_BlackExtObl.otf -adobe-helveticaneue blackext-black-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_BlackExtObl.otf -adobe-helveticaneue blackext-black-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_BlackItalic.otf -adobe-helvetica 95 black-black-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_BlackItalic.otf -adobe-helvetica 95 black-black-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_BlackItalic.otf -adobe-helvetica 95 black-black-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_BlackItalic.otf -adobe-helvetica 95 black-black-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_BlackItalic.otf -adobe-helvetica 95 black-black-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_BlackItalic.otf -adobe-helvetica 95 black-black-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_Bold.otf -adobe-helvetica 55 roman-bold-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_Bold.otf -adobe-helvetica 55 roman-bold-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_Bold.otf -adobe-helvetica 55 roman-bold-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_Bold.otf -adobe-helvetica 55 roman-bold-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_Bold.otf -adobe-helvetica 55 roman-bold-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_Bold.otf -adobe-helvetica 55 roman-bold-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_BoldCond.otf -adobe-helveticaneue condensed-bold-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_BoldCond.otf -adobe-helveticaneue condensed-bold-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_BoldCond.otf -adobe-helveticaneue condensed-bold-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_BoldCond.otf -adobe-helveticaneue condensed-bold-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_BoldCond.otf -adobe-helveticaneue condensed-bold-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_BoldCond.otf -adobe-helveticaneue condensed-bold-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_BoldCondObl.otf -adobe-helveticaneue condensed-bold-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_BoldCondObl.otf -adobe-helveticaneue condensed-bold-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_BoldCondObl.otf -adobe-helveticaneue condensed-bold-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_BoldCondObl.otf -adobe-helveticaneue condensed-bold-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_BoldCondObl.otf -adobe-helveticaneue condensed-bold-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_BoldCondObl.otf -adobe-helveticaneue condensed-bold-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_BoldExt.otf -adobe-helveticaneue extended-bold-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_BoldExt.otf -adobe-helveticaneue extended-bold-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_BoldExt.otf -adobe-helveticaneue extended-bold-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_BoldExt.otf -adobe-helveticaneue extended-bold-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_BoldExt.otf -adobe-helveticaneue extended-bold-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_BoldExt.otf -adobe-helveticaneue extended-bold-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_BoldExtObl.otf -adobe-helveticaneue extended-bold-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_BoldExtObl.otf -adobe-helveticaneue extended-bold-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_BoldExtObl.otf -adobe-helveticaneue extended-bold-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_BoldExtObl.otf -adobe-helveticaneue extended-bold-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_BoldExtObl.otf -adobe-helveticaneue extended-bold-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_BoldExtObl.otf -adobe-helveticaneue extended-bold-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_BoldItalic.otf -adobe-helvetica 55 roman-bold-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_BoldItalic.otf -adobe-helvetica 55 roman-bold-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_BoldItalic.otf -adobe-helvetica 55 roman-bold-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_BoldItalic.otf -adobe-helvetica 55 roman-bold-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_BoldItalic.otf -adobe-helvetica 55 roman-bold-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_BoldItalic.otf -adobe-helvetica 55 roman-bold-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_Condensed.otf -adobe-helveticaneue condensed-medium-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_Condensed.otf -adobe-helveticaneue condensed-medium-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_Condensed.otf -adobe-helveticaneue condensed-medium-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_Condensed.otf -adobe-helveticaneue condensed-medium-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_Condensed.otf -adobe-helveticaneue condensed-medium-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_Condensed.otf -adobe-helveticaneue condensed-medium-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_CondensedObl.otf -adobe-helveticaneue condensed-medium-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_CondensedObl.otf -adobe-helveticaneue condensed-medium-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_CondensedObl.otf -adobe-helveticaneue condensed-medium-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_CondensedObl.otf -adobe-helveticaneue condensed-medium-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_CondensedObl.otf -adobe-helveticaneue condensed-medium-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_CondensedObl.otf -adobe-helveticaneue condensed-medium-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_Extended.otf -adobe-helveticaneue extended-medium-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_Extended.otf -adobe-helveticaneue extended-medium-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_Extended.otf -adobe-helveticaneue extended-medium-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_Extended.otf -adobe-helveticaneue extended-medium-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_Extended.otf -adobe-helveticaneue extended-medium-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_Extended.otf -adobe-helveticaneue extended-medium-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_ExtendedObl.otf -adobe-helveticaneue extended-medium-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_ExtendedObl.otf -adobe-helveticaneue extended-medium-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_ExtendedObl.otf -adobe-helveticaneue extended-medium-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_ExtendedObl.otf -adobe-helveticaneue extended-medium-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_ExtendedObl.otf -adobe-helveticaneue extended-medium-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_ExtendedObl.otf -adobe-helveticaneue extended-medium-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_Light.otf -adobe-helvetica 45 light-light-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_Light.otf -adobe-helvetica 45 light-light-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_Light.otf -adobe-helvetica 45 light-light-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_Light.otf -adobe-helvetica 45 light-light-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_Light.otf -adobe-helvetica 45 light-light-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_Light.otf -adobe-helvetica 45 light-light-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_LightCond.otf -adobe-helveticaneue lightcond-light-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_LightCond.otf -adobe-helveticaneue lightcond-light-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_LightCond.otf -adobe-helveticaneue lightcond-light-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_LightCond.otf -adobe-helveticaneue lightcond-light-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_LightCond.otf -adobe-helveticaneue lightcond-light-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_LightCond.otf -adobe-helveticaneue lightcond-light-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_LightCondObl.otf -adobe-helveticaneue lightcond-light-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_LightCondObl.otf -adobe-helveticaneue lightcond-light-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_LightCondObl.otf -adobe-helveticaneue lightcond-light-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_LightCondObl.otf -adobe-helveticaneue lightcond-light-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_LightCondObl.otf -adobe-helveticaneue lightcond-light-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_LightCondObl.otf -adobe-helveticaneue lightcond-light-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_LightExt.otf -adobe-helveticaneue lightext-light-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_LightExt.otf -adobe-helveticaneue lightext-light-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_LightExt.otf -adobe-helveticaneue lightext-light-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_LightExt.otf -adobe-helveticaneue lightext-light-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_LightExt.otf -adobe-helveticaneue lightext-light-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_LightExt.otf -adobe-helveticaneue lightext-light-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_LightItalic.otf -adobe-helvetica 45 light-light-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_LightItalic.otf -adobe-helvetica 45 light-light-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_LightItalic.otf -adobe-helvetica 45 light-light-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_LightItalic.otf -adobe-helvetica 45 light-light-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_LightItalic.otf -adobe-helvetica 45 light-light-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_LightItalic.otf -adobe-helvetica 45 light-light-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_Medium.otf -adobe-helvetica 65 medium-medium-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_Medium.otf -adobe-helvetica 65 medium-medium-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_Medium.otf -adobe-helvetica 65 medium-medium-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_Medium.otf -adobe-helvetica 65 medium-medium-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_Medium.otf -adobe-helvetica 65 medium-medium-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_Medium.otf -adobe-helvetica 65 medium-medium-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_MediumCondObl.otf -adobe-helveticaneue mediumcond-medium-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_MediumCondObl.otf -adobe-helveticaneue mediumcond-medium-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_MediumCondObl.otf -adobe-helveticaneue mediumcond-medium-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_MediumCondObl.otf -adobe-helveticaneue mediumcond-medium-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_MediumCondObl.otf -adobe-helveticaneue mediumcond-medium-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_MediumCondObl.otf -adobe-helveticaneue mediumcond-medium-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_MediumExt.otf -adobe-helveticaneue mediumext-medium-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_MediumExt.otf -adobe-helveticaneue mediumext-medium-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_MediumExt.otf -adobe-helveticaneue mediumext-medium-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_MediumExt.otf -adobe-helveticaneue mediumext-medium-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_MediumExt.otf -adobe-helveticaneue mediumext-medium-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_MediumExt.otf -adobe-helveticaneue mediumext-medium-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_MediumExtObl.otf -adobe-helveticaneue mediumext-medium-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_MediumExtObl.otf -adobe-helveticaneue mediumext-medium-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_MediumExtObl.otf -adobe-helveticaneue mediumext-medium-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_MediumExtObl.otf -adobe-helveticaneue mediumext-medium-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_MediumExtObl.otf -adobe-helveticaneue mediumext-medium-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_MediumExtObl.otf -adobe-helveticaneue mediumext-medium-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_MediumItalic.otf -adobe-helvetica 65 medium-medium-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_MediumItalic.otf -adobe-helvetica 65 medium-medium-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_MediumItalic.otf -adobe-helvetica 65 medium-medium-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_MediumItalic.otf -adobe-helvetica 65 medium-medium-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_MediumItalic.otf -adobe-helvetica 65 medium-medium-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_MediumItalic.otf -adobe-helvetica 65 medium-medium-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_Roman.otf -adobe-helvetica 55 roman-medium-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_Roman.otf -adobe-helvetica 55 roman-medium-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_Roman.otf -adobe-helvetica 55 roman-medium-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_Roman.otf -adobe-helvetica 55 roman-medium-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_Roman.otf -adobe-helvetica 55 roman-medium-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_Roman.otf -adobe-helvetica 55 roman-medium-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_Thin.otf -adobe-helvetica 35 thin-thin-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_Thin.otf -adobe-helvetica 35 thin-thin-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_Thin.otf -adobe-helvetica 35 thin-thin-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_Thin.otf -adobe-helvetica 35 thin-thin-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_Thin.otf -adobe-helvetica 35 thin-thin-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_Thin.otf -adobe-helvetica 35 thin-thin-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_ThinCond.otf -adobe-helveticaneue thincond-thin-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_ThinCond.otf -adobe-helveticaneue thincond-thin-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_ThinCond.otf -adobe-helveticaneue thincond-thin-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_ThinCond.otf -adobe-helveticaneue thincond-thin-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_ThinCond.otf -adobe-helveticaneue thincond-thin-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_ThinCond.otf -adobe-helveticaneue thincond-thin-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_ThinCondObl.otf -adobe-helveticaneue thincond-thin-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_ThinCondObl.otf -adobe-helveticaneue thincond-thin-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_ThinCondObl.otf -adobe-helveticaneue thincond-thin-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_ThinCondObl.otf -adobe-helveticaneue thincond-thin-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_ThinCondObl.otf -adobe-helveticaneue thincond-thin-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_ThinCondObl.otf -adobe-helveticaneue thincond-thin-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_ThinExt.otf -adobe-helveticaneue thinext-thin-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_ThinExt.otf -adobe-helveticaneue thinext-thin-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_ThinExt.otf -adobe-helveticaneue thinext-thin-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_ThinExt.otf -adobe-helveticaneue thinext-thin-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_ThinExt.otf -adobe-helveticaneue thinext-thin-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_ThinExt.otf -adobe-helveticaneue thinext-thin-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_ThinExtObl.otf -adobe-helveticaneue thinext-thin-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_ThinExtObl.otf -adobe-helveticaneue thinext-thin-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_ThinExtObl.otf -adobe-helveticaneue thinext-thin-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_ThinExtObl.otf -adobe-helveticaneue thinext-thin-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_ThinExtObl.otf -adobe-helveticaneue thinext-thin-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_ThinExtObl.otf -adobe-helveticaneue thinext-thin-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_ThinItalic.otf -adobe-helvetica 35 thin-thin-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_ThinItalic.otf -adobe-helvetica 35 thin-thin-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_ThinItalic.otf -adobe-helvetica 35 thin-thin-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_ThinItalic.otf -adobe-helvetica 35 thin-thin-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_ThinItalic.otf -adobe-helvetica 35 thin-thin-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_ThinItalic.otf -adobe-helvetica 35 thin-thin-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_UltraLigCond.otf -adobe-helveticaneue ultraligcond-extralight-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_UltraLigCond.otf -adobe-helveticaneue ultraligcond-extralight-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_UltraLigCond.otf -adobe-helveticaneue ultraligcond-extralight-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_UltraLigCond.otf -adobe-helveticaneue ultraligcond-extralight-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_UltraLigCond.otf -adobe-helveticaneue ultraligcond-extralight-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_UltraLigCond.otf -adobe-helveticaneue ultraligcond-extralight-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_UltraLigCondObl.otf -adobe-helveticaneue ultraligcond-extralight-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_UltraLigCondObl.otf -adobe-helveticaneue ultraligcond-extralight-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaNeue_UltraLigCondObl.otf -adobe-helveticaneue ultraligcond-extralight-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_UltraLigCondObl.otf -adobe-helveticaneue ultraligcond-extralight-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_UltraLigCondObl.otf -adobe-helveticaneue ultraligcond-extralight-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_UltraLigCondObl.otf -adobe-helveticaneue ultraligcond-extralight-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_UltraLigExt.otf -adobe-helveticaneue ultraligext-extralight-r-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_UltraLigExt.otf -adobe-helveticaneue ultraligext-extralight-r-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_UltraLigExt.otf -adobe-helveticaneue ultraligext-extralight-r-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_UltraLigExt.otf -adobe-helveticaneue ultraligext-extralight-r-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_UltraLigExt.otf -adobe-helveticaneue ultraligext-extralight-r-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_UltraLigExt.otf -adobe-helveticaneue ultraligext-extralight-r-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_UltraLigExtObl.otf -adobe-helveticaneue ultraligext-extralight-i-expanded--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_UltraLigExtObl.otf -adobe-helveticaneue ultraligext-extralight-i-expanded--0-0-0-0-p-0-ascii-0
+HelveticaNeue_UltraLigExtObl.otf -adobe-helveticaneue ultraligext-extralight-i-expanded--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_UltraLigExtObl.otf -adobe-helveticaneue ultraligext-extralight-i-expanded--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_UltraLigExtObl.otf -adobe-helveticaneue ultraligext-extralight-i-expanded--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_UltraLigExtObl.otf -adobe-helveticaneue ultraligext-extralight-i-expanded--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_UltraLight.otf -adobe-helvetica 25 ultralight-extralight-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_UltraLight.otf -adobe-helvetica 25 ultralight-extralight-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_UltraLight.otf -adobe-helvetica 25 ultralight-extralight-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_UltraLight.otf -adobe-helvetica 25 ultralight-extralight-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_UltraLight.otf -adobe-helvetica 25 ultralight-extralight-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_UltraLight.otf -adobe-helvetica 25 ultralight-extralight-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaNeue_UltraLightItal.otf -adobe-helvetica 25 ultralight-extralight-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaNeue_UltraLightItal.otf -adobe-helvetica 25 ultralight-extralight-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaNeue_UltraLightItal.otf -adobe-helvetica 25 ultralight-extralight-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaNeue_UltraLightItal.otf -adobe-helvetica 25 ultralight-extralight-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaNeue_UltraLightItal.otf -adobe-helvetica 25 ultralight-extralight-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaNeue_UltraLightItal.otf -adobe-helvetica 25 ultralight-extralight-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaRounded_Black.otf -adobe-helveticarounded bold-black-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaRounded_Black.otf -adobe-helveticarounded bold-black-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaRounded_Black.otf -adobe-helveticarounded bold-black-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaRounded_Black.otf -adobe-helveticarounded bold-black-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaRounded_Black.otf -adobe-helveticarounded bold-black-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaRounded_Black.otf -adobe-helveticarounded bold-black-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaRounded_BlackObl.otf -adobe-helveticarounded bold-black-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaRounded_BlackObl.otf -adobe-helveticarounded bold-black-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaRounded_BlackObl.otf -adobe-helveticarounded bold-black-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaRounded_BlackObl.otf -adobe-helveticarounded bold-black-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaRounded_BlackObl.otf -adobe-helveticarounded bold-black-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaRounded_BlackObl.otf -adobe-helveticarounded bold-black-i-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaRounded_Bold.otf -adobe-helveticarounded bold-bold-r-normal--0-0-0-0-p-0-adobe-standard
+HelveticaRounded_Bold.otf -adobe-helveticarounded bold-bold-r-normal--0-0-0-0-p-0-ascii-0
+HelveticaRounded_Bold.otf -adobe-helveticarounded bold-bold-r-normal--0-0-0-0-p-0-iso10646-1
+HelveticaRounded_Bold.otf -adobe-helveticarounded bold-bold-r-normal--0-0-0-0-p-0-iso8859-1
+HelveticaRounded_Bold.otf -adobe-helveticarounded bold-bold-r-normal--0-0-0-0-p-0-iso8859-15
+HelveticaRounded_Bold.otf -adobe-helveticarounded bold-bold-r-normal--0-0-0-0-p-0-microsoft-cp1252
+HelveticaRounded_BoldCond.otf -adobe-helveticarounded boldcond-bold-r-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaRounded_BoldCond.otf -adobe-helveticarounded boldcond-bold-r-condensed--0-0-0-0-p-0-ascii-0
+HelveticaRounded_BoldCond.otf -adobe-helveticarounded boldcond-bold-r-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaRounded_BoldCond.otf -adobe-helveticarounded boldcond-bold-r-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaRounded_BoldCond.otf -adobe-helveticarounded boldcond-bold-r-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaRounded_BoldCond.otf -adobe-helveticarounded boldcond-bold-r-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaRounded_BoldCondObl.otf -adobe-helveticarounded boldcond-bold-i-condensed--0-0-0-0-p-0-adobe-standard
+HelveticaRounded_BoldCondObl.otf -adobe-helveticarounded boldcond-bold-i-condensed--0-0-0-0-p-0-ascii-0
+HelveticaRounded_BoldCondObl.otf -adobe-helveticarounded boldcond-bold-i-condensed--0-0-0-0-p-0-iso10646-1
+HelveticaRounded_BoldCondObl.otf -adobe-helveticarounded boldcond-bold-i-condensed--0-0-0-0-p-0-iso8859-1
+HelveticaRounded_BoldCondObl.otf -adobe-helveticarounded boldcond-bold-i-condensed--0-0-0-0-p-0-iso8859-15
+HelveticaRounded_BoldCondObl.otf -adobe-helveticarounded boldcond-bold-i-condensed--0-0-0-0-p-0-microsoft-cp1252
+HelveticaRounded_BoldObl.otf -adobe-helveticarounded bold-bold-i-normal--0-0-0-0-p-0-adobe-standard
+HelveticaRounded_BoldObl.otf -adobe-helveticarounded bold-bold-i-normal--0-0-0-0-p-0-ascii-0
+HelveticaRounded_BoldObl.otf -adobe-helveticarounded bold-bold-i-normal--0-0-0-0-p-0-iso10646-1
+HelveticaRounded_BoldObl.otf -adobe-helveticarounded bold-bold-i-normal--0-0-0-0-p-0-iso8859-1
+HelveticaRounded_BoldObl.otf -adobe-helveticarounded bold-bold-i-normal--0-0-0-0-p-0-iso8859-15
+HelveticaRounded_BoldObl.otf -adobe-helveticarounded bold-bold-i-normal--0-0-0-0-p-0-microsoft-cp1252
