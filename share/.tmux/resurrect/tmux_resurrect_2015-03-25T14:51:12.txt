@@ -1,0 +1,20 @@
+grouped_session	2	tmux	:3	:2
+pane	0	0	:fish	1	:*	0	:/home/tiago	1	fish	:
+pane	tmux	0	:Code	0	:-	0	:/srv/http/lightwizard.com.au/wp-content/themes/lightwizard/library/scss	1	python	:/usr/bin/python -O /usr/bin/ranger
+pane	tmux	0	:Code	0	:-	1	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	mc	:mc
+pane	tmux	1	:System	0	: 	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	python	:/usr/bin/python /usr/bin/glances
+pane	tmux	1	:System	0	: 	1	:/home/tiago	1	htop	:htop
+pane	tmux	2	:Music	0	: 	0	:/home/tiago	0	ncmpcpp	:ncmpcpp
+pane	tmux	2	:Music	0	: 	1	:/home/tiago	1	alsamixer	:alsamixer
+pane	tmux	2	:Music	0	: 	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	ncmpcpp	:ncmpcpp
+pane	tmux	3	:Web	0	: 	0	:/home/tiago	0	links	:links
+pane	tmux	3	:Web	0	: 	1	:/home/tiago	1	finch	:finch
+pane	tmux	3	:Web	0	: 	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	irssi	:irssi
+pane	tmux	4	:fish	1	:*	0	:/home/tiago	1	fish	:
+window	0	0	1	:*	c3de,273x74,0,0,1
+window	tmux	0	0	:-	db11,273x74,0,0{147x74,0,0,2,125x74,148,0,3}
+window	tmux	1	0	: 	b51c,273x74,0,0{133x74,0,0,4,139x74,134,0,5}
+window	tmux	2	0	: 	201b,273x74,0,0{170x74,0,0,6,102x74,171,0[102x41,171,0,7,102x32,171,42,8]}
+window	tmux	3	0	: 	ee6e,273x74,0,0{155x74,0,0,9,117x74,156,0[117x37,156,0,10,117x36,156,38,11]}
+window	tmux	4	1	:*	6221,273x74,0,0,12
+state	2	0

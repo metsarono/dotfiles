@@ -1,0 +1,102 @@
+// out: ../dist/theme.css, compress: false, strictMath: true
+/* variables */
+@alpha: #293134;
+@beta: #E0E2E4;
+@charlie: #678CB1;
+@delta: #EC7600;
+@echo: #93C763;
+@foxtrot: #A082BD;
+@golf: #dc322f;
+@hotel: #FFCD22;
+@india: #616161;
+@juliet: #7D8C93;
+@kilo: #804000;
+@lima: #81969A;
+
+/* Code Styling */
+.CodeMirror, .CodeMirror-scroll {
+    background-color: @alpha;
+    color: @beta;
+}
+
+.CodeMirror-lines {
+    padding: 5px 0;
+}
+
+.CodeMirror-focused .CodeMirror-activeline {
+    .inline-widget {
+        color: @beta;    
+    }
+}
+
+/* Obsidian Colours */
+.cm-atom {color: @echo;}
+.cm-plus {color: @beta;}
+.cm-hr {color: @beta;}
+.cm-number {color: @hotel;}
+.cm-string {color: @delta;}
+.cm-string-2 {color: @delta;}
+.cm-attribute {color: @echo;}
+.cm-keyword {color: @echo;}
+.cm-tag {color: @charlie;}
+.cm-bracket {color: @charlie;}
+.cm-variable {color: @beta;}
+.cm-variable-2 {color: @foxtrot;}
+.cm-variable-3 {color: @beta;}
+.cm-builtin {color: @echo;}
+.cm-quote {color: @beta;} 
+.cm-def {color: @foxtrot;}
+.cm-rangeinfo {color: @beta;}
+.cm-property {color: @beta;}
+.cm-meta {color: @beta;}
+.cm-operator {color: @beta;}
+.cm-comment {color: @juliet;}
+.cm-error {color: @golf;}
+.cm-minus {color: @beta;}
+.cm-header {color: @beta;}
+.cm-link {color: @beta; text-decoration: none;}
+
+/* Extra CSS */
+.CodeMirror-searching {
+    background-color: @india;
+}
+
+.CodeMirror-cursor {
+    border-left: 1px solid @beta !important;
+}
+
+.CodeMirror-gutters {
+    background-color: @alpha;
+    border-right: none;
+}
+
+.CodeMirror-linenumber {
+    color: @lima;
+}
+
+.CodeMirror .CodeMirror-selected {
+    background: @beta;
+}
+.CodeMirror-focused .CodeMirror-selected {
+    background: @kilo;
+}
+
+.CodeMirror-matchingbracket, .CodeMirror-matchingtag {
+    background-color: @beta;
+    color: @alpha !important;
+}
+
+.CodeMirror-overwrite .CodeMirror-cursor {
+    border-left: none !important;
+    border-bottom: 1px solid #fff;
+}
+
+/* Non-editor styling */
+.image-view,
+.not-editor {
+    background-color: @alpha;
+}
+
+.view-pane .image-view {
+    color: @beta;
+}

@@ -1,0 +1,1 @@
+x11vnc -noxdamage -repeat -clip 960x504+1600+0

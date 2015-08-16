@@ -1,0 +1,41 @@
+[Animation]
+Frames=10
+
+[Appearance]
+BackgroundColor=255,255,255
+BackgroundColorOpacity=100
+Skin=tabsonly
+SkinInstalledWithKns=true
+Translucency=true
+
+[Colors]
+CurrentPalette=Forty Colors
+
+[Desktop Entry]
+DefaultProfile=Shell.profile
+
+[Dialogs]
+FirstRun=false
+
+[DownloadDialog Settings]
+Height 900=400
+Width 1600=700
+
+[Favorite Profiles]
+Favorites=
+
+[KFileDialog Settings]
+Height 900=540
+Width 1600=864
+
+[Notification Messages]
+ShowPasteHugeTextWarning=false
+
+[Shortcuts]
+options_configure=Shift+F12
+
+[Window]
+Height=100
+ShowOnAllDesktops=false
+ShowTabBar=false
+Width=100

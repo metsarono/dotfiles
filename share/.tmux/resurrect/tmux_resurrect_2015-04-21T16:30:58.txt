@@ -1,0 +1,16 @@
+grouped_session	5	tmux	:2	:4
+pane	0	0	:fish	1	:*	0	:/home/tiago	1	fish	:
+pane	tmux	0	:Code	1	:*	0	:/srv/http/inspiral.co/wp-content/themes/canvas	0	python	:/usr/bin/python -O /usr/bin/ranger
+pane	tmux	0	:Code	1	:*	1	:/srv/http	0	mc	:mc
+pane	tmux	0	:Code	1	:*	2	:/home/tiago	1	fish	:
+pane	tmux	1	:System	0	: 	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	htop	:htop
+pane	tmux	2	:Music	0	:-	0	:/home/tiago	1	ncmpcpp	:ncmpcpp
+pane	tmux	2	:Music	0	:-	1	:/home/tiago	0	alsamixer	:alsamixer
+pane	tmux	2	:Music	0	:-	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	ncmpcpp	:ncmpcpp
+pane	tmux	4	:fish	0	: 	0	:/tmp/yaourt-tmp-tiago/aur-kdebase-dolphin-klook	1	bash	:/bin/bash /usr/bin/yaourt -Syua
+window	0	0	1	:*	bf1e,228x63,0,0,1
+window	tmux	0	1	:*	705d,228x63,0,0{129x63,0,0,2,98x63,130,0[98x40,130,0,3,98x22,130,41,10]}
+window	tmux	1	0	: 	bf21,228x63,0,0,4
+window	tmux	2	0	:-	c4f8,228x63,0,0{134x63,0,0,5,93x63,135,0[93x40,135,0,6,93x22,135,41,7]}
+window	tmux	4	0	: 	bf25,228x63,0,0,8
+state	5	tmux

@@ -1,0 +1,20 @@
+#!/bin/bash
+
+konsolex=$(qdbus | grep konsole | cut -f 2 -d\ )
+if [ -n konsolex ]; then
+   for konsole in $konsolex
+   do
+   for (( c=1; ; c++ ))
+   do
+   konsolewindows=$(qdbus org.kde.konsole | grep MainWindow_$c )
+   if [ -n "$konsolewindows" ]; then
+	  xprop -f _KDE_NET_WM_BLUR_BEHIND_REGION 32c -set _KDE_NET_WM_BLUR_BEHIND_REGION 0 -id `qdbus $konsole /konsole/MainWindow_$c winId`;
+   else
+	  break;
+   fi
+done
+done
+fi
+if [ `qdbus | grep yakuake` ]; then
+   xprop -f _KDE_NET_WM_BLUR_BEHIND_REGION 32c -set _KDE_NET_WM_BLUR_BEHIND_REGION 0 -name Yakuake;
+fi

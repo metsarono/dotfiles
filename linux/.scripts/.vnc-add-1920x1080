@@ -1,0 +1,4 @@
+xrandr --newmode "1920x1080_60.00"  173.00  1920 2048 2248 2576  1080 1083 1088 1120 -hsync +vsync &&
+xrandr --addmode VIRTUAL1 1920x1080_60.00 &&
+xrandr --output VIRTUAL1 --mode 1920x1080_60.00 --below LVDS1 &&
+x11vnc -noxdamage -repeat -clip 1920x1080+0+900

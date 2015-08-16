@@ -1,0 +1,17 @@
+{
+    "name": "spissl.obsidian",
+    "title": "Obsidian",
+    "description": "Slightly customised Obsidian Theme - Based on Obsidian for Komodo by Gizmoh",
+    "homepage": "http://github.com/LegibleEel/Obsidian",
+    "version": "1.1.1",
+    "author": "Sean <sean@issl.co.uk>",
+    "license": "MIT",
+    "engines": {
+        "brackets": ">=0.42.0"
+    },
+    "theme": {
+        "file": "theme.css",
+		"dark": true
+    },
+    "keywords": ["obsidian, theme"]
+}

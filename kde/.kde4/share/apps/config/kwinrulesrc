@@ -1,0 +1,43 @@
+[1]
+Description=(Default) Disable focus stealing prevention for XV
+fsplevel=0
+fsplevelrule=2
+types=4294967295
+wmclass=^xv .*
+wmclasscomplete=true
+wmclassmatch=3
+
+[2]
+Description=Settings for Plasma-windowed
+clientmachine=chronos
+clientmachinematch=0
+fullscreen=true
+fullscreenrule=3
+title=Takeoff
+titlematch=0
+types=4294967295
+wmclass=plasma-windowed
+wmclasscomplete=false
+wmclassmatch=1
+
+[3]
+Description=Settings for MPlayer
+below=true
+belowrule=2
+opacityinactive=33
+opacityinactiverule=2
+skippager=true
+skippagerrule=2
+skipswitcher=true
+skipswitcherrule=2
+skiptaskbar=true
+skiptaskbarrule=2
+title=MPlayer
+titlematch=0
+types=1
+wmclass=xv mplayer
+wmclasscomplete=true
+wmclassmatch=1
+
+[General]
+count=3

@@ -1,0 +1,3 @@
+pane	0	0	:fish	1	:*	0	:/home/tiago	1	fish	:
+window	0	0	1	:*	a89d,79x30,0,0,0
+state	0	

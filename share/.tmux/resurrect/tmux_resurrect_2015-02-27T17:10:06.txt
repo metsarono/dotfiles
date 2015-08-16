@@ -1,0 +1,18 @@
+pane	0	0	:zsh	1	:*	0	:/home/tiago	1	zsh	:
+pane	tmux	0	:Code	0	:-	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	python	:/usr/bin/python -O /usr/bin/ranger
+pane	tmux	0	:Code	0	:-	1	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	mc	:mc
+pane	tmux	1	:System	0	: 	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	python	:/usr/bin/python /usr/bin/glances
+pane	tmux	1	:System	0	: 	1	:/home/tiago	1	htop	:htop
+pane	tmux	2	:Music	0	: 	0	:/home/tiago	0	cmus	:cmus
+pane	tmux	2	:Music	0	: 	1	:/home/tiago	1	alsamixer	:alsamixer
+pane	tmux	3	:Web	0	: 	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	links	:links
+pane	tmux	3	:Web	0	: 	1	:/home/tiago	0	zsh	:
+pane	tmux	3	:Web	0	: 	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	irssi	:irssi
+pane	tmux	4	:zsh	1	:*	0	:/var/log/journal	1	zsh	:
+window	0	0	1	:*	cf3e,199x57,0,0,1
+window	tmux	0	0	:-	daf0,199x57,0,0{114x57,0,0,2,84x57,115,0,3}
+window	tmux	1	0	: 	b2bd,199x57,0,0{100x57,0,0,4,98x57,101,0,5}
+window	tmux	2	0	: 	feba,199x57,0,0{137x57,0,0,6,61x57,138,0,7}
+window	tmux	3	0	: 	aa8a,199x57,0,0{122x57,0,0,8,76x57,123,0[76x24,123,0,9,76x32,123,25,10]}
+window	tmux	4	1	:*	67d1,199x57,0,0,12
+state	tmux	tmux

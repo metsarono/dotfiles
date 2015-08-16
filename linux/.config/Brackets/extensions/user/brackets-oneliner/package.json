@@ -1,0 +1,22 @@
+{
+    "name": "brackets-oneliner",
+    "title": "Oneliner",
+    "version": "0.1.0",
+	"description": "Remove all the line breaks and convert multilined text blocks into one line.",
+    "homepage": "http://caferati.me/labs/brackets-oneliner",
+    "author": "rcaferati (https://github.com/rcaferati/)",
+    "license": "MIT",
+    "categories": "formatting",
+    "keywords": [
+        "formatting",
+        "line break",
+        "one line",
+        "trim spaces"
+    ],
+    "files": [
+        "main.js"
+    ],
+    "engines": {
+        "brackets": ">=0.30.0"
+    }
+}

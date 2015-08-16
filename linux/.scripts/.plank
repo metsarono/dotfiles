@@ -1,0 +1,5 @@
+#!/bin/bash
+
+if ! [ `qdbus | grep plank` ]; then
+gksudo -u tiago plank >/dev/null &
+fi

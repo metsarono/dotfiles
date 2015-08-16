@@ -1,0 +1,50 @@
+#titlebar {
+    background: #3C3F41;
+    box-shadow: none;
+    height: 20px;
+    border-bottom: 0;
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: 0;
+    z-index: 50;
+}
+
+#titlebar, #titlebar .dropdown-toggle {
+    color: #FFFFFF;
+}
+
+#editor-holder {
+    padding-top: 27px;
+}
+
+
+#titlebar .dropdown-toggle:hover, #titlebar .dropdown.open .dropdown-toggle {
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid transparent;
+    border-bottom: 0px;
+}
+
+#titlebar .dropdown-toggle {
+    padding: 4px 9px;
+}
+
+#titlebar .title, #titlebar .dirty-dot {
+    display: none;
+}
+
+#main-toolbar {
+    padding-top: 30px;
+}
+
+#sidebar {
+    padding-top: 27px;
+}
+
+#titlebar .dropdown-menu {
+    margin-top: -7px;
+}
+
+.modal-bar {
+    top: 27px;
+}

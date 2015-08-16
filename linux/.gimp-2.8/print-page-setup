@@ -1,0 +1,10 @@
+[print-page-setup]
+PPDName=Photo4x6
+DisplayName=Photo
+Width=101.59999999999999
+Height=152.39999999999998
+MarginTop=1.0583333333333331
+MarginBottom=1.0583333333333331
+MarginLeft=1.0583333333333331
+MarginRight=1.0583333333333331
+Orientation=portrait

@@ -1,0 +1,17 @@
+[Takeoff]
+ShowFavorites=true
+ShowAllApplications=false
+ShowXdgMenu=false
+LauncherSize=128
+SeparationBetweenLaunchers=32
+NumRows=5
+NumColumns=8
+Icon=/home/tiago/Pictures/Icons/title-arch.png
+RememberLastTab=false
+ShowIconText=true
+FullScreen=true
+ShowBackgroundImage=true
+BackgroundImage=/home/tiago/Pictures/Wallpaper/Arch Linux/Arch_Linux_Wallpapers_13.png
+
+[Favorites]
+FavoriteURLs=/home/tiago/.local/share/applications/wine-Programs-Adobe Bridge CS6.desktop, /home/tiago/.local/share/applications/wine-Programs-Adobe Photoshop CS6.desktop, /home/tiago/.local/share/applications/wine-Programs-Adobe Illustrator CS6.desktop, /usr/share/applications/gimp.desktop, /usr/share/applications/kde4/krita.desktop, /usr/share/applications/inkscape.desktop, /home/tiago/.local/share/applications/chrome-pdagghjnpkeagmlbilmjmclfhjeaapaa-Default.desktop, /usr/share/applications/mypaint.desktop, /usr/share/applications/popcorntime.desktop, /usr/share/applications/minitube.desktop, /usr/share/applications/youtube-dl-gui.desktop, /usr/share/applications/shotcut-bin.desktop, /usr/share/applications/ghb.desktop, /usr/share/applications/spotify.desktop, /usr/share/applications/Blockify-UI.desktop, /usr/share/applications/audio-recorder.desktop, /usr/share/applications/ocenaudio.desktop, /usr/share/applications/audacity.desktop, /usr/share/applications/ardour.desktop, /usr/share/applications/kde4/k3b.desktop, /usr/share/applications/kde4/konqbrowser.desktop, /usr/share/applications/firefox.desktop, /usr/share/applications/steam.desktop, /usr/share/applications/xmind.desktop, /usr/share/applications/blender.desktop, /usr/share/applications/google-webdesigner.desktop, /usr/share/applications/kde4/karbon.desktop, /usr/share/applications/calibre-gui.desktop, /usr/share/applications/koala.desktop

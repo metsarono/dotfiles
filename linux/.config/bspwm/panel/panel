@@ -1,0 +1,157 @@
+#! /bin/sh
+
+if [ $(pgrep -cx panel) -gt 1 ] ; then
+   printf "%s\n" "The panel is already running." >&2
+   exit 1
+fi
+
+trap 'trap - TERM; kill 0' INT TERM QUIT EXIT
+
+flavor=${1:-bar}
+
+[ -e "$PANEL_FIFO" ] && rm "$PANEL_FIFO"
+mkfifo "$PANEL_FIFO"
+
+bspc config top_padding $PANEL_HEIGHT
+
+
+# Colorscheme for mocha
+#BLUE="%{F#FF8AB3B5}"
+#RED="%{F#FFCB6077}"
+#YELLOW="%{F#FFF4BC87}"
+#ORANGE="%{F#FFD28B71}"
+#MAGENTA="%{F#FFA89BB9}"
+#TEAL="%{F#FF7BBdA4}"
+#LIGHTGREY="%{F#FFb8AfAD}"
+#DARKGREY="%{F#FF7E705A}"
+#GREEN="%{F#FF90A950}"
+#PURPLE="%{F#FF9547C9}"
+#BG="%{F#FF3B3228}"
+
+# Colorscheme for default-dark
+BLUE="%{F#FF6A9FB5}"
+RED="%{F#FFAC4142}"
+YELLOW="%{F#FFFF4BF75}"
+ORANGE="%{F#FFD28B71}"
+MAGENTA="%{F#FFAA759F}"
+TEAL="%{F#FF75B5AA}"
+LIGHTGREY="%{F#FFB0B0B0}"
+DARKGREY="%{F#FF505050}"
+GREEN="%{F#FF99CC99}"
+PURPLE="%{F#FF9547C9}"
+BG="%{F#FF151515}"
+INDIANRED="%{F#FFEE6363}"
+
+bspc control --subscribe > "$PANEL_FIFO" &
+xtitle -sf 'T%s' > "$PANEL_FIFO" &
+conky -c ~/.config/bspwm/panel/conkyrc > "$PANEL_FIFO" &
+
+panel_temperature()
+{
+   temp=$((`sensors | grep "Physical id 0" | cut -d'+' -f2 | head -c2`))
+   echo $GREEN " Temp" $temp°C;
+}
+
+panel_memused()
+{
+    read t f <<< `grep -E 'Mem(Total|Free)' /proc/meminfo |awk '{print $2}'`
+    bc <<< "scale=2; 100 - $f / $t * 100" | cut -d. -f1
+}
+
+panel_mem()
+{
+   echo $GREEN " MEM:" $(panel_memused)%%
+}
+panel_cpuload()
+{
+    LINE=`ps -eo pcpu |grep -vE '^\s*(0.0|%CPU)' |sed -n '1h;$!H;$g;s/\n/ +/gp'`
+    bc <<< $LINE
+}
+
+panel_cpu()
+{
+   echo $GREEN " CPU:" $(panel_cpuload)%%
+}
+panel_volicon()
+{
+        volStatus=$(pulseaudio-ctl | grep "muted" | less | cut -c 36-37)
+        volLevel=$(pulseaudio-ctl | grep "Volume level" | less | cut -c 36-38)
+
+        if [ "$volStatus" == "no" ]
+                then echo $GREEN " ⮞  ${volLevel}"
+        elif [ "$volStatus" == "ye" ]
+                then echo $RED " ⮝ ${volLevel}"
+   else echo " ⮞"
+        fi
+}
+
+
+panel_sigStrength()
+{
+        signalStrength=$(cat /proc/net/wireless | awk 'NR==3 { print $3}' | sed 's/\.//')
+
+        if [ "$signalStrength" -gt 64 ]
+        then
+                echo ""$GREEN " ‗▬▪▮"
+        elif [ "$signalStrength" -lt 65 ] && [ "$signalStrength" -gt 39 ]
+        then
+                echo ""$GREEN " ‗▬▪"$DARKGREY"▮"$ORANGE
+        elif [ "$signalStrength" -lt 40 ]
+        then
+                echo ""$GREEN " ‗▬"$DARKGREY"▪▮"$ORANGE
+        else
+                echo ""$DARKGREY " ‗▬▪▮ Not connected"
+        fi
+}
+
+panel_essid()
+{
+   echo $GREEN $(panel_sigStrength) $GREEN $(iwgetid -r)
+}
+
+panel_battery()
+{
+        batStats=$(cat /sys/class/power_supply/BAT1/status)
+        if [ "$batStats" == "" ]
+        then
+                echo $LIGHTGREY " ⮎ AC"
+        elif [ "$batStats" == "Charging" ]
+        then
+                echo $GREEN" ⮒" $(cat /sys/class/power_supply/BAT1/capacity)"+"
+        elif [ "$batStats" == "Discharging" ]
+        then
+                echo $RED " ⮑" $(cat /sys/class/power_supply/BAT1/capacity)"-"
+   elif [ "$batStats" == "Unknown" ]
+   then
+                echo $GREEN" ⮒" $(cat /sys/class/power_supply/BAT1/capacity)
+        else    echo $GREEN" ⮒" $(cat /sys/class/power_supply/BAT1/capacity)
+        fi
+}
+
+panel_clock()
+{
+   echo $GREEN " ⭧ " $(clock -f '%a %d %I: %M')
+}
+
+# Loop to check time, battery and volume statuses
+while true; do
+   echo "S" $(panel_battery)%{A:nmcli_dmenu:}$(panel_essid)%{A} > "$PANEL_FIFO" &
+   sleep 1s
+done &
+
+. panel_colors
+
+case "$flavor" in
+   bar)
+	  FONT_FAMILY='-benis-lemon-medium-r-normal--10-110-75-75-m-50-iso8859-1'
+	  FONT_FAMILY2='-*-terminus-medium-r-normal-*-12-*-*-*-c-*-*-1'
+	  cat "$PANEL_FIFO" | panel_bar | lemonbar -p -g x20 -f "$FONT_FAMILY2","$FONT_FAMILY" -u 2 -F "$BG" -B "$BG" | sh
+	  ;;
+   dzen2)
+	  FONT_FAMILY='DejaVu Sans'
+	  FONT_SIZE=11
+	  cat "$PANEL_FIFO" | panel_dzen2 -f "$FONT_FAMILY" -s "$FONT_SIZE" | dzen2 -h $PANEL_HEIGHT -dock -ta l -title-name panel -fn "${FONT_FAMILY}:pixelsize=${FONT_SIZE}" -fg "$COLOR_FOREGROUND" -bg "$COLOR_BACKGROUND" &
+	  ;;
+esac
+
+wait

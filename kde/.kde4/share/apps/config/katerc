@@ -1,0 +1,1075 @@
+[$Version]
+update_info=kate-2.4.upd:kate2.4
+
+[Colors]
+CurrentPalette=Forty Colors
+
+[Document 0]
+Bookmarks=
+Encoding=UTF-8
+Highlighting=None
+Indentation Mode=normal
+Mode=
+URL=
+
+[Document 1]
+Bookmarks=
+Encoding=UTF-8
+Highlighting=None
+Indentation Mode=normal
+Mode=
+URL=
+
+[Document 2]
+Bookmarks=
+Encoding=UTF-8
+Highlighting=M3U
+Indentation Mode=normal
+Mode=M3U
+URL=file:///home/tiago/ROMs/PS1/Front Mission 2.m3u
+
+[Document 3]
+Bookmarks=
+Encoding=UTF-8
+Highlighting=None
+Indentation Mode=normal
+Mode=
+URL=file:///home/tiago/virtual-drives/1/system.cnf
+
+[Document 4]
+Bookmarks=
+Encoding=UTF-8
+Highlighting=None
+Indentation Mode=normal
+Mode=
+URL=file:///home/tiago/Downloads/Arch/steam-ice/Ice-master/emulators.txt
+
+[Document 5]
+Bookmarks=
+Encoding=UTF-8
+Highlighting=None
+Indentation Mode=normal
+Mode=
+URL=file:///home/tiago/Downloads/Arch/steam-ice/Ice-master/consoles.txt
+
+[General]
+Days Meta Infos=30
+Last Session=
+Modified Notification=false
+Restore Window Configuration=true
+Save Meta Infos=true
+Show Full Path in Title=false
+Show Menu Bar=true
+Show Status Bar=true
+Startup Session=last
+
+[KFileDialog Settings]
+Height 900=437
+Recent Files[$e]=$HOME/ROMs/PS1/Klonoa - Door to Phantomile.cue,$HOME/Downloads/NightLion Aptana.kateschema,$HOME/ROMs/PS1/Crash Bandicoot 3.cue,$HOME/ROMs/PS1/Crash Bandicoot 2.cue,$HOME/ROMs/PS1/Crash Bandicoot.cue,$HOME/ROMs/PS1/Xenogears.m3u,$HOME/ROMs/PS1/Wild Arms 2.m3u,$HOME/ROMs/PS1/Vagrant Story.m3u,$HOME/ROMs/PS1/Tales of Phantasia.m3u,$HOME/ROMs/PS1/Tales of Destiny.m3u
+Recent URLs[$e]=$HOME/ROMs/PS1/,/mnt/Windows/Users/Tiago/ROMs/PS1/,$HOME/Downloads/
+Width 1600=800
+
+[Kate Document Defaults]
+Allow End of Line Detection=true
+Allow Simple Mode=true
+BOM=false
+Backup Flags=0
+Backup Prefix=
+Backup Suffix=~
+Encoding=UTF-8
+End of Line=0
+Indent On Backspace=false
+Indent On Tab=true
+Indent On Text Paste=false
+Indentation Mode=normal
+Indentation Width=2
+Keep Extra Spaces=false
+Line Length Limit=4096
+Newline At EOF=false
+No sync=false
+On-The-Fly Spellcheck=false
+Overwrite Mode=false
+PageUp/PageDown Moves Cursor=false
+Remove Spaces=0
+ReplaceTabsDyn=false
+Search Dir Config Depth=9
+Show Spaces=false
+Show Tabs=true
+Smart Home=true
+Tab Handling=2
+Tab Width=8
+Word Wrap=false
+Word Wrap Column=80
+
+[Kate Part Defaults]
+Encoding Prober Type=1
+Fallback Encoding=ISO-8859-15
+
+[Kate Plugins]
+kate_kttsd=false
+katebacktracebrowserplugin=false
+katebuildplugin=false
+katecloseexceptplugin=true
+katectagsplugin=false
+katefilebrowserplugin=false
+katefiletemplates=false
+katefiletreeplugin=true
+kategdbplugin=false
+katekonsoleplugin=false
+katemailfilesplugin=false
+kateopenheaderplugin=false
+katepateplugin=false
+kateprojectplugin=true
+katereplicodeplugin=false
+katesearchplugin=true
+katesnippetsplugin=false
+katesqlplugin=false
+katesymbolviewerplugin=false
+katetabbarextensionplugin=false
+katetabifyplugin=false
+katetextfilterplugin=false
+katexmlcheckplugin=false
+katexmltoolsplugin=false
+
+[Kate Renderer Defaults]
+Animate Bracket Matching=false
+Schema=Solarized (dark)
+Show Indentation Lines=false
+Show Whole Bracket Expression=false
+Word Wrap Marker=false
+
+[Kate Vi Input Mode Settings]
+Command Mode Mapping Keys=
+Command Mode Mappings=
+Command Mode Mappings Recursion=
+Insert Mode Mapping Keys=
+Insert Mode Mappings=
+Insert Mode Mappings Recursion=
+Macro Completions=
+Macro Contents=
+Macro Registers=
+Normal Mode Mapping Keys=
+Normal Mode Mappings=
+Normal Mode Mappings Recursion=
+Visual Mode Mapping Keys=
+Visual Mode Mappings=
+Visual Mode Mappings Recursion=
+
+[Kate View Defaults]
+Allow Mark Menu=true
+Auto Center Lines=0
+Auto Completion=true
+Bookmark Menu Sorting=0
+Default Mark Type=1
+Dynamic Word Wrap=false
+Dynamic Word Wrap Align Indent=80
+Dynamic Word Wrap Indicators=1
+Fold First Line=false
+Folding Bar=true
+Icon Bar=false
+Keyword Completion=true
+Line Modification=false
+Line Numbers=false
+Maximum Search History Size=100
+Persistent Selection=false
+Replacement Text History=/mnt/Windows/Users/Tiago
+Scroll Bar Marks=false
+Scroll Bar Mini Map=false
+Scroll Bar Mini Map All=false
+Scroll Bar Mini Map Width=60
+Scroll Past End=false
+Search Pattern History={09},perfect,{07},2-a,wk42,BCHC,STZK,sdqs,sdq,HLPM,RNKG,BMFT,KPNT,THSH,KHFC,wk38,01.04,wk36,khfc,CRCK,Garuda,cchc,wk35,wk34,wk31,QU'S MARSH,CHOC,blue magic,qu's,frog,wk30,wk28,hppl,wk25,wk23,wk22,wk21,2-z,2-y,2-s,2-r,mana tree,moogle village,ice palace,2-q,metal mantis,4-b,northtown ruins,weapons,drive,3-A,15,02.39,02.37,02.33,2-k,2.33,4.72,rage list,skull drgn,4.68,67,62.4,4.65,lock,enhancer,58.1,PHUNBABA1-LINK,4.56,EARLY-GOGO,WDRAGON-LINK,4.55.6, 4.55.1,Magicite,4.54.1,WK19,weapon,missable,magazine,abilities,SM#06,commands,command,Forest Owl's Base,train,raw,53,stretch,special,hq,ratio,load,%F.%M%x,fast,emulators,/mnt/Local,sound,save
+Search/Replace Flags=140
+Show Scrollbars=0
+Smart Copy Cut=false
+Vi Input Mode=false
+Vi Input Mode Emulate Command Bar=false
+Vi Input Mode Steal Keys=false
+Vi Relative Line Numbers=false
+Word Completion=true
+Word Completion Minimal Word Length=3
+Word Completion Remove Tail=true
+
+[MainWindow]
+Height 480=481
+Height 900=901
+State=AAAA/wAAAAD9AAAAAAAAAj0AAANNAAAABAAAAAQAAAAIAAAACPwAAAADAAAAAAAAAAAAAAACAAAAAAAAAAIAAAABAAAAFgBtAGEAaQBuAFQAbwBvAGwAQgBhAHIBAAAAAP////8AAAAAAAAAAA==
+ToolBarsMovable=Disabled
+Width 1600=573
+Width 640=783
+
+[MainWindow0]
+Characters Count Visible=true
+Cursor Position Visible=true
+Document Name Visible=true
+Encoding Visible=true
+Height 900=901
+Insertion Mode Visible=true
+Kate-MDI-H-Splitter=167,783,200
+Kate-MDI-Sidebar-0-Splitter=0,0
+Kate-MDI-Sidebar-3-Splitter=0,0
+Kate-MDI-Sidebar-Style=2
+Kate-MDI-Sidebar-Visible=false
+Kate-MDI-ToolView-kate_plugin_katesearch-Persistent=false
+Kate-MDI-ToolView-kate_plugin_katesearch-Position=3
+Kate-MDI-ToolView-kate_plugin_katesearch-Sidebar-Position=1
+Kate-MDI-ToolView-kate_plugin_katesearch-Visible=false
+Kate-MDI-ToolView-kate_private_plugin_katefiletreeplugin-Persistent=false
+Kate-MDI-ToolView-kate_private_plugin_katefiletreeplugin-Position=0
+Kate-MDI-ToolView-kate_private_plugin_katefiletreeplugin-Sidebar-Position=1
+Kate-MDI-ToolView-kate_private_plugin_katefiletreeplugin-Visible=false
+Kate-MDI-ToolView-kateproject-Persistent=false
+Kate-MDI-ToolView-kateproject-Position=0
+Kate-MDI-ToolView-kateproject-Sidebar-Position=0
+Kate-MDI-ToolView-kateproject-Visible=false
+Kate-MDI-ToolView-kateprojectinfo-Persistent=false
+Kate-MDI-ToolView-kateprojectinfo-Position=3
+Kate-MDI-ToolView-kateprojectinfo-Sidebar-Position=0
+Kate-MDI-ToolView-kateprojectinfo-Visible=false
+Kate-MDI-V-Splitter=150,571,195
+Selection Mode Visible=true
+State=AAAA/wAAAAD9AAAAAAAAAw8AAAI7AAAABAAAAAQAAAAIAAAACPwAAAADAAAAAAAAAAAAAAACAAAAAAAAAAIAAAABAAAAFgBtAGEAaQBuAFQAbwBvAGwAQgBhAHIBAAAAAP////8AAAAAAAAAAA==
+Width 1600=573
+
+[MainWindow0 Settings]
+Height 900=901
+State=AAAA/wAAAAD9AAAAAAAAAw8AAAI7AAAABAAAAAQAAAAIAAAACPwAAAADAAAAAAAAAAAAAAACAAAAAAAAAAIAAAABAAAAFgBtAGEAaQBuAFQAbwBvAGwAQgBhAHIBAAAAAP////8AAAAAAAAAAA==
+Width 1600=573
+WindowState=8
+
+[MainWindow0-Splitter 0]
+Sizes=783
+
+[MainWindow0-ViewSpace 0]
+Active View=
+Count=1
+View 0=file:///usr/share/icons/MokaFlattr/index.theme
+View 1=file:///home/tiago/Documents/FFLife/FAQ/final_fantasy_ix_na_p.txt
+View 2=file:///home/tiago/ROMs/PS1/Front Mission 2.m3u
+View 3=file:///home/tiago/virtual-drives/1/system.cnf
+View 4=file:///home/tiago/Downloads/Arch/steam-ice/Ice-master/emulators.txt
+View 5=file:///home/tiago/Downloads/Arch/steam-ice/Ice-master/consoles.txt
+
+[MainWindow0-ViewSpace 0 file:///etc/fonts/conf.d/30-metric-aliases.conf]
+CursorColumn=0
+CursorLine=530
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.config/fontconfig/fonts.conf]
+CursorColumn=9
+CursorLine=17
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.config/mupen64plus/mupen64plus.cfg]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.config/steam-ice/config.txt]
+CursorColumn=0
+CursorLine=29
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.config/steam-ice/consoles.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.config/steam-ice/emulators.txt]
+CursorColumn=0
+CursorLine=4
+JumpList=
+ViMarks=.,0,0,[,0,0,],-1,-1
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.config/steam-ice/error.log]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.config/steam-ice/ice.log]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.fonts/fonts.dir]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.grsync/exclude-ubuntu.txt]
+CursorColumn=6
+CursorLine=2
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.grsync/exclude-windows.txt]
+CursorColumn=27
+CursorLine=18
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.grsync/exclude.txt]
+CursorColumn=12
+CursorLine=4
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.kde4/share/apps/be.shell/Themes/default/style.css]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.mednafen/cheats/snes.cht]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.mednafen/mednafen-09x.cfg]
+CursorColumn=21
+CursorLine=50
+JumpList=
+ViMarks=.,0,0,[,0,0,],-1,-1
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.minetest/MT-GitSync-master/README]
+CursorColumn=0
+CursorLine=23
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.minetest/MT-GitSync-master/gitsync.py]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.minetest/MT-GitSync/README]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.minetest/MT-GitSync/gitsync.conf]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.minetest/MT-GitSync/gitsync.py]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.minetest/mods/Ruins/README.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.minetest/mods/Ruins/depends.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.pcsxr/cfg/Crash Bandicoot.cfg]
+CursorColumn=7
+CursorLine=25
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.pcsxr/pcsxr.cfg]
+CursorColumn=16
+CursorLine=9
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.wine/drive_c/Program Files/Eidos Interactive/Square Soft, Inc/FINAL FANTASY VIII/ff7_opengl.cfg]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.wine/drive_c/Program Files/Eidos Interactive/Square Soft, Inc/FINAL FANTASY VIII/ff7_opengl.reg]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.wine/drive_c/Program Files/Eidos Interactive/Square Soft, Inc/FINAL FANTASY VIII/ff8_opengl.cfg]
+CursorColumn=22
+CursorLine=54
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.wine/drive_c/Program Files/Eidos Interactive/Square Soft, Inc/FINAL FANTASY VIII/ff8input.cfg]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.wine/drive_c/Program Files/Final Fantasy VIII/tonberry/prefs.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.wine/drive_c/Program Files/Final Fantasy VIII/tonberry/readme.txt]
+CursorColumn=10
+CursorLine=16
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.wine/drive_c/Program Files/Final Fantasy X/service.log]
+CursorColumn=0
+CursorLine=8
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.zsnes/rominfo.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/.zsnes/zsnesl.cfg]
+CursorColumn=53
+CursorLine=311
+JumpList=
+ViMarks=.,311,53,[,311,53,],311,53
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Desktop/Adobe Photoshop CS6.desktop]
+CursorColumn=5
+CursorLine=5
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Desktop/FFX Editor.url]
+CursorColumn=53
+CursorLine=1
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/chrono_trigger_ds_f.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/chrono_trigger_i.txt]
+CursorColumn=0
+CursorLine=827
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/final_fantasy_iii_l.txt]
+CursorColumn=52
+CursorLine=22637
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/final_fantasy_ix_na_p.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/final_fantasy_viii_y.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/secret_of_mana_f.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/secret_of_mana_f.txt#2-K:%20 Damn You, Cannon Man!]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/star_ocean_2_f.txt]
+CursorColumn=62
+CursorLine=7159
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/xenogears_n.txt]
+CursorColumn=33
+CursorLine=104
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/zelda_64_t.txt]
+CursorColumn=72
+CursorLine=9238
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/FFLife/FAQ/zelda_majoras_mask_p.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/Linux/polkit-kde-authentication-agent-1.sh]
+CursorColumn=57
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/MakeMavericksDVD.sh]
+CursorColumn=5
+CursorLine=13
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/OS X Mavericks.sh]
+CursorColumn=27
+CursorLine=10
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Documents/polkit-kde-authentication-agent-1.sh]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Adobe Photoshop CS6 13.0.1 Final%20 Multilanguage (cracked dll) \x5bChingLiu\x5d/ChingLiu.Notes.nfo]
+CursorColumn=0
+CursorLine=45
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Adobe Photoshop CS6 13.0.1 Final%20 Multilanguage (cracked dll) \x5bChingLiu\x5d/How To Open Nfo Files.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Android/Kingdom Hearts - Chain of Memories.sgm]
+CursorColumn=529
+CursorLine=27
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Arch/Minecraft/Sphax PureBDcraft 128x MC18/how to update.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Arch/Steam/Ice-master/consoles.txt]
+CursorColumn=19
+CursorLine=16
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Arch/Steam/Ice-master/emulators.txt]
+CursorColumn=48
+CursorLine=26
+JumpList=
+ViMarks=.,26,47,[,26,40,],26,47
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Arch/steam-ice/Ice-master/consoles.txt]
+CursorColumn=17
+CursorLine=7
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Arch/steam-ice/Ice-master/emulators.txt]
+CursorColumn=20
+CursorLine=6
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Arch/steam-ice/pysteam-master/setup.py]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Emulation/Sony/FF Save Editors/FFVI/README.TXT]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Games/Final Fantasy VIII 2000/Mods/Avatar/Readme.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Games/Final Fantasy VIII 2000/Mods/MCINDUS SeeD v2.0/MCINDUS SeeD v2.0/SeeD/data/eng/menu/Addendum.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Games/Final Fantasy VIII Steam Edition-iNLAWS/Mods/Tripod v1.1/TripodReadMeFirst.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Games/Steam/Ice-master/emulators.txt]
+CursorColumn=12
+CursorLine=6
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Games/XenoComi/XenoComi - First Edition1.2-linux-x86/XenoComi - First Edition.py]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Games/XenoComi/XenoComi - First Edition1.2-linux-x86/XenoComi - First Edition.sh]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/Windows/Visual Style/Download.url]
+CursorColumn=4
+CursorLine=4
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/YS Origin ENG/install.txt]
+CursorColumn=34
+CursorLine=12
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/rld-son4e2/reloaded.nfo]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Downloads/~]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Dropbox/Emulation/Saves/Save Editors/FFVI/License.txt]
+CursorColumn=40
+CursorLine=5
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Dropbox/Emulation/Saves/Save Editors/Secret of Mana/License.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Ice/config.txt]
+CursorColumn=20
+CursorLine=16
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Ice/consoles.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/Ice/emulators.txt]
+CursorColumn=0
+CursorLine=16
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/ROMs/PS1/Breath of Fire III.cue]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/ROMs/PS1/Breath of Fire IV.m3u]
+CursorColumn=21
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/ROMs/PS1/Front Mission 2.cue]
+CursorColumn=19
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/ROMs/PS1/Front Mission 2.m3u]
+CursorColumn=15
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/ROMs/PS1/Grandia CD1.cue]
+CursorColumn=17
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/ROMs/PS1/Grandia CD2.cue]
+CursorColumn=17
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/ROMs/PS1/Grandia.m3u]
+CursorColumn=11
+CursorLine=1
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/ROMs/SNES/ice.log]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///home/tiago/virtual-drives/1/system.cnf]
+CursorColumn=14
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Local/Dropbox/Documents/Business/Accounts/tia wifi.txt]
+CursorColumn=0
+CursorLine=1
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Local/Dropbox/Emulation/SNES/NFO/Castlevania - Dracula X (U).nfo]
+CursorColumn=17
+CursorLine=14
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Local/Google Drive/Linux/mount jenova sdc2]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Virtual/Steam/skins/skins_readme.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/.wine/drive_c/Program Files/Final Fantasy VII/MountDisc/MountFF7DISC1.bat]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/.wine/drive_c/Program Files/Final Fantasy VII/ff7_opengl.cfg]
+CursorColumn=27
+CursorLine=115
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/.wine/drive_c/Program Files/Sonic Generations/DefaultInput.cfg]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/.wine/drive_c/Program Files/Sonic the Hedgehog 4 - Episode I/main.conf]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/.wine/drive_c/Program Files/Sonic the Hedgehog 4 - Episode I/playername.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/.wine/drive_c/Program Files/Sonic the Hedgehog 4 - Episode II/Config/UserConfig.cfg]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/.wine/winetricks.log]
+CursorColumn=1
+CursorLine=36
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/wine/user.reg]
+CursorColumn=19
+CursorLine=82
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/wine/userdef.reg]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/wine/winetricks.log]
+CursorColumn=0
+CursorLine=37
+JumpList=
+ViMarks=.,37,0,[,37,0,],37,0
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/wineprefix/FinalFantasyIV/playonlinux.cfg]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/Windows/Users/Tiago/ROMs/PC/wineprefix/FinalFantasyIV/playonlinux.log]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/iso/CRACK/Non GeForce CRACK/GUIDE.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///mnt/iso/UPDATE/Non-GeForce PATCH/README.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///opt/WorldOfGoo/libs/COPYING-SDL]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///run/media/tiago/External/Software/Windows/Adobe Creative Suite 6 Master Collection for Windows/instructions.txt]
+CursorColumn=7
+CursorLine=25
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///run/media/tiago/Ubuntu/etc/lightdm/lightdm.conf]
+CursorColumn=1
+CursorLine=4
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///run/media/tiago/Ubuntu/etc/lightdm/users.conf]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///run/media/tiago/Ubuntu/home/tiago/.cache/upstart/gnome-session-Unity.log]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///run/media/tiago/Ubuntu/home/tiago/.cache/upstart/unity-settings-daemon.log]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///run/media/tiago/Ubuntu/home/tiago/.grsync/exclude.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///run/media/tiago/Ubuntu/home/tiago/.grsync/exclude.txt~]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/icons/MokaFlattr/index.theme]
+CursorColumn=21
+CursorLine=514
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/minecraft/minecraft.sh]
+CursorColumn=9
+CursorLine=1
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/minetest/textures/faithful/info.txt]
+CursorColumn=0
+CursorLine=3
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/minetest/textures/texture_packs_here.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/README.md]
+CursorColumn=110
+CursorLine=14
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/config.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/consoles.txt]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/emulators.txt]
+CursorColumn=0
+CursorLine=7
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/emulators.txt.example]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/ice.py]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/ice/configuration.py]
+CursorColumn=62
+CursorLine=55
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/ice/configuration.pyc]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/ice/emulator.py]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/ice/persistence/emulator_manager.py]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/ice/resources/__init__.py]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/ice/rom_manager.py]
+CursorColumn=63
+CursorLine=59
+JumpList=
+ViMarks=
+
+[MainWindow0-ViewSpace 0 file:///usr/share/steam-ice/ice/runners/command_line_runner.py]
+CursorColumn=0
+CursorLine=0
+JumpList=
+ViMarks=
+
+[Notification Messages]
+Kate hide sidebars notification message=false
+
+[Open Documents]
+Count=1
+
+[Open MainWindows]
+Count=1
+
+[Plugin:katecloseexceptplugin:menu]
+ShowConfirmation=true
+
+[Plugin:katesearchplugin:MainWindow:0:search-plugin]
+BinaryFiles=false
+CurrentExcludeFilter=-1
+CurrentFilter=-1
+ExcludeFilters=
+ExpandSearchResults=false
+Filters=
+FollowSymLink=false
+HiddenFiles=false
+MatchCase=false
+Place=1
+Recursive=true
+Search=
+SearchDiskFiles=
+SearchDiskFiless=
+UseRegExp=false
+
+[Recent Files]
+File1[$e]=$HOME/ROMs/PS1/Front Mission 2.m3u
+File10[$e]=/usr/share/icons/MokaFlattr/index.theme
+File2[$e]=$HOME/Documents/FFLife/FAQ/xenogears_n.txt
+File3[$e]=$HOME/.config/mupen64plus/mupen64plus.cfg
+File4[$e]=$HOME/Documents/FFLife/FAQ/zelda_64_t.txt
+File5[$e]=$HOME/Downloads/Games/Steam/Ice-master/emulators.txt
+File6[$e]=$HOME/Documents/FFLife/FAQ/zelda_majoras_mask_p.txt
+File7[$e]=$HOME/Documents/FFLife/FAQ/final_fantasy_ix_na_p.txt
+File8[$e]=$HOME/Documents/FFLife/FAQ/secret_of_mana_f.txt
+File9[$e]=$HOME/Documents/FFLife/FAQ/chrono_trigger_ds_f.txt
+Name1[$e]=Front Mission 2.m3u
+Name10[$e]=index.theme
+Name2[$e]=xenogears_n.txt
+Name3[$e]=mupen64plus.cfg
+Name4[$e]=zelda_64_t.txt
+Name5[$e]=emulators.txt
+Name6[$e]=zelda_majoras_mask_p.txt
+Name7[$e]=final_fantasy_ix_na_p.txt
+Name8[$e]=secret_of_mana_f.txt
+Name9[$e]=chrono_trigger_ds_f.txt
+
+[TipOfDay]
+RunOnStart=false
+
+[filetree]
+editShade=210,181,216
+listMode=false
+shadingEnabled=true
+showFullPathOnRoots=false
+sortRole=0
+viewShade=185,178,206

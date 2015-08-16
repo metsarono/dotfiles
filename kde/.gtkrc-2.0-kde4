@@ -1,0 +1,22 @@
+# created by KDE, Fri May 8 00:48:01 2015
+#
+# If you do not want KDE to override your GTK settings, select
+# Appearance -> Colors in the System Settings and disable the checkbox
+# "Apply colors to non-KDE4 applications"
+#
+#
+
+gtk-alternative-button-order = 1
+
+#include "/usr/share/themes/QtCurve/gtk-2.0/gtkrc"
+#include "/etc/gtk-2.0/gtkrc"
+
+style "user-font"
+{
+    font_name="San Francisco Text"
+}
+widget_class "*" style "user-font" 
+gtk-theme-name="Vertex-Dark"
+# gtk-theme-name="QtCurve"
+# gtk-theme-name="Cenodark-night"
+gtk-font-name="San Francisco Text 11"

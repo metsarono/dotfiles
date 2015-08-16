@@ -1,0 +1,19 @@
+grouped_session	5	tmux	:1	:0
+grouped_session	3	tmux	:4	:3
+pane	0	0	:zsh	1	:*	0	:/home/tiago	1	zsh	:
+pane	tmux	0	:Code	1	:*	0	:/srv/http/inspiral.co/wp-content/themes/canvas	1	python	:/usr/bin/python -O /usr/bin/ranger
+pane	tmux	0	:Code	1	:*	1	:/srv/http	0	mc	:mc
+pane	tmux	0	:Code	1	:*	2	:/srv/http/inspiral.co	0	zsh	:
+pane	tmux	1	:System	0	: 	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	htop	:htop
+pane	tmux	2	:Music	0	:-	0	:/home/tiago	1	ncmpcpp	:ncmpcpp
+pane	tmux	2	:Music	0	:-	1	:/home/tiago	0	alsamixer	:alsamixer
+pane	tmux	2	:Music	0	:-	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	ncmpcpp	:ncmpcpp
+pane	tmux	3	:fish	0	: 	0	:/home/tiago	1	zsh	:
+pane	tmux	4	:fish	0	: 	0	:/home/tiago/.be.shell	1	fish	:fish
+window	0	0	1	:*	b71e,228x61,0,0,1
+window	tmux	0	1	:*	bbac,228x56,0,0{135x56,0,0,2,92x56,136,0[92x35,136,0,3,92x20,136,36,4]}
+window	tmux	1	0	: 	c922,228x56,0,0,5
+window	tmux	2	0	:-	2343,228x56,0,0{134x56,0,0,6,93x56,135,0[93x35,135,0,7,93x20,135,36,8]}
+window	tmux	3	0	: 	c926,228x56,0,0,9
+window	tmux	4	0	: 	64bf,228x56,0,0,10
+state	3	0

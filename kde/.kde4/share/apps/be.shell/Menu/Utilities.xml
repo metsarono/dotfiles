@@ -1,0 +1,15 @@
+<submenu>
+<menu label="  View" >
+  <action label="Colors" exec="wallcolour"/>
+<action label="BE::Shell Folder" icon="folder" exec="dolphin $HOME/.kde4/share/apps/be.shell"/>
+<action label="Theme Dir" icon="preferences-color" exec="dolphin $HOME/.kde4/share/apps/be.shell/Themes"/>
+<action label="Scripts Dir" icon="libreoffice-extension" exec="dolphin $HOME/.kde4/share/apps/be.shell/Scripts"/>
+<action label="Update Global Menu" icon="reload" exec="touch $HOME/.kde4/share/apps/be.shell/MainMenu.xml $HOME/.kde4/share/apps/XBar/MainMenu.xml"/>
+<action label="Reload Plasma" icon="reload" exec="kquitapp plasma-desktop;sleep 1;plasma-desktop"/>
+<action label="Reload be.shell" icon="reload" exec="kquitapp be.shell;sleep 1;be.shell"/>
+<action label="Refresh KWin" icon="reload" exec="konsole -e kwin --replace"/>
+<action label="Return to Plasma" icon="plasma" exec="kquitapp be.shell;sleep 1;plasma-desktop"/>
+<action label="Return to be.shell" icon="plasma" exec="kquitapp plasma-desktop;sleep 1;be.shell"/>
+<action label="Refresh Font Cache" icon="font" exec="fc-cache -vf"/>
+</menu>
+</submenu>

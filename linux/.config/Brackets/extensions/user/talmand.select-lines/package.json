@@ -1,0 +1,11 @@
+{
+    "name": "talmand.select-lines",
+    "title": "Select Lines",
+    "description": "Options for selecting lines via clicking/dragging in the gutter.",
+    "homepage": "https://github.com/talmand/Brackets-Select-Lines",
+    "version": "1.3.0",
+    "author": "Travis Almand",
+    "engines": {
+        "brackets": ">=0.20.0"
+    }
+}

@@ -1,0 +1,18 @@
+pane	0	0	:fish	1	:*	0	:/home/tiago	1	fish	:
+pane	tmux	0	:Code	0	: 	0	:/	1	python	:/usr/bin/python -O /usr/bin/ranger
+pane	tmux	0	:Code	0	: 	1	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	mc	:mc
+pane	tmux	1	:System	0	:-	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	python	:/usr/bin/python /usr/bin/glances
+pane	tmux	1	:System	0	:-	1	:/home/tiago	0	htop	:htop
+pane	tmux	2	:Music	1	:*	0	:/home/tiago	1	cmus	:cmus
+pane	tmux	2	:Music	1	:*	1	:/home/tiago	0	alsamixer	:alsamixer
+pane	tmux	3	:Web	0	: 	0	:/home/tiago	0	links	:links
+pane	tmux	3	:Web	0	: 	1	:/home/tiago	1	finch	:finch
+pane	tmux	3	:Web	0	: 	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	irssi	:irssi
+pane	tmux	4	:fish	0	: 	0	:/	1	fish	:
+window	0	0	1	:*	cf3d,199x57,0,0,0
+window	tmux	0	0	: 	51fe,199x57,0,0{113x57,0,0,1,85x57,114,0,2}
+window	tmux	1	0	:-	f95e,199x57,0,0{99x57,0,0,3,99x57,100,0,4}
+window	tmux	2	1	:*	75c8,199x57,0,0{136x57,0,0,5,62x57,137,0,6}
+window	tmux	3	0	: 	aae6,199x57,0,0{121x57,0,0,7,77x57,122,0[77x23,122,0,8,77x33,122,24,9]}
+window	tmux	4	0	: 	67d6,199x57,0,0,17
+state	tmux	tmux

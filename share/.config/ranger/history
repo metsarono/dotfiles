@@ -1,0 +1,9 @@
+ 
+Q
+
+rename ecwid.scss
+rename _ecwid.scss
+set showhidden true
+delete
+set show_hidden true
+open_with 

@@ -1,0 +1,32 @@
+grouped_session	5	tmux	:1	:0
+grouped_session	3	tmux	:2	:3
+pane	0	0	:fish	1	:*	0	:/home/tiago	1	fish	:
+pane	0	0	:fish	1	:*	0	:/home/tiago	1	fish	:
+pane	tmux	0	:Code	1	:*	0	:/srv/http/inspiral.co/wp-content	0	python	:/usr/bin/python -O /usr/bin/ranger
+pane	tmux	0	:Code	1	:*	0	:/srv/http/inspiral.co/wp-content	0	python	:/usr/bin/python -O /usr/bin/ranger
+pane	tmux	0	:Code	1	:*	1	:/srv/http	0	mc	:mc
+pane	tmux	0	:Code	1	:*	1	:/srv/http	0	mc	:mc
+pane	tmux	0	:Code	1	:*	2	:/srv/http/inspiral.co	1	fish	:
+pane	tmux	1	:System	0	: 	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	htop	:htop
+pane	tmux	0	:Code	1	:*	2	:/srv/http/inspiral.co	1	fish	:
+pane	tmux	2	:Music	0	:-	0	:/home/tiago	1	ncmpcpp	:ncmpcpp
+pane	tmux	1	:System	0	: 	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	htop	:htop
+pane	tmux	2	:Music	0	:-	0	:/home/tiago	1	ncmpcpp	:ncmpcpp
+pane	tmux	2	:Music	0	:-	1	:/home/tiago	0	alsamixer	:alsamixer
+pane	tmux	2	:Music	0	:-	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	ncmpcpp	:ncmpcpp
+pane	tmux	2	:Music	0	:-	1	:/home/tiago	0	alsamixer	:alsamixer
+pane	tmux	3	:fish	0	: 	0	:/home/tiago	1	fish	:
+pane	tmux	2	:Music	0	:-	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	ncmpcpp	:ncmpcpp
+window	0	0	1	:*	b71f,228x61,0,0,2
+window	tmux	0	1	:*	81c4,228x61,0,0{135x61,0,0,4,92x61,136,0[92x39,136,0,6,92x21,136,40,8]}
+window	tmux	1	0	: 	5bbf,228x61,0,0,10
+window	tmux	2	0	:-	2472,228x61,0,0{134x61,0,0,12,93x61,135,0[93x39,135,0,14,93x21,135,40,16]}
+window	tmux	3	0	: 	5bc7,228x61,0,0,18
+state	3	0
+pane	tmux	3	:fish	0	: 	0	:/home/tiago	1	fish	:
+window	0	0	1	:*	b71f,228x61,0,0,2
+window	tmux	0	1	:*	81c4,228x61,0,0{135x61,0,0,4,92x61,136,0[92x39,136,0,6,92x21,136,40,8]}
+window	tmux	1	0	: 	5bbf,228x61,0,0,10
+window	tmux	2	0	:-	2472,228x61,0,0{134x61,0,0,12,93x61,135,0[93x39,135,0,14,93x21,135,40,16]}
+window	tmux	3	0	: 	5bc7,228x61,0,0,18
+state	3	0

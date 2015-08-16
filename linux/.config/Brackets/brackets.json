@@ -1,0 +1,21 @@
+{
+    "debug.showErrorsInStatusBar": false,
+    "themes.theme": "dark-theme",
+    "me.drewh.jsbeautify.on_save": false,
+    "linting.enabled": true,
+    "linting.collapsed": true,
+    "closeBrackets": true,
+    "useTabChar": true,
+    "brackets-minifier.on-save": false,
+    "customToolbar.red": true,
+    "toggleToolbar.hidden": false,
+    "dnbard.documents-toolbar.icons": true,
+    "dnbard.documents-toolbar.smallIcons": false,
+    "dnbard.documents-toolbar.tooltip": false,
+    "dnbard.documents-toolbar.close_left": false,
+    "dnbard.documents-toolbar.workingFiles": true,
+    "dnbard.documents-toolbar.brackets_font": true,
+    "dnbard.documents-toolbar.grayscaleIcons": false,
+    "fonts.fontSize": "12px",
+    "fonts.fontFamily": "'DejaVu Sans Mono'"
+}

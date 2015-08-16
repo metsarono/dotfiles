@@ -1,0 +1,23 @@
+grouped_session	2	tmux	:2	:3
+grouped_session	3	tmux	:1	:3
+grouped_session	5	tmux	:4	:0
+pane	0	0	:fish	1	:*	0	:/home/tiago	1	fish	:
+pane	tmux	0	:Code	1	:*	0	:/srv/http/lightwizard.com.au/wp-content/themes/lightwizard/library/scss	0	python	:/usr/bin/python -O /usr/bin/ranger
+pane	tmux	0	:Code	1	:*	1	:/srv/http	1	mc	:mc
+pane	tmux	0	:Code	1	:*	2	:/srv/http	0	fish	:
+pane	tmux	1	:System	0	: 	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	python	:/usr/bin/python /usr/bin/glances
+pane	tmux	1	:System	0	: 	1	:/home/tiago	1	htop	:htop
+pane	tmux	2	:Music	0	: 	0	:/home/tiago	0	ncmpcpp	:ncmpcpp
+pane	tmux	2	:Music	0	: 	1	:/home/tiago	0	alsamixer	:alsamixer
+pane	tmux	2	:Music	0	: 	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	ncmpcpp	:ncmpcpp
+pane	tmux	3	:Web	0	:-	0	:/home/tiago	1	links	:links
+pane	tmux	3	:Web	0	:-	1	:/home/tiago	0	finch	:finch
+pane	tmux	3	:Web	0	:-	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	irssi	:irssi
+pane	tmux	4	:ssh	0	: 	0	:/home/tiago	1	ssh	:ssh inspiral@ds6246.dreamservers.com
+window	0	0	1	:*	bf1e,228x63,0,0,1
+window	tmux	0	1	:*	a610,228x63,0,0{128x63,0,0,2,99x63,129,0[99x40,129,0,3,99x22,129,41,4]}
+window	tmux	1	0	: 	74b5,228x63,0,0{119x63,0,0,5,108x63,120,0,6}
+window	tmux	2	0	: 	1361,228x63,0,0{151x63,0,0,7,76x63,152,0[76x40,152,0,8,76x22,152,41,9]}
+window	tmux	3	0	:-	5873,228x63,0,0{141x63,0,0,10,86x63,142,0[86x35,142,0,11,86x27,142,36,12]}
+window	tmux	4	0	: 	5fc3,228x63,0,0,14
+state	5	0

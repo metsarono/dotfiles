@@ -1,0 +1,23 @@
+grouped_session	2	tmux	:2	:3
+grouped_session	3	tmux	:3	:4
+grouped_session	5	tmux	:1	:0
+pane	0	0	:fish	1	:*	0	:/home/tiago	1	fish	:
+pane	tmux	0	:Code	0	:-	0	:/mnt/Windows/Users/Tiago/Creative Cloud Files	0	python	:/usr/bin/python -O /usr/bin/ranger
+pane	tmux	0	:Code	0	:-	1	:/srv/http	1	fish	:
+pane	tmux	0	:Code	0	:-	2	:/srv/http/lightwizard.com.au_/wp-content/themes/lightwizard/library/images	0	mc	:mc
+pane	tmux	1	:System	0	: 	0	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	0	python	:/usr/bin/python /usr/bin/glances
+pane	tmux	1	:System	0	: 	1	:/home/tiago	1	htop	:htop
+pane	tmux	2	:Music	0	: 	0	:/home/tiago	0	ncmpcpp	:ncmpcpp
+pane	tmux	2	:Music	0	: 	1	:/home/tiago	0	alsamixer	:alsamixer
+pane	tmux	2	:Music	0	: 	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	ncmpcpp	:ncmpcpp
+pane	tmux	3	:Web	0	: 	0	:/home/tiago	0	links	:links
+pane	tmux	3	:Web	0	: 	1	:/home/tiago	0	finch	:finch
+pane	tmux	3	:Web	0	: 	2	:/srv/http/adrianfreedman.com/wp-content/themes/canvas	1	irssi	:irssi
+pane	tmux	4	:fish	1	:*	0	:/tmp/yaourt-tmp-tiago/aur-qtox-git	1	bash	:/bin/bash /usr/bin/yaourt -Syua
+window	0	0	1	:*	b71e,228x61,0,0,1
+window	tmux	0	0	:-	c057,228x63,0,0{121x63,0,0[121x31,0,0,2,121x31,0,32,14],106x63,122,0,3}
+window	tmux	1	0	: 	f4b3,228x63,0,0{119x63,0,0,4,108x63,120,0,5}
+window	tmux	2	0	: 	5340,228x63,0,0{151x63,0,0,6,76x63,152,0[76x40,152,0,7,76x22,152,41,8]}
+window	tmux	3	0	: 	51cd,228x63,0,0{141x63,0,0,9,86x63,142,0[86x35,142,0,10,86x27,142,36,11]}
+window	tmux	4	1	:*	5fc1,228x63,0,0,12
+state	5	

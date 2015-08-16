@@ -1,0 +1,294 @@
+[$Version]
+update_info=kded.upd:kde3.0
+
+[Appmenu Style]
+Style=Others
+
+[ColorEffects:Disabled]
+Color=112,111,110
+ColorAmount=0
+ColorEffect=0
+ContrastAmount=0.65
+ContrastEffect=1
+IntensityAmount=0.1
+IntensityEffect=0
+
+[ColorEffects:Inactive]
+ChangeSelectionColor=true
+Color=112,111,110
+ColorAmount=0.025
+ColorEffect=2
+ContrastAmount=0.1
+ContrastEffect=2
+Enable=false
+IntensityAmount=0
+IntensityEffect=0
+
+[Colors:Button]
+BackgroundAlternate=62,62,62
+BackgroundNormal=51,51,51
+DecorationFocus=83,83,83
+DecorationHover=63,63,63
+ForegroundActive=255,128,224
+ForegroundInactive=119,119,119
+ForegroundLink=46,184,230
+ForegroundNegative=240,1,1
+ForegroundNeutral=255,221,0
+ForegroundNormal=255,255,255
+ForegroundPositive=128,255,128
+ForegroundVisited=255,102,102
+
+[Colors:Selection]
+BackgroundAlternate=115,115,115
+BackgroundNormal=77,86,99
+DecorationFocus=83,83,83
+DecorationHover=63,63,63
+ForegroundActive=255,128,224
+ForegroundInactive=119,119,119
+ForegroundLink=46,184,230
+ForegroundNegative=240,1,1
+ForegroundNeutral=255,221,0
+ForegroundNormal=255,255,255
+ForegroundPositive=128,255,128
+ForegroundVisited=255,102,102
+
+[Colors:Tooltip]
+BackgroundAlternate=0,0,0
+BackgroundNormal=0,0,0
+DecorationFocus=83,83,83
+DecorationHover=63,63,63
+ForegroundActive=255,128,224
+ForegroundInactive=119,119,119
+ForegroundLink=46,184,230
+ForegroundNegative=240,1,1
+ForegroundNeutral=255,221,0
+ForegroundNormal=255,255,255
+ForegroundPositive=128,255,128
+ForegroundVisited=255,102,102
+
+[Colors:View]
+BackgroundAlternate=51,51,51
+BackgroundNormal=36,36,36
+DecorationFocus=83,83,83
+DecorationHover=63,63,63
+ForegroundActive=255,128,224
+ForegroundInactive=119,119,119
+ForegroundLink=46,184,230
+ForegroundNegative=240,1,1
+ForegroundNeutral=255,221,0
+ForegroundNormal=255,255,255
+ForegroundPositive=128,255,128
+ForegroundVisited=255,102,102
+
+[Colors:Window]
+BackgroundAlternate=51,51,51
+BackgroundNormal=51,51,51
+DecorationFocus=83,83,83
+DecorationHover=63,63,63
+ForegroundActive=255,128,224
+ForegroundInactive=119,119,119
+ForegroundLink=46,184,230
+ForegroundNegative=240,1,1
+ForegroundNeutral=255,221,0
+ForegroundNormal=255,255,255
+ForegroundPositive=128,255,128
+ForegroundVisited=255,102,102
+
+[DesktopIcons]
+ActiveColor=169,156,255
+ActiveColor2=0,0,0
+ActiveEffect=togamma
+ActiveSemiTransparent=false
+ActiveValue=0.7
+Animated=true
+DefaultColor=144,128,248
+DefaultColor2=0,0,0
+DefaultEffect=none
+DefaultSemiTransparent=false
+DefaultValue=1
+DisabledColor=34,202,0
+DisabledColor2=0,0,0
+DisabledEffect=togray
+DisabledSemiTransparent=true
+DisabledValue=1
+Size=48
+
+[DialogIcons]
+ActiveColor=169,156,255
+ActiveColor2=0,0,0
+ActiveEffect=none
+ActiveSemiTransparent=false
+ActiveValue=1
+Animated=false
+DefaultColor=144,128,248
+DefaultColor2=0,0,0
+DefaultEffect=none
+DefaultSemiTransparent=false
+DefaultValue=1
+DisabledColor=34,202,0
+DisabledColor2=0,0,0
+DisabledEffect=togray
+DisabledSemiTransparent=true
+DisabledValue=1
+Size=32
+
+[DirSelect Dialog]
+DirSelectDialog Size=810,580
+History Items[$e]=applications:/Chrome,file://$HOME,file://$HOME/Music/Ambient Psychedelic,file://$HOME/Google Drive/Chrome/APK/com.yahoo.mobile.client.android.weather_twerk,file://$HOME/Google Drive/Chrome/APK,file://$HOME/Google Drive/Chrome/ARC Welder/com.yahoo.mobile.client.android.weather,file://$HOME/Google Drive/Chrome/ARC Welder/free.reddit.news-169,file://$HOME/Google Drive/Chrome/ARC Welder/com.onelouder.baconreader,file://$HOME/Google Drive/Chrome/ARC Welder/com.namelessdev.mpdroid,file://$HOME/Google Drive/Chrome/ARC Welder/com.cyngn.gallerynext-1.0.7-1026-minAPI18,file://$HOME/Google Drive/Chrome/APK/Reddit Now,file://$HOME/Google Drive/Chrome/ARC Welder,file://$HOME/Google Drive/Chrome/APK/com.skype.raider,file://$HOME/Google Drive/Chrome/Runtime/vladikoff-archon-1.2_x64,file://$HOME/Google Drive/Chrome/APK/free.reddit.news_twerk,file://$HOME/Google Drive/Chrome/APK/com.phyora.apps.reddit_now_twerk,file://$HOME/Google Drive/Chrome/ArchonSD/SimpleLauncher,file://$HOME/Google Drive/Chrome/Runtime,file://$HOME/Google Drive/Chrome/Runtime/SimpleLauncher_twerk,file://$HOME/Downloads/Chrome/ARChon,file://$HOME/Google Drive/Chrome/APK/com.skype.raider_twerk,file://$HOME/Google Drive/Chrome/Runtime/vladikoff-archon-2.1.0_x64,file:///srv/http/lightwizard.com.au/wp-content/themes/lightwizard/library/less,file://$HOME/Music,file://$HOME/Google Drive/Chrome/Extensions/Deezify,file:///run/media,file://$HOME/Downloads/Zelda,file:///mnt/Windows/Users/Tiago/Downloads/Zelda,file://$HOME/Downloads/THE LEGEND OF ZELDA,file:///mnt/Windows/Users/Tiago/Downloads,file://$HOME/ROMs/N64/hires_texture,file://$HOME/ROMs/N64/hires_texture/,file://$HOME/ROMs/N64/hires_texture/ZELDA MAJORA'S MASK,file:///mnt/Windows/Users/Tiago/ROMs/N64/hires_texture,file://$HOME/ROMs/N64,file:///mnt/Windows/Users/Tiago/ROMs/PC/.wine/drive_c/Program Files/Square Soft\\, Inc/Final Fantasy VII/,file://$HOME/Downloads/FINAL FANTASY IV-RELOADED/iso,file://$HOME/Downloads,file://$HOME/.wine/drive_c/Program Files/Final Fantasy VIII/,file://$HOME/.config/pcsx2/cheats_ws/,file://$HOME/Dropbox/Emulation/SNES,file://$HOME/Google Drive/Chrome/APK/Snes9xEX9.1.5.20_twerk,file://$HOME/ROMs/Genesis,file://$HOME/ROMs/PS1,file://$HOME/ROMs/PSP,file://$HOME/ROMs/Wii,file:///mnt/Windows/Users/Tiago/ROMs/PSP,file://$HOME/ROMs/Gameboy,file://$HOME/ROMs,file://$HOME/Google Drive/Chrome/APK/Snes9xEX9.1.5.20_twerk/
+
+[Emoticons]
+emoticonsTheme=GoogleEmojiComplete
+parseMode=2
+
+[General]
+ColorScheme=Adobe Dark
+TerminalApplication[$e]=konsole
+UseSystemBell=false
+XftAntialias=true
+XftHintStyle=hintfull
+XftSubPixel=rgb
+desktopFont=San Francisco Text,11,-1,5,50,0,0,0,0,0
+fixed=DejaVu Sans Mono for Powerline,9,-1,5,50,0,0,0,0,0
+font=San Francisco Display,11,-1,5,50,0,0,0,0,0
+menuFont=San Francisco Display,11,-1,5,50,0,0,0,0,0
+shadeSortColumn=true
+smallestReadableFont=San Francisco Text,8,-1,5,25,0,0,0,0,0
+taskbarFont=San Francisco Text,11,-1,5,50,0,0,0,0,0
+toolBarFont=San Francisco Text,9,-1,5,75,0,0,0,0,0
+widgetStyle=styleproject
+
+[Icons]
+Theme=Numix-Circle
+
+[KDE]
+AutoSelectDelay=-1
+ChangeCursor=true
+DoubleClickInterval=400
+ShowDeleteCommand=false
+ShowIconsInMenuItems=true
+ShowIconsOnPushButtons=false
+SingleClick=true
+StartDragDist=4
+StartDragTime=500
+WheelScrollLines=3
+contrast=0
+
+[KDE-Global GUI Settings]
+GraphicEffectsLevel=7
+
+[KFileDialog Settings]
+Automatically select filename extension=true
+Breadcrumb Navigation=false
+Decoration position=2
+LocationCombo Completionmode=5
+PathCombo Completionmode=5
+Previews=true
+Show Bookmarks=false
+Show Full Path=false
+Show Preview=false
+Show Speedbar=true
+Show hidden files=false
+Sort by=Date
+Sort directories first=true
+Sort reversed=false
+Speedbar Width=271
+View Style=Simple
+detailedViewIconSize=100
+listViewIconSize=100
+
+[KShortcutsDialog Settings]
+Dialog Size=600,480
+
+[MainToolbarIcons]
+ActiveColor=169,156,255
+ActiveColor2=0,0,0
+ActiveEffect=none
+ActiveSemiTransparent=false
+ActiveValue=1
+Animated=false
+DefaultColor=144,128,248
+DefaultColor2=0,0,0
+DefaultEffect=none
+DefaultSemiTransparent=false
+DefaultValue=1
+DisabledColor=34,202,0
+DisabledColor2=0,0,0
+DisabledEffect=togray
+DisabledSemiTransparent=true
+DisabledValue=1
+Size=22
+
+[PanelIcons]
+ActiveColor=169,156,255
+ActiveColor2=0,0,0
+ActiveEffect=togamma
+ActiveSemiTransparent=false
+ActiveValue=0.7
+Animated=false
+DefaultColor=144,128,248
+DefaultColor2=0,0,0
+DefaultEffect=none
+DefaultSemiTransparent=false
+DefaultValue=1
+DisabledColor=34,202,0
+DisabledColor2=0,0,0
+DisabledEffect=togray
+DisabledSemiTransparent=true
+DisabledValue=1
+Size=32
+
+[PreviewSettings]
+MaximumRemoteSize=0
+
+[SmallIcons]
+ActiveColor=169,156,255
+ActiveColor2=0,0,0
+ActiveEffect=none
+ActiveSemiTransparent=false
+ActiveValue=1
+Animated=false
+DefaultColor=144,128,248
+DefaultColor2=0,0,0
+DefaultEffect=none
+DefaultSemiTransparent=false
+DefaultValue=1
+DisabledColor=34,202,0
+DisabledColor2=0,0,0
+DisabledEffect=togray
+DisabledSemiTransparent=true
+DisabledValue=1
+Size=16
+
+[Toolbar style]
+ToolButtonStyle=NoText
+ToolButtonStyleOtherToolbars=NoText
+
+[ToolbarIcons]
+ActiveColor=169,156,255
+ActiveColor2=0,0,0
+ActiveEffect=none
+ActiveSemiTransparent=false
+ActiveValue=1
+Animated=false
+DefaultColor=144,128,248
+DefaultColor2=0,0,0
+DefaultEffect=none
+DefaultSemiTransparent=false
+DefaultValue=1
+DisabledColor=34,202,0
+DisabledColor2=0,0,0
+DisabledEffect=togray
+DisabledSemiTransparent=true
+DisabledValue=1
+Size=22
+
+[WM]
+activeBackground=90,90,90
+activeBlend=90,90,90
+activeFont=Adobe Blank,4,-1,5,50,0,0,0,0,0
+activeForeground=255,255,255
+activeTitleBtnBg=235,235,233
+inactiveBackground=90,90,90
+inactiveBlend=90,90,90
+inactiveForeground=220,220,220
+inactiveTitleBtnBg=55,53,53

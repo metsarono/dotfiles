@@ -1,0 +1,71 @@
+#! /bin/sh
+
+CBR='%{B-}'
+CB1='%{B#FF99CC99}'
+CB2='%{B#FF4E4E4E}'
+CFR='%{F-}'
+CF1='%{F#FF000000}'
+CF2='%{F#FF99CC99}'
+CF3='%{F#FFD75F5F}'
+CF4='%{F#FF4E4E4E}'
+LA='%{l}'
+RA='%{r}'
+AC='%{A:'
+AB=':}'
+AE='%{A}'
+logo="${CB1}${CF1}${AC}dmenu_recent -l 10&disown${AB} $(hostname -s) %{B#FF000000}${CF2}${AE}"
+menu="${CF2}${AC}mygtkmenu ~/.config/GTKmenu/BspwmDesktopMenu${AB} menu ${AE}%{B#FF000000}${CF4}"
+while read -r line ; do
+   case $line in
+   S*)
+	  sys_infos="${RA}${line#?}"
+   ;;
+   C*)
+        conky_infos="%{F#FF99CC99} ${line#?} "
+    ;;
+   T*)
+	  title="${CFR} ${AC}bspc desktop -l next${AB}${line#?}${AE} "
+   ;;
+   W*)
+	  wm_infos="%{B#FF000000}"
+	  IFS=':'
+	  set -- ${line#?}
+	  while [ $# -gt 0 ] ; do
+		 item=$1
+		 name=${item#?}
+		 case $item in
+		 [OFU]*)
+			# active desktop
+			wm_infos="${wm_infos}${CF2}${AC}bspc desktop -f ${name}${AB} • ${AE}${CFR}"
+		 ;;
+		 o*)
+			# inactive but occupied desktop
+			wm_infos="${wm_infos}${AC}bspc desktop -f ${name}${AB} • ${AE}"
+		 ;;
+		 f*)
+			# inactive desktop
+			wm_infos="${wm_infos}${AC}bspc desktop -f ${name}${AB} ○ ${AE}"
+		 ;;
+		 u*)
+			# urgent desktop
+			wm_infos="${wm_infos}${CF3}${AC}bspc desktop -f ${name}${AB} • ${AE}${CFR}"
+		 ;;
+		 L*)
+			# layout
+			case $name in
+			t*)
+			   layout="T"
+			;;
+			m*)
+			   layout="M"
+			;;
+			esac
+			wm_infos="${wm_infos} ${AC}bspc desktop -l next${AB}${layout}${AE} %{B#FF000000}${CF4}"
+		 ;;
+		 esac
+		 shift
+	  done
+   ;;
+   esac
+   printf "%s\n" "$logo $wm_infos $menu %{c}$title $sys_infos ${conky_infos}"
+done

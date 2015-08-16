@@ -1,0 +1,19 @@
+{
+    "title": "Chrome",
+    "name": "chrome",
+    "description": "Chrome Theme for Brackets",
+    "version": "1.0.0",
+    "author": "Rameez Raja <mrameezraja@gmail.com>",
+    "homepage": "https://github.com/Brackets-Themes/Chrome",
+    "repository": {
+        "type": "git",
+        "url": "git://github.com/Brackets-Themes/Chrome.git"
+    },
+    "engines": {
+        "brackets": ">=0.42.0"
+    },
+    "theme": {
+        "file": "main.less"
+    },
+    "screenshot": "screenshot.png"
+}
