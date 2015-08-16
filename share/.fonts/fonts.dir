@@ -1,4 +1,4 @@
-51
+53
 CousineRegen-Powerline.ttf -misc-cousine regen for powerline-medium-r-normal--0-0-0-0-p-0-adobe-standard
 CousineRegen-Powerline.ttf -misc-cousine regen for powerline-medium-r-normal--0-0-0-0-p-0-ascii-0
 CousineRegen-Powerline.ttf -misc-cousine regen for powerline-medium-r-normal--0-0-0-0-p-0-ibm-cp437
@@ -37,6 +37,7 @@ ter-powerline-powerline-x12n.pcf.gz -xos4-terminesspowerline-medium-r-normal--12
 ter-powerline-powerline-x14b.pcf.gz -xos4-terminesspowerline-bold-r-normal--14-140-72-72-c-80-iso10646-1
 ter-powerline-powerline-x14n.pcf.gz -xos4-terminesspowerline-medium-r-normal--14-140-72-72-c-80-iso10646-1
 ter-powerline-powerline-x16b.pcf.gz -xos4-terminesspowerline-bold-r-normal--16-160-72-72-c-80-iso10646-1
+ter-powerline-powerline-x16n.pcf.gz -xos4-terminesspowerline-medium-r-normal--16-160-72-72-c-80-iso10646-1
 ter-powerline-powerline-x18b.pcf.gz -xos4-terminesspowerline-bold-r-normal--18-180-72-72-c-100-iso10646-1
 ter-powerline-powerline-x18n.pcf.gz -xos4-terminesspowerline-medium-r-normal--18-180-72-72-c-100-iso10646-1
 ter-powerline-powerline-x20b.pcf.gz -xos4-terminesspowerline-bold-r-normal--20-200-72-72-c-100-iso10646-1
@@ -45,6 +46,7 @@ ter-powerline-powerline-x22b.pcf.gz -xos4-terminesspowerline-bold-r-normal--22-2
 ter-powerline-powerline-x22n.pcf.gz -xos4-terminesspowerline-medium-r-normal--22-220-72-72-c-110-iso10646-1
 ter-powerline-powerline-x24b.pcf.gz -xos4-terminesspowerline-bold-r-normal--24-240-72-72-c-120-iso10646-1
 ter-powerline-powerline-x24n.pcf.gz -xos4-terminesspowerline-medium-r-normal--24-240-72-72-c-120-iso10646-1
+ter-powerline-powerline-x28b.pcf.gz -xos4-terminesspowerline-bold-r-normal--28-280-72-72-c-140-iso10646-1
 ter-powerline-powerline-x28n.pcf.gz -xos4-terminesspowerline-medium-r-normal--28-280-72-72-c-140-iso10646-1
 ter-powerline-powerline-x32b.pcf.gz -xos4-terminesspowerline-bold-r-normal--32-320-72-72-c-160-iso10646-1
 ter-powerline-powerline-x32n.pcf.gz -xos4-terminesspowerline-medium-r-normal--32-320-72-72-c-160-iso10646-1
