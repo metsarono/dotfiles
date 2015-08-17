@@ -19,7 +19,7 @@ Plugin 'vi-mode'
 set -gx TERM xterm-256color
 set -gx EDITOR vim
 set -gx PATH $PATH /home/tiago/.gem/ruby/2.2.0/bin
-set -gx fish_greeting ""
+set -U fish_greeting ""
 
 #set fish_function_path $fish_function_path "$HOME/.local/lib/python2.7/site-#packages/powerline/bindings/fish"
 #powerline-setup
