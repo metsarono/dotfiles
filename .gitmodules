@@ -1,0 +1,79 @@
+[submodule "linux/.config/Brackets/extensions/user/brackets-beautify"]
+	path = linux/.config/Brackets/extensions/user/brackets-beautify
+	url = git://github.com/drewhamlett/brackets-beautify.git
+
+[submodule "linux/.config/Brackets/extensions/user/csscomb-brackets"]
+    path = linux/.config/Brackets/extensions/user/csscomb-brackets
+    url = git://github.com/hano/csscomb-brackets.git
+
+[submodule "share/.config/bspwm/panel/bar"]
+    path = share/.config/bspwm/panel/bar
+    url = git://github.com/LemonBoy/bar.git
+
+[submodule "share/.config/bspwm/panel/sutils"]
+    path = share/.config/bspwm/panel/sutils
+    url = git://github.com/baskerville/sutils.git
+
+[submodule "share/.config/bspwm/panel/xtitle"]
+    path = share/.config/bspwm/panel/xtitle
+    url = git://github.com/LemonBoy/bar.git
+
+[submodule "share/.config/zsh/zgen"]
+    path = share/.config/zsh/zgen
+    url = git://github.com/tarjoilija/zgen.git
+
+[submodule "share/.oh-my-fish"]
+    path = share/.oh-my-fish
+    url = git://github.com/oh-my-fish/oh-my-fish.git
+
+[submodule "share/.tmux/plugins/tmux-continuum"]
+    path = share/.tmux/plugins/tmux-continuum
+    url = git://github.com/tmux-plugins/tmux-continuum.git
+
+[submodule "share/.tmux/plugins/tmux-resurrect"]
+    path = share/.tmux/plugins/tmux-resurrect
+    url = git://github.com/tmux-plugins/tmux-resurrect.git
+
+[submodule "share/.tmux/plugins/tpm"]
+    path = share/.tmux/plugins/tpm
+    url = git://github.com/tmux-plugins/tpm.git
+
+[submodule "share/.vim/bundle/flatlandia"]
+    path = share/.vim/bundle/flatlandia
+    url = git://github.com/jordwalke/flatlandia.git
+
+[submodule "share/.vim/bundle/vim-airline"]
+    path = share/.vim/bundle/vim-airline
+    url = git://github.com/bling/vim-airline.git
+
+[submodule "share/.vim/bundle/vim-obsession"]
+    path = share/.vim/bundle/vim-obsession
+    url = git://github.com/tpope/vim-obsession.git
+
+[submodule "share/.zgen/maverick2000/zsh2000-master"]
+    path = share/.zgen/maverick2000/zsh2000-master
+    url = git://github.com/maverick2000/zsh2000.git
+
+[submodule "share/.zgen/robbyrussell/oh-my-zsh-master"]
+    path = share/.zgen/robbyrussell/oh-my-zsh-master
+    url = git://github.com/robbyrussell/oh-my-zsh.git
+
+[submodule "share/.zgen/tarruda/zsh-autosuggestions-master"]
+    path = share/.zgen/tarruda/zsh-autosuggestions-master
+    url = git://github.com/tarruda/zsh-autosuggestions.git
+
+[submodule "share/.zgen/thvitt/tvline-master"]
+    path = share/.zgen/thvitt/tvline-master
+    url = git://github.com/thvitt/tvline.git
+
+[submodule "share/.zgen/zsh-users/zsh-completions-master"]
+    path = share/.zgen/zsh-users/zsh-completions-master
+    url = git://github.com/zsh-users/zsh-completions.git
+
+[submodule "share/.zgen/zsh-users/zsh-history-substring-search-master"]
+    path = share/.zgen/zsh-users/zsh-history-substring-search-master
+    url = git://github.com/zsh-users/zsh-history-substring-search.git
+
+[submodule "share/.zgen/zsh-users/zsh-syntax-highlighting-master"]
+    path = share/.zgen/zsh-users/zsh-syntax-highlighting-master
+    url = git://github.com/zsh-users/zsh-syntax-highlighting.git

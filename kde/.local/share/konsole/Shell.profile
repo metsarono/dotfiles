@@ -8,7 +8,7 @@ Font=Liberation Mono for Powerline,10,-1,5,50,0,0,0,0,0
 CursorShape=1
 
 [General]
-Command=env TERM=xterm-256color fish
+Command=env zsh
 Name=Shell
 Parent=FALLBACK/
 
