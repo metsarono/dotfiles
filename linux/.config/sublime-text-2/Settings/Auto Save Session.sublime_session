@@ -22,7 +22,7 @@
 					"file": "/home/tiago/.config/fish/config.fish",
 					"settings":
 					{
-						"buffer_size": 948,
+						"buffer_size": 924,
 						"line_ending": "Unix"
 					}
 				},
@@ -39,6 +39,14 @@
 					"settings":
 					{
 						"buffer_size": 11995,
+						"line_ending": "Unix"
+					}
+				},
+				{
+					"file": "/home/tiago/.tmux.conf",
+					"settings":
+					{
+						"buffer_size": 5029,
 						"line_ending": "Unix"
 					}
 				},
@@ -98,6 +106,9 @@
 				"case_sensitive": false,
 				"find_history":
 				[
+					"default-terminal",
+					"color",
+					"default-terminal",
 					"powerline"
 				],
 				"highlight": true,
@@ -116,7 +127,7 @@
 			"groups":
 			[
 				{
-					"selected": 2,
+					"selected": 0,
 					"sheets":
 					[
 						{
@@ -124,15 +135,15 @@
 							"file": "/home/tiago/.config/fish/config.fish",
 							"settings":
 							{
-								"buffer_size": 948,
+								"buffer_size": 924,
 								"regions":
 								{
 								},
 								"selection":
 								[
 									[
-										948,
-										948
+										409,
+										409
 									]
 								],
 								"settings":
@@ -140,7 +151,7 @@
 									"syntax": "Packages/Text/Plain text.tmLanguage"
 								},
 								"translation.x": 0.0,
-								"translation.y": 135.0,
+								"translation.y": 0.0,
 								"zoom_level": 1.0
 							},
 							"type": "text"
@@ -157,13 +168,13 @@
 								"selection":
 								[
 									[
-										640,
-										640
+										2978,
+										2978
 									]
 								],
 								"settings":
 								{
-									"syntax": "Packages/Text/Plain text.tmLanguage"
+									"syntax": "Packages/Batch File/Batch File.tmLanguage"
 								},
 								"translation.x": 0.0,
 								"translation.y": 0.0,
@@ -183,8 +194,8 @@
 								"selection":
 								[
 									[
-										432,
-										221
+										728,
+										728
 									]
 								],
 								"settings":
@@ -192,13 +203,39 @@
 									"syntax": "Packages/ShellScript/Shell-Unix-Generic.tmLanguage"
 								},
 								"translation.x": 0.0,
-								"translation.y": 0.0,
+								"translation.y": 45.0,
 								"zoom_level": 1.0
 							},
 							"type": "text"
 						},
 						{
 							"buffer": 3,
+							"file": "/home/tiago/.tmux.conf",
+							"settings":
+							{
+								"buffer_size": 5029,
+								"regions":
+								{
+								},
+								"selection":
+								[
+									[
+										2465,
+										2465
+									]
+								],
+								"settings":
+								{
+									"syntax": "Packages/Text/Plain text.tmLanguage"
+								},
+								"translation.x": 0.0,
+								"translation.y": 575.0,
+								"zoom_level": 1.0
+							},
+							"type": "text"
+						},
+						{
+							"buffer": 4,
 							"file": "/home/tiago/.dotfiles/kde/.vimrc",
 							"settings":
 							{

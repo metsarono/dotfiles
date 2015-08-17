@@ -1,30 +1,31 @@
 # Path to your oh-my-fish.
 set fish_path $HOME/.oh-my-fish
 
-# Theme
-# set fish_theme robbyrussell
-
-# All built-in plugins can be found at ~/.oh-my-fish/plugins/
-# Custom plugins may be added to ~/.oh-my-fish/custom/plugins/
-# Enable plugins by adding their name separated by a space to the line below.
-set fish_plugins tmux archlinux mc sublime vi-mode
-
 # Path to your custom folder (default path is ~/.oh-my-fish/custom)
-#set fish_custom $HOME/dotfiles/oh-my-fish
+# set fish_custom $HOME/dotfiles/oh-my-fish
 
 # Load oh-my-fish configuration.
 . $fish_path/oh-my-fish.fish
 
-set -x EDITOR vim
+# Custom plugins and themes may be added to ~/.oh-my-fish/custom
+# Plugins and themes can be found at https://github.com/oh-my-fish/
+Theme 'theme-bobthefish'
+Plugin 'theme'
+Plugin 'tmux'
+Plugin 'mc'
+Plugin 'sublime'
+Plugin 'vi-mode'
 
-set fish_function_path $fish_function_path "$HOME/.local/lib/python2.7/site-packages/powerline/bindings/fish"
-powerline-setup
-
+set -gx TERM xterm-256color
+set -gx EDITOR vim
 set -gx PATH $PATH /home/tiago/.gem/ruby/2.2.0/bin
+set -gx fish_greeting ""
 
-set -U fish_greeting ""
+#set fish_function_path $fish_function_path "$HOME/.local/lib/python2.7/site-#packages/powerline/bindings/fish"
+#powerline-setup
 
-if test -f $HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf
-      tmux source "$HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
-end
+#if test -f $HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf
+#      tmux source "$HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
+#end
+
 
