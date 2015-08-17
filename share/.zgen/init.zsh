@@ -7,6 +7,7 @@ source "/home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/git/git.plugin.z
 source "/home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/sudo/sudo.plugin.zsh"
 source "/home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/command-not-found/command-not-found.plugin.zsh"
 source "/home/tiago/.zgen/maverick2000/zsh2000-master/zsh2000.zsh-theme"
+source "/home/tiago/.zgen/thvitt/tvline-master/tvline.zsh-theme"
 source "/home/tiago/.zgen/zsh-users/zsh-syntax-highlighting-master/zsh-syntax-highlighting.plugin.zsh"
 source "/home/tiago/.zgen/tarruda/zsh-autosuggestions-master/autosuggestions.plugin.zsh"
 source "/home/tiago/.zgen/tarruda/zsh-autosuggestions-master/zsh-autosuggestions.plugin.zsh"
@@ -15,4 +16,4 @@ source "/home/tiago/.zgen/zsh-users/zsh-history-substring-search-master/zsh-hist
 #
 # Add our plugins and completions to fpath
 #
-fpath=(/home/tiago/.zgen/robbyrussell/oh-my-zsh-master /home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/git /home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/sudo /home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/command-not-found /home/tiago/.zgen/maverick2000/zsh2000-master /home/tiago/.zgen/zsh-users/zsh-syntax-highlighting-master /home/tiago/.zgen/tarruda/zsh-autosuggestions-master /home/tiago/.zgen/zsh-users/zsh-history-substring-search-master /home/tiago/.zgen/zsh-users/zsh-completions-master/src ${fpath})
+fpath=(/home/tiago/.zgen/robbyrussell/oh-my-zsh-master /home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/git /home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/sudo /home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/command-not-found /home/tiago/.zgen/maverick2000/zsh2000-master /home/tiago/.zgen/thvitt/tvline-master /home/tiago/.zgen/zsh-users/zsh-syntax-highlighting-master /home/tiago/.zgen/tarruda/zsh-autosuggestions-master /home/tiago/.zgen/zsh-users/zsh-history-substring-search-master /home/tiago/.zgen/zsh-users/zsh-completions-master/src ${fpath})

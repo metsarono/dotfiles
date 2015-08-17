@@ -24,8 +24,15 @@ set -gx fish_greeting ""
 #set fish_function_path $fish_function_path "$HOME/.local/lib/python2.7/site-#packages/powerline/bindings/fish"
 #powerline-setup
 
-#if test -f $HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf
-#      tmux source "$HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
-#end
-
-
+if test -f $HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf
+      tmux source "$HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
+end
+if test -f /usr/lib/python3.4/site-packages/powerline/bindings/tmux/powerline.conf
+      tmux source "/usr/lib/python3.4/site-packages/powerline/bindings/tmux/powerline.conf"
+end
+if test -f /usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf
+      tmux source "/usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
+end
+if test -f source /Users/tiago/.iterm2_shell_integration.fish
+    source /Users/tiago/.iterm2_shell_integration.fish
+end

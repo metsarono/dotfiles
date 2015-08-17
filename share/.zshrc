@@ -421,6 +421,7 @@ if ! zgen saved; then
     zgen oh-my-zsh plugins/sudo
     zgen oh-my-zsh plugins/command-not-found
     zgen load maverick2000/zsh2000 zsh2000
+    zgen load thvitt/tvline tvline
     zgen load zsh-users/zsh-syntax-highlighting
     zgen load tarruda/zsh-autosuggestions
 
@@ -435,7 +436,7 @@ EOPLUGINS
     zgen load zsh-users/zsh-completions src
 
     # theme
-    zgen oh-my-zsh themes/zsh2000
+    zgen oh-my-zsh themes/tvline
 
     # save all to init script
     zgen save
