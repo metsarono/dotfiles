@@ -26,8 +26,8 @@ set -U fish_greeting ""
 
 if test -f $HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf
       tmux source "$HOME/.local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
-else if test -f /usr/lib/python3.4/site-packages/powerline/bindings/tmux/powerline.conf
-      tmux source "/usr/lib/python3.4/site-packages/powerline/bindings/tmux/powerline.conf"
+else if test -f /usr/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf
+      tmux source "/usr/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
 else if test -f /usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf
       tmux source "/usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
 end
