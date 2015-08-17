@@ -1,0 +1,81 @@
+# Conky settings #
+background yes
+update_interval 1
+double_buffer yes
+no_buffers yes
+imlib_cache_size 10
+
+# Window specifications #
+gap_x 100
+gap_y 100
+minimum_size 360 213
+maximum_width 360
+own_window yes
+own_window_type normal  # other options are: override/dock/desktop/panel
+own_window_transparent yes
+own_window_hints undecorate,sticky,skip_taskbar,skip_pager,below
+border_inner_margin 0
+border_outer_margin 0
+#alignment middle_middle
+#own_window_argb_visual yes
+#own_window_argb_value 0
+
+# Graphics settings #
+draw_shades no
+default_shade_color AAAAAA
+draw_outline no
+default_outline_color AAAAAA
+draw_borders no
+draw_graph_borders no
+
+# Text settings #
+use_xft yes
+xftalpha 0
+xftfont Roboto:size=10
+text_buffer_size 256
+override_utf8_locale yes
+override_utf8_locale yes
+imlib_cache_size 0
+
+# Color scheme #
+default_color FFFFFF
+color1 FFFFFF
+
+TEXT
+\
+#----------CLOCK----------#
+\
+\
+${font Roboto :size=64}${alignc}${time %H}${voffset -10}${font Roboto Thin :size=64}${time :%M}${font}
+\
+\
+#---------CALENDAR---------#
+\
+\
+${font Roboto Light :size=14}${voffset 4}${alignc}${time %A} \
+${font Roboto :size=14}${alignc}${time %d} \
+${font Roboto Light :size=14}${voffset -2}${alignc}${time %B}
+\
+\
+#---------WEATHER----------#
+\
+\
+# WOEID(Where On Earth ID) #
+\
+${execi 300 curl -s "http://weather.yahooapis.com/forecastrss?w=44418&u=c" -o ~/.cache/weather.xml}\
+\
+# Current temparature #
+\
+${font Roboto Light :size=22}${goto 212}${voffset 18}${execi 300 grep "yweather:condition" ~/.cache/weather.xml | grep -o "temp=\"[^\"]*\"" | grep -o "\"[^\"]*\"" | grep -o "[^\"]*"}°\
+\
+# Forecast for today #
+\
+${font Roboto Light :size=10}${goto 213}${voffset 32}${execi 300 grep "yweather:forecast" ~/.cache/weather.xml | grep -o "low=\"[^\"]*\"" | grep -o "\"[^\"]*\"" | grep -o "[^\"]*" | awk 'NR==1'}° | ${execi 300 grep "yweather:forecast" ~/.cache/weather.xml | grep -o "high=\"[^\"]*\"" | grep -o "\"[^\"]*\"" | grep -o "[^\"]*" | awk 'NR==1'}°
+\
+# Conditions in textual form("partly cloudy" etc.) #
+\
+${font Roboto Light :size=10}${alignr 210}${voffset -60}${execi 300 grep "yweather:condition" ~/.cache/weather.xml | grep -o "text=\"[^\"]*\"" | grep -o "\"[^\"]*\"" | grep -o "[^\"]*"}
+\
+# Current weather icon #
+\
+${execi 300 cp -f ~/.jelly-weather-icons/$(grep "yweather:condition" ~/.cache/weather.xml | grep -o "code=\"[^\"]*\"" | grep -o "\"[^\"]*\"" | grep -o "[^\"]*").png ~/.cache/weather-1.png}${image ~/.cache/weather-1.png -p 165,146 -s 32x32}${font}${voffset -40}
