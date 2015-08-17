@@ -34,6 +34,10 @@
     path = share/.tmux/plugins/tmux-resurrect
     url = git://github.com/tmux-plugins/tmux-resurrect.git
 
+[submodule "share/.tmux/plugins/tmux-sensible"]
+    path = share/.tmux/plugins/tmux-sensible
+    url = git://github.com/tmux-plugins/tmux-sensible.git
+
 [submodule "share/.tmux/plugins/tpm"]
     path = share/.tmux/plugins/tpm
     url = git://github.com/tmux-plugins/tpm.git
