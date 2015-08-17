@@ -10,15 +10,15 @@
 # Let's have some colors first
 autoload -U colors && colors
 
-if [[ -e /usr/share/zsh/site-contrib/powerline.zsh ]]; then
-	# Powerline support is enabled if available, otherwise use a regular PS1
-	. /usr/share/zsh/site-contrib/powerline.zsh
-	VIRTUAL_ENV_DISABLE_PROMPT=true
-elif [[ -e $HOME/.local/lib/python2.7/site-packages/powerline/bindings/zsh/powerline.zsh ]]; then
+#if [[ -e /usr/share/zsh/site-contrib/powerline.zsh ]]; then
+#	# Powerline support is enabled if available, otherwise use a regular PS1
+#	. /usr/share/zsh/site-contrib/powerline.zsh
+#	VIRTUAL_ENV_DISABLE_PROMPT=true
+#elif [[ -e $HOME/.local/lib/python2.7/site-packages/powerline/bindings/zsh/powerline.zsh ]]; then
     #statements
-    . $HOME/.local/lib/python2.7/site-packages/powerline/bindings/zsh/powerline.zsh
-    VIRTUAL_ENV_DISABLE_PROMPT=true
-else
+#    . $HOME/.local/lib/python2.7/site-packages/powerline/bindings/zsh/powerline.zsh
+#    VIRTUAL_ENV_DISABLE_PROMPT=true
+#else
 	# Default colors:
 	# Cyan for users, red for root, magenta for system users
 	local _time="%{$fg[yellow]%}[%*]"
@@ -39,7 +39,7 @@ else
 	if [[ ! -z "$SSH_CLIENT" ]]; then
 		RPROMPT="$RPROMPT ⇄" # ssh icon
 	fi
-fi
+#fi
 
 ##
 # Environment variables
@@ -383,13 +383,13 @@ if [[ $LANG == "C"  || $LANG == "" ]]; then
 fi
 
 # Syntax highlighting plugin
-if [[ -e /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
-	source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-fi
+#if [[ -e /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+#	source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+#fi
 
-if [[ -e /usr/share/zsh/plugins/zsh-history-substring-search/zsh-history-substring-search.zsh ]]; then
-	source /usr/share/zsh/plugins/zsh-history-substring-search/zsh-history-substring-search.zsh
-fi
+#if [[ -e /usr/share/zsh/plugins/zsh-history-substring-search/zsh-history-substring-search.zsh ]]; then
+#	source /usr/share/zsh/plugins/zsh-history-substring-search/zsh-history-substring-search.zsh
+#fi
 
 # bind UP and DOWN arrow keys
 #zmodload zsh/terminfo
@@ -420,8 +420,10 @@ if ! zgen saved; then
     zgen oh-my-zsh plugins/git
     zgen oh-my-zsh plugins/sudo
     zgen oh-my-zsh plugins/command-not-found
+    zgen load maverick2000/zsh2000 zsh2000
     zgen load zsh-users/zsh-syntax-highlighting
     zgen load tarruda/zsh-autosuggestions
+
     # bulk load
     zgen loadall <<EOPLUGINS
         zsh-users/zsh-history-substring-search
@@ -433,7 +435,7 @@ EOPLUGINS
     zgen load zsh-users/zsh-completions src
 
     # theme
-    # zgen oh-my-zsh themes/arrow
+    zgen oh-my-zsh themes/zsh2000
 
     # save all to init script
     zgen save
