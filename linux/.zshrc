@@ -14,6 +14,10 @@ if [[ -e /usr/share/zsh/site-contrib/powerline.zsh ]]; then
 	# Powerline support is enabled if available, otherwise use a regular PS1
 	. /usr/share/zsh/site-contrib/powerline.zsh
 	VIRTUAL_ENV_DISABLE_PROMPT=true
+elif [[ -e $HOME/.local/lib/python2.7/site-packages/powerline/bindings/zsh/powerline.zsh ]]; then
+    #statements
+    . $HOME/.local/lib/python2.7/site-packages/powerline/bindings/zsh/powerline.zsh
+    VIRTUAL_ENV_DISABLE_PROMPT=true
 else
 	# Default colors:
 	# Cyan for users, red for root, magenta for system users
@@ -401,7 +405,40 @@ fi
 #bindkey -M vicmd 'j' history-substring-search-down
 
 # Setup zsh-autosuggestions
-source $HOME/.config/zsh/zsh-autosuggestions/autosuggestions.zsh
+#source $HOME/.config/zsh/zsh-autosuggestions/autosuggestions.zsh
+
+# load zgen
+source "$HOME/.config/zsh/zgen/zgen.zsh"
+
+# check if there's no init script
+if ! zgen saved; then
+    echo "Creating a zgen save"
+
+    zgen oh-my-zsh
+
+    # plugins
+    zgen oh-my-zsh plugins/git
+    zgen oh-my-zsh plugins/sudo
+    zgen oh-my-zsh plugins/command-not-found
+    zgen load zsh-users/zsh-syntax-highlighting
+    zgen load tarruda/zsh-autosuggestions
+    # bulk load
+    zgen loadall <<EOPLUGINS
+        zsh-users/zsh-history-substring-search
+
+EOPLUGINS
+    # ^ can't indent this EOPLUGINS
+
+    # completions
+    zgen load zsh-users/zsh-completions src
+
+    # theme
+    # zgen oh-my-zsh themes/arrow
+
+    # save all to init script
+    zgen save
+fi
+
 
 # Enable autosuggestions automatically
 zle-line-init() {
