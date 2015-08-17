@@ -404,9 +404,6 @@ fi
 #bindkey -M vicmd 'k' history-substring-search-up
 #bindkey -M vicmd 'j' history-substring-search-down
 
-# Setup zsh-autosuggestions
-#source $HOME/.config/zsh/zsh-autosuggestions/autosuggestions.zsh
-
 # load zgen
 source "$HOME/.config/zsh/zgen/zgen.zsh"
 
