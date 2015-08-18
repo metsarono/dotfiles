@@ -16,7 +16,7 @@
 
 [submodule "share/.config/bspwm/panel/xtitle"]
     path = share/.config/bspwm/panel/xtitle
-    url = git://github.com/LemonBoy/bar.git
+    url = git://github.com/baskerville/xtitle.git
 
 [submodule "share/.config/zsh/zgen"]
     path = share/.config/zsh/zgen
