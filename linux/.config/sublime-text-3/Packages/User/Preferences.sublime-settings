@@ -1,10 +1,10 @@
 {
+	"bold_folder_labels": "true",
 	"color_scheme": "Packages/Theme - Elementary/Oceanic_Next.tmTheme",
 	"ignored_packages":
 	[
 		"Vintage"
 	],
 	"overlay_scroll_bars": "enabled",
-	"bold_folder_labels": "true",
 	"theme": "Elementary Dark.sublime-theme"
 }
