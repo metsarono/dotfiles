@@ -1,6 +1,6 @@
-" Updated: Thu 14 May 2015 08:30:00 PM CEST
-" Revision: 233
-" Author: tiago@Chronos
+" Updated: Thu 20 Aug 00:50:21 2015
+" Revision: 235
+" Author: tiago@Tiagos-MBP.fritz.box
 
 " http://www.askapache.com/linux/fast-vimrc.html
 
@@ -14,14 +14,14 @@ let maplocalleader=','
 " ====================================================================================
 
 " SET RUNTIMEPATH {{{4
-"if isdirectory(expand("$HOME/.vim"))
-"   if isdirectory(expand("$HOME/.vim/colors"))
-"          if filereadable(expand("$HOME/colors/flatlandia.vim"))
-"                 let $VIMRUNTIME=expand("$HOME/.vim")
-"                 set runtimepath=$VIMRUNTIME
-"          endif
-"   endif
-"endif
+if isdirectory(expand("$HOME/.vim"))
+   if isdirectory(expand("$HOME/.vim/colors"))
+          if filereadable(expand("$HOME/colors/flatlandia.vim"))
+                 let $VIMRUNTIME=expand("$HOME/.vim")
+                 set runtimepath=$VIMRUNTIME
+          endif
+   endif
+endif
 
 "echomsg &runtimepath
 "echomsg expand("$VIMRUNTIME")
@@ -951,4 +951,4 @@ cmap w!! w !sudo tee > /dev/null %
 noremap <Leader>s :update<CR>
 
 let g:airline_powerline_fonts = 1
-"let g:airline_theme = "jellybeans"
+"let g:airline_theme = "flatlandia"
