@@ -464,3 +464,4 @@ if [ -e /usr/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf 
 elif [ -e /usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf ]; then
       tmux source "/usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
 fi
+export PATH="/usr/local/sbin:$PATH"
