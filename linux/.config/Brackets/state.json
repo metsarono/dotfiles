@@ -105,15 +105,67 @@
                 }
             },
             "project.baseUrl": "http://dev.adrianfreedman.com/",
-            "code-folding.folds": {
-                "/srv/http/adrianfreedman.com/wp-content/themes/canvas/custom.css": {}
-            }
+            "code-folding.folds": {}
         }
     },
     "afterFirstLaunch": "true",
     "currentSort": "view.sortWorkingSetByAdded",
-    "lastInfoURLFetchTime": 1436306989837,
+    "lastInfoURLFetchTime": 1449590215239,
     "updateInfo": [
+        {
+            "buildNumber": 16538,
+            "versionString": "Release 1.5",
+            "dateString": "10-14-2015",
+            "releaseNotesURL": "https://github.com/adobe/brackets/wiki/Release-Notes:-1.5",
+            "downloadURL": "http://brackets.io",
+            "newFeatures": [
+                {
+                    "name": "Fold Selected Text",
+                    "description": "Select any text block in the editor and fold markers will appear to collapse the selected text."
+                },
+                {
+                    "name": "Instant Search: Improved Stability and Performance",
+                    "description": "Major stability and performance improvements. Find in Files can now index and search robustly in thousands of files instantly."
+                },
+                {
+                    "name": "CSS Code Hints in PHP",
+                    "description": "CSS code hints are now available for style elements inside PHP files."
+                },
+                {
+                    "name": "Remember Collapsed Linters",
+                    "description": "Remember collapsed state of linters on switching files."
+                }
+            ]
+        },
+        {
+            "buildNumber": 16380,
+            "versionString": "Release 1.4",
+            "dateString": "07-27-2015",
+            "releaseNotesURL": "https://github.com/adobe/brackets/wiki/Release-Notes:-1.4",
+            "downloadURL": "http://brackets.io",
+            "newFeatures": [
+                {
+                    "name": "Instant Search in Files",
+                    "description": "Searching across files is faster than ever. Results are now displayed incrementally and updated as you type."
+                },
+                {
+                    "name": "Easier Preferences Editing",
+                    "description": "All preferences are now available as code hints while editing the `brackets.json` preferences file. Opening a preferences file will also open the default preferences in a second pane for reference."
+                },
+                {
+                    "name": "Disable Extensions Individually",
+                    "description": "Extensions can now be individually enabled/disabled from the Extension Manager."
+                },
+                {
+                    "name": "Improved Text Rendering on Mac",
+                    "description": "Crisp text rendering on Mac with subpixel antialiasing enabled by default. You can use the older text rendering by setting the `fonts.fontSmoothing` preference to `antialiased`."
+                },
+                {
+                    "name": "Greek and Cyrillic Character Support",
+                    "description": "Updated editor font (Source Code Pro) with improved support for Greek and Cyrillic character sets."
+                }
+            ]
+        },
         {
             "buildNumber": 16022,
             "versionString": "Release 1.3",
@@ -1249,12 +1301,37 @@
     ],
     "extensionUpdateInfo": [
         {
+            "id": "os.xcode.theme",
+            "installVersion": "5.0.0",
+            "registryVersion": "5.1.0"
+        },
+        {
+            "id": "jasonsanjose.brackets-sass",
+            "installVersion": "1.0.4-83",
+            "registryVersion": "2.0.3-132"
+        },
+        {
+            "id": "camden.csslint",
+            "installVersion": "2.0.16",
+            "registryVersion": "2.0.21"
+        },
+        {
+            "id": "brackets-oneliner",
+            "installVersion": "0.1.0",
+            "registryVersion": "0.2.0"
+        },
+        {
             "id": "dnbard.documents-toolbar",
             "installVersion": "0.5.7",
-            "registryVersion": "0.5.10"
+            "registryVersion": "0.5.19"
+        },
+        {
+            "id": "mikaeljorhult.brackets-autoprefixer",
+            "installVersion": "0.5.20",
+            "registryVersion": "0.6.1"
         }
     ],
-    "lastExtensionRegistryCheckTime": 1423509242025,
+    "lastExtensionRegistryCheckTime": 1449590214833,
     "workingSetSortMethod": "cmd.sortWorkingSetByAdded",
     "recentProjects": [
         "/srv/http/adrianfreedman.com/wp-content/themes/canvas",
@@ -1272,6 +1349,22 @@
     },
     "lastNotifiedBuildNumber": 15558,
     "auto-install-extensions": {},
-    "nextHealthDataSendTime": 1436308788765,
-    "healthDataNotificationShown": true
+    "nextHealthDataSendTime": 1449676612827,
+    "healthDataNotificationShown": true,
+    "UUID": "0a451b3c-3453-46df-863c-8bd6e6e49c7e",
+    "HealthData.Logs": {
+        "ProjectDetails": {
+            "prj-1367706280": {
+                "numFiles": 207,
+                "cacheSize": 2567009
+            }
+        },
+        "fileStats": {
+            "openedFileExt": {
+                "php": 1,
+                "css": 1
+            },
+            "workingSetFileExt": {}
+        }
+    }
 }

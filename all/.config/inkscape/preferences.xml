@@ -421,9 +421,9 @@
        offset="0"
        offsetunits="pt" />
     <group
-       id="measure"
+       unit="px"
        fontsize="10"
-       unit="px" />
+       id="measure" />
   </group>
   <group
      id="palette">
@@ -952,11 +952,11 @@
        partialdynamic="0"
        floatallowed="0" />
     <group
-       value="1"
-       id="bitmapoversample" />
+       id="bitmapoversample"
+       value="1" />
     <group
-       numthreads="1"
-       id="threading" />
+       id="threading"
+       numthreads="1" />
     <group
        id="rendering" />
   </group>
@@ -972,7 +972,7 @@
        y="1080"
        fullscreen="0"
        id="geometry"
-       maximized="0" />
+       maximized="1" />
     <group
        id="XYfront" />
     <group
@@ -1072,14 +1072,14 @@
   <group
      id="whiteboard">
     <group
-       ssl="0"
-       username=""
-       port="5222"
+       id="server"
        name="jabber.org"
-       id="server" />
+       port="5222"
+       username=""
+       ssl="0" />
     <group
-       server="gristle.org"
+       id="room"
        name="inkboard"
-       id="room" />
+       server="gristle.org" />
   </group>
 </inkscape>
