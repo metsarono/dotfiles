@@ -461,7 +461,15 @@ export VISUAL=/usr/bin/vim
 #if [ -e /usr/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf ]; then
 #      tmux source "/usr/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
 
+<<<<<<< HEAD
 #elif [ -e /usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf ]; then
 #      tmux source "/usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
 #fi
 export PATH="/usr/local/sbin:$PATH"
+=======
+elif [ -e /usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf ]; then
+      tmux source "/usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
+fi
+export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+
+>>>>>>> 2910a010f825ca207737a74a3ebd9a0abd125649

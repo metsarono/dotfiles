@@ -373,8 +373,6 @@
        doo="1" />
     <eventcontext
        id="spray"
-       selcue="1"
-       gradientdrag="0"
        usepressure="1"
        width="15"
        population="70"
@@ -382,17 +380,14 @@
        rotation_variation="0"
        scale_variation="0"
        standard_deviation="70"
-       mean="0" />
+       mean="0"
+       selcue="1"
+       gradientdrag="0" />
     <eventcontext
        id="gradient"
        selcue="1"
        newgradient="1"
        newfillorstroke="1" />
-    <eventcontext
-       id="mesh"
-       selcue="1"
-       mesh_cols="1"
-       mesh_rows="1" />
     <eventcontext
        id="zoom"
        selcue="1"
@@ -420,6 +415,11 @@
        threshold="5"
        offset="0"
        offsetunits="pt" />
+    <eventcontext
+       mesh_rows="1"
+       mesh_cols="1"
+       selcue="1"
+       id="mesh" />
     <group
        unit="px"
        fontsize="10"
@@ -679,9 +679,6 @@
   <group
      id="options">
     <group
-       id="renderingcache"
-       size="64" />
-    <group
        id="useoldpdfexporter"
        value="0" />
     <group
@@ -714,9 +711,6 @@
     <group
        id="dragtolerance"
        value="4.0" />
-    <group
-       id="grabsize"
-       value="3" />
     <group
        id="displayprofile"
        enable="0"
@@ -791,6 +785,9 @@
        id="simplifythreshold"
        value="0.002" />
     <group
+       id="bitmapoversample"
+       value="1" />
+    <group
        id="bitmapeditor"
        value="gimp"
        choices="gimp,krita,gpaint,kolourpaint,mtpaint,cinepaint" />
@@ -808,9 +805,6 @@
     <group
        id="dialogsskiptaskbar"
        value="1" />
-    <group
-       id="defaultwindowsize"
-       value="2" />
     <group
        id="arenatilescachesize"
        value="8192" />
@@ -890,8 +884,9 @@
        minimumexponent="-8"
        inlineattrs="0"
        indent="2"
-       pathstring_format="2"
+       allowrelativecoordinates="1"
        forcerepeatcommands="0"
+       pathstring_format="2"
        incorrect_attributes_warn="1"
        incorrect_attributes_remove="0"
        incorrect_style_properties_warn="1"
@@ -900,8 +895,7 @@
        style_defaults_remove="0"
        check_on_reading="0"
        check_on_editing="0"
-       check_on_writing="0"
-       allowrelativecoordinates="1" />
+       check_on_writing="0" />
     <group
        id="externalresources">
       <group
@@ -949,14 +943,28 @@
     <group
        id="workarounds"
        colorsontop="0"
-       partialdynamic="0"
-       floatallowed="0" />
+       floatallowed="0"
+       partialdynamic="0" />
     <group
+       id="threading"
+       numthreads="1" />
+    <group
+<<<<<<< HEAD
        id="bitmapoversample"
        value="1" />
     <group
        id="threading"
        numthreads="1" />
+=======
+       size="64"
+       id="renderingcache" />
+    <group
+       value="3"
+       id="grabsize" />
+    <group
+       value="2"
+       id="defaultwindowsize" />
+>>>>>>> 2910a010f825ca207737a74a3ebd9a0abd125649
     <group
        id="rendering" />
   </group>
@@ -966,10 +974,10 @@
      id="desktop"
      style="">
     <group
-       width="993"
-       height="666"
+       width="444"
+       height="418"
        x="0"
-       y="1080"
+       y="23"
        fullscreen="0"
        id="geometry"
        maximized="1" />
@@ -1061,6 +1069,19 @@
     </group>
   </group>
   <group
+     id="whiteboard">
+    <group
+       id="server"
+       name="jabber.org"
+       port="5222"
+       username=""
+       ssl="0" />
+    <group
+       id="room"
+       name="inkboard"
+       server="gristle.org" />
+  </group>
+  <group
      id="debug">
     <group
        id="latency"
@@ -1069,6 +1090,7 @@
   <group
      id="ui"
      language="" />
+<<<<<<< HEAD
   <group
      id="whiteboard">
     <group
@@ -1082,4 +1104,6 @@
        name="inkboard"
        server="gristle.org" />
   </group>
+=======
+>>>>>>> 2910a010f825ca207737a74a3ebd9a0abd125649
 </inkscape>
