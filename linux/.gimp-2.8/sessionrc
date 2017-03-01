@@ -55,7 +55,7 @@
                 (aux-info
                     (show-button-bar "true"))))
         (book
-            (position 606)
+            (position 603)
             (current-page 2)
             (dockable "gimp-navigation-view"
                 (tab-style name)
