@@ -9,9 +9,10 @@ source "/home/tiago/.zgen/robbyrussell/oh-my-zsh-master/plugins/command-not-foun
 source "/home/tiago/.zgen/maverick2000/zsh2000-master/zsh2000.zsh-theme"
 source "/home/tiago/.zgen/thvitt/tvline-master/tvline.zsh-theme"
 source "/home/tiago/.zgen/zsh-users/zsh-syntax-highlighting-master/zsh-syntax-highlighting.plugin.zsh"
-source "/home/tiago/.zgen/tarruda/zsh-autosuggestions-master/autosuggestions.plugin.zsh"
-source "/home/tiago/.zgen/tarruda/zsh-autosuggestions-master/zsh-autosuggestions.plugin.zsh"
-source "/home/tiago/.zgen/zsh-users/zsh-history-substring-search-master/zsh-history-substring-search.plugin.zsh"
+source "/home/tiago/.zgen/zsh-users/zsh-autosuggestions/zsh-autosuggestions.plugin.zsh"
+# source "/home/tiago/.zgen/tarruda/zsh-autosuggestions-master/autosuggestions.plugin.zsh"
+# source "/home/tiago/.zgen/tarruda/zsh-autosuggestions-master/zsh-autosuggestions.zsh"
+source "/home/tiago/.zgen/zsh-users/zsh-history-substring-search-master/zsh-history-substring-search.zsh"
 
 #
 # Add our plugins and completions to fpath

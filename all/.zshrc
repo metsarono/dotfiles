@@ -420,7 +420,7 @@ if ! zgen saved; then
     zgen load maverick2000/zsh2000 zsh2000
     zgen load thvitt/tvline tvline
     zgen load zsh-users/zsh-syntax-highlighting
-    zgen load tarruda/zsh-autosuggestions
+    zgen load zsh-users/zsh-autosuggestions
 
     # bulk load
     zgen loadall <<EOPLUGINS
@@ -441,9 +441,9 @@ fi
 
 
 # Enable autosuggestions automatically
-zle-line-init() {
-    zle autosuggest-start
-}
+#zle-line-init() {
+#    zle autosuggest-start
+#}
 
 zle -N zle-line-init
 
