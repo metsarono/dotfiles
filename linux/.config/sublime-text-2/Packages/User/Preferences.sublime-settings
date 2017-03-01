@@ -14,8 +14,9 @@
 	"ignored_packages":
 	[
 		"JSLint",
-		"Vintage",
-		"SublimeOnSaveBuild"
+		"Package Control",
+		"SublimeOnSaveBuild",
+		"Vintage"
 	],
 	"tab_size": 4,
 	"theme": "Flatland Dark.sublime-theme",

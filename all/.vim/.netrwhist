@@ -1,11 +1,2 @@
 let g:netrw_dirhistmax  =10
-let g:netrw_dirhist_cnt =9
-let g:netrw_dirhist_1='/home/tiago/.config'
-let g:netrw_dirhist_2='/home/tiago/.fonts'
-let g:netrw_dirhist_3='/usr/share/fonts/misc'
-let g:netrw_dirhist_4='/srv/http/lightwizard.com.au/wp-content/themes/lightwizard/library/scss'
-let g:netrw_dirhist_5='/srv/http/lightwizard.com.au/wp-content/themes/lightwizard/library'
-let g:netrw_dirhist_6='/srv/http/lightwizard.com.au/wp-content/themes/lightwizard/library/scss'
-let g:netrw_dirhist_7='/home/tiago/.ssh'
-let g:netrw_dirhist_8='/home/tiago/.local/share/applications/wine'
-let g:netrw_dirhist_9='/etc/X11/xorg.conf.d'
+let g:netrw_dirhist_cnt =0

@@ -20,10 +20,11 @@ fi
 setxkbmap -option ctrl:nocaps
 
 # exec gnome-session
-exec startkde
+exec startgnome
 # exec startxfce4
 # ...or the Window Manager of your choice
 
-#xrandr --setprovideroutputsource modesetting NVIDIA-0
+xrandr --setprovideroutputsource modesetting NVIDIA-0
 xrandr --auto
 
+export DESKTOP_SESSION=gnome

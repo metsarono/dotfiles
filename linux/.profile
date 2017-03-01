@@ -24,3 +24,5 @@ fi
 if [ -d "$HOME/.local/bin" ]; then
     PATH="$HOME/.local/bin:$PATH"
 fi
+
+export AQUARIA_DATA_PATH=~/.config/Aquaria
