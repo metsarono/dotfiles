@@ -34,12 +34,6 @@ cd ~/.dotfiles
 #### Arch
 ```sudo pacman -S vim zsh```
 #### Debian
-```bash
-sudo apt update
-sudo apt install vim zsh
-```
+```sudo apt install vim zsh```
 #### MacOS
-```bash
-homebrew update
-homebrew install vim zsh
-```
+```homebrew install vim zsh```
