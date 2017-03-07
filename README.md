@@ -6,38 +6,40 @@
 #### Arch
 ```sudo pacman -S git stow```
 #### Debian
-```sudo apt update
+```bash
+sudo apt update
 sudo apt install git stow
 ```
 #### MacOS
-```homebrew update
+```bash
+homebrew update
 homebrew install git stow
 ```
 
 ### Clone dotfiles
-```git clone --recursive https://github.com/metsarono/dotfiles.git ~/.dotfiles
+```bash
+git clone --recursive https://github.com/metsarono/dotfiles.git ~/.dotfiles
 cd ~/.dotfiles
 ```
 
 ### Stowing dotfiles
 #### Arch
-```stow all linux arch
-```
+```stow all linux arch```
 #### Debian
-```stow all linux debian
-```
+```stow all linux debian```
 #### MacOS
-```stow all osx
-```
+```stow all osx```
 
 ### Installing vim and zsh
 #### Arch
 ```sudo pacman -S vim zsh```
 #### Debian
-```sudo apt update
+```bash
+sudo apt update
 sudo apt install vim zsh
 ```
 #### MacOS
-```homebrew update
+```bash
+homebrew update
 homebrew install vim zsh
 ```
