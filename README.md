@@ -7,4 +7,5 @@
 ```sudo pacman -S git```
 #### Debian
 ```sudo apt update
+
 sudo apt install git```
