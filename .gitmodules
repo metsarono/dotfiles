@@ -18,10 +18,6 @@
     path = all/.config/bspwm/panel/xtitle
     url = git://github.com/baskerville/xtitle.git
 
-[submodule "all/.config/zsh/zgen"]
-    path = all/.config/zsh/zgen
-    url = git://github.com/tarjoilija/zgen.git
-
 [submodule "all/.oh-my-fish"]
     path = all/.oh-my-fish
     url = git://github.com/oh-my-fish/oh-my-fish.git
@@ -54,34 +50,3 @@
     path = all/.vim/bundle/vim-obsession
     url = git://github.com/tpope/vim-obsession.git
 
-[submodule "all/.zgen/maverick2000/zsh2000-master"]
-    path = all/.zgen/maverick2000/zsh2000-master
-    url = git://github.com/maverick2000/zsh2000.git
-
-[submodule "all/.zgen/robbyrussell/oh-my-zsh-master"]
-    path = all/.zgen/robbyrussell/oh-my-zsh-master
-    url = git://github.com/robbyrussell/oh-my-zsh.git
-
-[submodule "all/.zgen/tarruda/zsh-autosuggestions-master"]
-    path = all/.zgen/tarruda/zsh-autosuggestions-master
-    url = git://github.com/tarruda/zsh-autosuggestions.git
-
-[submodule "all/.zgen/thvitt/tvline-master"]
-    path = all/.zgen/thvitt/tvline-master
-    url = git://github.com/thvitt/tvline.git
-
-[submodule "all/.zgen/zsh-users/zsh-completions-master"]
-    path = all/.zgen/zsh-users/zsh-completions-master
-    url = git://github.com/zsh-users/zsh-completions.git
-
-[submodule "all/.zgen/zsh-users/zsh-history-substring-search-master"]
-    path = all/.zgen/zsh-users/zsh-history-substring-search-master
-    url = git://github.com/zsh-users/zsh-history-substring-search.git
-
-[submodule "all/.zgen/zsh-users/zsh-syntax-highlighting-master"]
-    path = all/.zgen/zsh-users/zsh-syntax-highlighting-master
-    url = git://github.com/zsh-users/zsh-syntax-highlighting.git
-
-[submodule "all/.zgen/zsh-users/zsh-autosuggestions"]
-    path = all/.zgen/zsh-users/zsh-autosuggestions
-    url = git://github.com/zsh-users/zsh-autosuggestions

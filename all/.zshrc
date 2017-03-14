@@ -405,7 +405,7 @@ fi
 #bindkey -M vicmd 'j' history-substring-search-down
 
 # load zgen
-source "$HOME/.config/zsh/zgen/zgen.zsh"
+source "${HOME}/.zgen/zgen.zsh"
 
 # check if there's no init script
 if ! zgen saved; then
@@ -417,15 +417,24 @@ if ! zgen saved; then
     zgen oh-my-zsh plugins/git
     zgen oh-my-zsh plugins/sudo
     zgen oh-my-zsh plugins/command-not-found
-    zgen load maverick2000/zsh2000 zsh2000
-    zgen load thvitt/tvline tvline
-    zgen load zsh-users/zsh-syntax-highlighting
+    zgen load maverick2000/zsh2000
+    # zgen load thvitt/tvline
+    # zgen load zsh-users/zsh-syntax-highlighting
     zgen load zsh-users/zsh-autosuggestions
+    zgen load zsh-users/zsh-completions
+    zgen load zsh-users/zsh-history-substring-search
+    zgen load zsh-users/zsh-syntax-highlighting
 
     # bulk load
     zgen loadall <<EOPLUGINS
-        zsh-users/zsh-history-substring-search
-
+	  zsh-users/zsh-history-substring-search
+	  maverick2000/zsh2000
+	  thvitt/tvline
+	  zsh-users/zsh-syntax-highlighting
+	  zsh-users/zsh-autosuggestions
+	  zsh-users/zsh-completions
+	  zsh-users/zsh-history-substring-search
+	  zsh-users/zsh-syntax-highlighting
 EOPLUGINS
     # ^ can't indent this EOPLUGINS
 
@@ -433,7 +442,7 @@ EOPLUGINS
     zgen load zsh-users/zsh-completions src
 
     # theme
-    zgen oh-my-zsh themes/tvline
+    zgen oh-my-zsh themes/agnoster
 
     # save all to init script
     zgen save
@@ -470,6 +479,6 @@ export VISUAL=/usr/bin/vim
 
 export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
 
-if [[ $TERMINIX_ID ]]; then
-       source /etc/profile.d/vte.sh
-fi
+#if [[ $TERMINIX_ID ]]; then
+#       source /etc/profile.d/vte.sh
+#fi
