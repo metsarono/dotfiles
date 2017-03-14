@@ -19,6 +19,7 @@ homebrew install git stow
 ### Clone dotfiles
 ```bash
 git clone --recursive https://github.com/metsarono/dotfiles.git ~/.dotfiles
+git submodule update --recursive --remote
 cd ~/.dotfiles
 ```
 
