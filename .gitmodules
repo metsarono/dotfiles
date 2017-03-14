@@ -81,3 +81,7 @@
 [submodule "all/.zgen/zsh-users/zsh-syntax-highlighting-master"]
     path = all/.zgen/zsh-users/zsh-syntax-highlighting-master
     url = git://github.com/zsh-users/zsh-syntax-highlighting.git
+
+[submodule "all/.zgen/zsh-users/zsh-autosuggestions"]
+    path = all/.zgen/zsh-users/zsh-autosuggestions
+    url = git://github.com/zsh-users/zsh-autosuggestions
