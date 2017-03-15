@@ -442,7 +442,7 @@ EOPLUGINS
     zgen load zsh-users/zsh-completions src
 
     # theme
-    zgen oh-my-zsh themes/agnoster
+    zgen oh-my-zsh /custom/themes/tvline
 
     # save all to init script
     zgen save
