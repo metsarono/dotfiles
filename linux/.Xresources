@@ -40,8 +40,8 @@ URxvt.cursorColor:#505050
 *color15: #C5C8C6
 
 !Fonts
-!URxvt*font:xft:EnvyCodeR:pixelsize=11:antialias=true:hinting=true,xft:Inconsolata-g:pixelsize=11:antialias=true:hinting=true
-!urxvt*font: xft:Terminus:pixelsize=12,xft:Inconsolata\ for\ Powerline:pixelsize=12
+URxvt*font:xft:EnvyCodeR:pixelsize=11:antialias=true:hinting=true,xft:Inconsolata-g:pixelsize=11:antialias=true:hinting=true
+urxvt*font: xft:Terminus:pixelsize=12,xft:Inconsolata\ for\ Powerline:pixelsize=12
 URxvt*font: xft:Terminess Powerline:size=12
 
 !Say no to scrollbars
