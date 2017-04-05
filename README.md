@@ -31,22 +31,16 @@ git submodule update --recursive --remote
 #### MacOS
 ```stow all osx```
 
-### Installing vim and zsh
+### Installing tools
 #### Arch
-```sudo pacman -S vim zsh```
+```sudo pacman -S vim zsh ranger rxvt-unicode```
 #### Debian
-```sudo apt install vim zsh```
+```sudo apt install vim zsh ranger rxvt-unicode```
 #### MacOS
-```homebrew install vim zsh```
+```homebrew install vim zsh ranger```
 
 ### Updating fonts
 ```fc-cache -f $fond_dir```
-
-### Installing Rxvt-Unicode
-#### Arch
-```sudo pacman -S rxvt-unicode```
-#### Debian
-```sudo apt install rxvt-unicode```
 
 #### Load .Xresources
 ```xrdb ~/.Xresources```

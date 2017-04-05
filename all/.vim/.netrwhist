@@ -1,2 +1,10 @@
 let g:netrw_dirhistmax  =10
-let g:netrw_dirhist_cnt =0
+let g:netrw_dirhist_cnt =8
+let g:netrw_dirhist_1='/home/dolch/.dotfiles/linux/.config/Brackets/extensions/user/brackets-beautify'
+let g:netrw_dirhist_2='/home/dolch/.dotfiles/linux/.config/Brackets/extensions/user'
+let g:netrw_dirhist_3='/home/dolch/.dotfiles/linux/.config/Brackets/extensions'
+let g:netrw_dirhist_4='/home/dolch/.dotfiles/linux/.config/Brackets'
+let g:netrw_dirhist_5='/home/dolch/.dotfiles/linux/.config'
+let g:netrw_dirhist_6='/home/dolch/.dotfiles/linux'
+let g:netrw_dirhist_7='/home/dolch/.dotfiles'
+let g:netrw_dirhist_8='/home/dolch/.dotfiles/linux/.config/Brackets/extensions/user/brackets-beautify'
