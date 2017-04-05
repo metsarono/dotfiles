@@ -58,7 +58,7 @@ urxvt*foreground: #C5C8C6
 urxvt*background: #333333
 
 *color0:  #2E3436
-*color1:  #a40000
+*color1:  #EF2929
 *color2:  #4E9A06
 *color3:  #C4A000
 *color4:  #3465A4
