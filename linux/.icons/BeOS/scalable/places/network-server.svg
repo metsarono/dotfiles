@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 20010904//EN"
+"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">
+<!-- Created with Sodipodi ("http://www.sodipodi.com/") -->
+<svg
+   width="48pt"
+   height="48pt"
+   viewBox="0 0 44.375 47.844"
+   overflow="visible"
+   enable-background="new 0 0 44.375 47.844"
+   xml:space="preserve"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:xml="http://www.w3.org/XML/1998/namespace"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   id="svg153"
+   sodipodi:version="0.32pre"
+   sodipodi:docname="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/filesystems/gnome-fs-server.svg"
+   sodipodi:docbase="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/filesystems">
+  <defs
+     id="defs198" />
+  <sodipodi:namedview
+     id="base" />
+  <metadata
+     id="metadata154">
+    <sfw>
+      <slices />
+      <sliceSourceBounds
+         y="395.578"
+         x="274.313"
+         width="44.375"
+         height="47.844"
+         bottomLeftOrigin="true" />
+    </sfw>
+  </metadata>
+  <g
+     id="Layer_1"
+     stroke="#000000">
+    <path
+       stroke="none"
+       d="M0,15.305v24.099l19.453,8.439l17.113-15.306V8.437L17.114,0L0,15.305z"
+       id="path156" />
+    <path
+       opacity="0.2"
+       stroke="none"
+       d="M36.566,32.538L19.453,47.844h7.809l17.113-15.306v-3.721l-7.882-3.368L36.566,32.538z"
+       id="path157" />
+    <linearGradient
+       id="XMLID_1_"
+       gradientUnits="userSpaceOnUse"
+       x1="-218.9131"
+       y1="382.7295"
+       x2="-220.1799"
+       y2="395.397"
+       gradientTransform="matrix(1 0 0 -1 238.1123 404.3906)">
+      <stop
+         offset="0"
+         style="stop-color:#F2F2F2"
+         id="stop159" />
+      <stop
+         offset="0.3121"
+         style="stop-color:#EEEEEE"
+         id="stop160" />
+      <stop
+         offset="0.6646"
+         style="stop-color:#E0E0E0"
+         id="stop161" />
+      <stop
+         offset="1"
+         style="stop-color:#CCCCCC"
+         id="stop162" />
+    </linearGradient>
+    <path
+       fill="url(#XMLID_1_)"
+       stroke="none"
+       d="M19.222,23.633L1.193,15.812l3.196-2.859l0.465,0.238l-0.02-0.635l12.51-11.187    l18.028,7.819L19.222,23.633z"
+       id="path170" />
+    <linearGradient
+       id="XMLID_2_"
+       gradientUnits="userSpaceOnUse"
+       x1="-219.2583"
+       y1="357.71"
+       x2="-227.888"
+       y2="373.2156"
+       gradientTransform="matrix(1 0 0 -1 238.1123 404.3906)">
+      <stop
+         offset="0"
+         style="stop-color:#E6E6E6"
+         id="stop172" />
+      <stop
+         offset="0.621"
+         style="stop-color:#C7C7C7"
+         id="stop173" />
+      <stop
+         offset="1"
+         style="stop-color:#B3B3B3"
+         id="stop174" />
+    </linearGradient>
+    <path
+       fill="url(#XMLID_2_)"
+       stroke="none"
+       d="M19.222,46.477L7.332,41.3l-0.013-0.446L6.596,41l-5.403-2.345V15.812l5.397,2.342    l0.79,0.018l-0.046,0.305l11.887,5.157V46.477z"
+       id="path180" />
+    <path
+       opacity="0.3"
+       stroke="none"
+       d="M7.319,40.854l-0.745,0.055V18.175l0.806-0.004L7.319,18.5V40.854z"
+       id="path181" />
+    <path
+       opacity="0.6"
+       fill="#FFFFFF"
+       stroke="none"
+       d="M8.077,41.623L7.332,41.3V18.474l0.745,0.324V41.623z"
+       id="path182" />
+    <linearGradient
+       id="XMLID_3_"
+       gradientUnits="userSpaceOnUse"
+       x1="-207.103"
+       y1="373.6504"
+       x2="-216.1694"
+       y2="380.7523"
+       gradientTransform="matrix(1 0 0 -1 238.1123 404.3906)">
+      <stop
+         offset="0"
+         style="stop-color:#999999"
+         id="stop184" />
+      <stop
+         offset="0.6839"
+         style="stop-color:#7B7B7B"
+         id="stop185" />
+      <stop
+         offset="1"
+         style="stop-color:#6B6B6B"
+         id="stop186" />
+    </linearGradient>
+    <path
+       fill="url(#XMLID_3_)"
+       stroke="none"
+       d="M35.373,32.032l-12.581,11.25l-0.573-0.296l0.017,0.792l-3.015,2.698V23.633    L35.372,9.187L35.373,32.032z"
+       id="path192" />
+    <path
+       opacity="0.6"
+       fill="#FFFFFF"
+       stroke="none"
+       d="M4.883,12.514l17.904,7.943v22.848l0.78-0.697V19.789L5.424,12.058    L4.883,12.514z"
+       id="path193" />
+    <path
+       opacity="0.6"
+       fill="#FFFFFF"
+       stroke="none"
+       d="M1.193,15.812l0.003,0.665l5.389,2.333l-0.01-0.634l0.806-0.004L7.32,19.128    l11.913,5.156l0.033-0.603l0.51-0.503L1.632,15.448L1.193,15.812z"
+       id="path194" />
+    <path
+       opacity="0.3"
+       stroke="none"
+       d="M4.854,13.19l17.365,7.728v22.068l0.567,0.289V20.457L4.833,12.554L4.854,13.19z"
+       id="path195" />
+    <path
+       fill="#FFFFFF"
+       stroke="none"
+       d="M17.073,27.898l-4.021-1.921v-3.011l4.021,1.922V27.898z"
+       id="path196" />
+  </g>
+</svg>

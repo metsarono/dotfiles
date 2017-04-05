@@ -1,3 +1,46 @@
+XTerm*background:         black
+XTerm*foreground:         white
+XTerm*cursorColor:        white
+XTerm*VT100.geometry:     80x25
+
+! XTerm*faceName:           Terminus:style=Regular:size=10
+! XTerm*font:              -*-dina-medium-r-*-*-16-*-*-*-*-*-*-*
+! These lines you do not need ... 
+
+XTerm*font:                 Inconsolata-g-10
+XTerm*dynamicColors:      true
+XTerm*utf8:               2
+XTerm*eightBitInput:      true
+XTerm*saveLines:          512
+XTerm*scrollKey:          true
+XTerm*scrollTtyOutput:    false
+XTerm*scrollBar:          true
+XTerm*rightScrollBar:     true
+XTerm*jumpScroll:         true
+XTerm*multiScroll:        true
+XTerm*toolBar:            false
+
+UXTerm*background:         black
+UXTerm*foreground:         white
+UXTerm*cursorColor:        white
+UXTerm*VT100.geometry:     90x30
+
+! UXTerm*faceName:           Terminus:style=Regular:size=10
+! UXTerm*font:              -*-dina-medium-r-*-*-16-*-*-*-*-*-*-*
+
+UXTerm*font:                Inconsolata-g-10
+UXTerm*dynamicColors:      true
+UXTerm*utf8:               2
+UXTerm*eightBitInput:      true
+UXTerm*saveLines:          512
+UXTerm*scrollKey:          true
+UXTerm*scrollTtyOutput:    false
+UXTerm*scrollBar:          true
+UXTerm*rightScrollBar:     true
+UXTerm*jumpScroll:         true
+UXTerm*multiScroll:        true
+UXTerm*toolBar:            false
+
 URxvt*termName:rxvt-unicode-256color
 Xft.antialias:  true
 !Xft.autohint:   true
@@ -8,7 +51,6 @@ Xft.rgba:       rgb
 Xft.dpi:        96
 
 URxvt*transparent:false
-
 
 URxvt.cursorColor:#505050
 *background: #333333
@@ -40,20 +82,17 @@ URxvt.cursorColor:#505050
 *color15: #C5C8C6
 
 !Fonts
-URxvt*font:xft:EnvyCodeR:pixelsize=11:antialias=true:hinting=true,xft:Inconsolata-g:pixelsize=11:antialias=true:hinting=true
-urxvt*font: xft:Terminus:pixelsize=12,xft:Inconsolata\ for\ Powerline:pixelsize=12
-URxvt*font: xft:Terminess Powerline:size=12
+URxvt*font: xft:Inconsolata\ for\ Powerline:pixelsize=14
 
 !Say no to scrollbars
 URxvt*scrollBar:false
 
-
 ! Size of my terminal
-URxvt.geometry:90x20+890+630
+URxvt.geometry:98x36+800+570
 URxvt.imLocale:en_US.UTF8
 
 URxvt*skipBuiltinGlyphs: true
-!
+
 ! Amount that I can scroll up
 URxvt.saveLines: 12000
 

@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   version="1.1"
+   width="107.762"
+   height="121.41"
+   viewBox="0 0 107.762 121.41"
+   id="svg2"
+   xml:space="preserve"
+   style="overflow:visible"><defs
+   id="defs57" />
+		<g
+   id="Layer_1_2_">
+			<path
+   d="M 9.613,28.812 0.001,24.9 l 2.935,75.102 46.48,21.408 c 0,0 0.307,-7.803 0.427,-10.914 5.097,2.349 19.467,8.967 19.467,8.967 L 72.952,26.236 8.487,0 9.613,28.812 z"
+   id="path5" />
+			<polygon
+   points="48.477,121.357 60.418,115.525 69.31,119.462 107.762,89.841 107.335,81.942 69.243,79.563 48.634,85.123 "
+   id="polygon7"
+   style="opacity:0.2" />
+			<g
+   id="g9">
+				
+					<linearGradient
+   x1="-302.7363"
+   y1="334.14789"
+   x2="-308.42169"
+   y2="294.35172"
+   id="XMLID_103_"
+   gradientUnits="userSpaceOnUse"
+   gradientTransform="matrix(1,0,0,-1,346.6191,360.2041)">
+					<stop
+   id="stop12"
+   style="stop-color:#fdfebb;stop-opacity:1"
+   offset="0" />
+					<stop
+   id="stop14"
+   style="stop-color:#ffeb60;stop-opacity:1"
+   offset="1" />
+					<midPointStop
+   id="midPointStop16"
+   style="stop-color:#FDFEBB"
+   offset="0" />
+					<midPointStop
+   id="midPointStop18"
+   style="stop-color:#FDFEBB"
+   offset="0.5" />
+					<midPointStop
+   id="midPointStop20"
+   style="stop-color:#FFEB60"
+   offset="1" />
+				</linearGradient>
+				<polygon
+   points="15.054,91.171 11.667,4.533 69.87,28.221 66.486,114.859 "
+   id="polygon22"
+   style="fill:url(#XMLID_103_)" />
+			</g>
+			<polygon
+   points="48.476,119.875 51.327,46.869 1.061,26.411 3.909,99.35 "
+   id="polygon24" />
+			<g
+   id="g26"
+   style="opacity:0.2">
+				<g
+   id="g28">
+					<polygon
+   points="59.976,114.701 63.327,43.488 11.73,21.696 15.41,94.177 "
+   id="polygon30"
+   style="fill:#3d3d3d" />
+				</g>
+			</g>
+			<polygon
+   points="2.936,100.001 49.416,121.41 52.354,46.207 0,24.9 0.183,29.55 "
+   id="polygon32" />
+			<g
+   id="g34">
+				
+					<linearGradient
+   x1="-346.6709"
+   y1="261.1665"
+   x2="-289.61929"
+   y2="320.45551"
+   id="XMLID_104_"
+   gradientUnits="userSpaceOnUse"
+   gradientTransform="matrix(1,0,0,-1,346.6191,360.2041)">
+					<stop
+   id="stop37"
+   style="stop-color:#d9d8ff;stop-opacity:1"
+   offset="0.0056" />
+					<stop
+   id="stop39"
+   style="stop-color:#fdfeed;stop-opacity:1"
+   offset="0.514" />
+					<stop
+   id="stop41"
+   style="stop-color:#9a99cd;stop-opacity:1"
+   offset="1" />
+					<midPointStop
+   id="midPointStop43"
+   style="stop-color:#D9D8FF"
+   offset="0.0056" />
+					<midPointStop
+   id="midPointStop45"
+   style="stop-color:#D9D8FF"
+   offset="0.5" />
+					<midPointStop
+   id="midPointStop47"
+   style="stop-color:#FDFEED"
+   offset="0.514" />
+					<midPointStop
+   id="midPointStop49"
+   style="stop-color:#FDFEED"
+   offset="0.5" />
+					<midPointStop
+   id="midPointStop51"
+   style="stop-color:#9A99CD"
+   offset="1" />
+				</linearGradient>
+				<polygon
+   points="5.86,98.046 3.181,29.433 49.274,48.193 46.595,116.807 "
+   id="polygon53"
+   style="fill:url(#XMLID_104_)" />
+			</g>
+		</g>
+	</svg>

@@ -1,0 +1,1608 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 20010904//EN"
+"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">
+<!-- Created with Sodipodi ("http://www.sodipodi.com/") -->
+<svg
+   width="48pt"
+   height="48pt"
+   viewBox="-0.169 0.151 118 117"
+   overflow="visible"
+   enable-background="new -0.169 0.151 118 117"
+   xml:space="preserve"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:xml="http://www.w3.org/XML/1998/namespace"
+   xmlns:a="http://ns.adobe.com/AdobeSVGViewerExtensions/3.0/"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   id="svg548"
+   sodipodi:version="0.32"
+   sodipodi:docname="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/apps/gnome-home.svg"
+   sodipodi:docbase="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/apps">
+  <defs
+     id="defs896" />
+  <sodipodi:namedview
+     id="base" />
+  <g
+     id="Layer_1_2_">
+    <path
+       d="M60.396,3.452c0,0-0.236,1.209-0.459,2.328c-3.622-1.475-13.76-5.602-13.76-5.602s0.622,11.186,0.879,15.812    C43.04,14.358,32.232,9.96,32.232,9.96l15.27,54.832l49.505,22.559l3.467-2.906l12.74-61.757l-1.379-9.095L92.636,8.001    c0,0-3.066,2.006-4.383,2.867C85.737,9.861,61.079,0,61.079,0L60.396,3.452z"
+       id="path550" />
+    <path
+       opacity="0.2"
+       a:adobe-blending-mode="multiply"
+       d="M97.392,87.255l20.932-19.029l-13.072-8.149L97.392,87.255z"
+       id="path551" />
+    <g
+       id="g552">
+      <path
+         d="M110.245,22.608l-1.02-6.732l-16.117-4.693l-4.527,2.964L63.263,4.021l-1.146,5.8L49.348,4.624l0.88,15.814     l-13.585-5.529l13.312,47.797l45.978,21.175l-0.773-5.101l3.195,1.473L110.245,22.608z"
+         id="path553" />
+    </g>
+    <g
+       id="g554">
+      <linearGradient
+         id="XMLID_1_"
+         gradientUnits="userSpaceOnUse"
+         x1="52.3745"
+         y1="42.1367"
+         x2="110.2451"
+         y2="42.1367">
+        <stop
+           offset="0"
+           style="stop-color:#FFFFFF"
+           id="stop556" />
+        <stop
+           offset="1"
+           style="stop-color:#F1C779"
+           id="stop557" />
+        
+        
+        
+      </linearGradient>
+      <path
+         fill="url(#XMLID_1_)"
+         d="M98.354,80.253l-45.98-21.177L63.263,4.021l25.318,10.126l4.527-2.964l16.117,4.693l1.02,6.732     L98.354,80.253z"
+         id="path561" />
+    </g>
+    <g
+       opacity="0.4"
+       a:adobe-blending-mode="multiply"
+       id="g562">
+      <g
+         a:adobe-blending-mode="normal"
+         id="g563">
+        <defs
+           id="defs564">
+          <path
+             id="XMLID_3_"
+             d="M98.339,81.625l11.369-49.65l-7.914-3.028L98.339,81.625z" />
+        </defs>
+        <clipPath
+           id="XMLID_4_">
+          <use
+             xlink:href="#XMLID_3_"
+             id="use567" />
+        </clipPath>
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#FFFFFF"
+           d="M110.706,33.651l-6.844-5.703h6.844V33.651z"
+           id="path568" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#FFFFFF"
+           d="M110.706,33.702l-6.906-5.754h0.062l6.844,5.703V33.702z"
+           id="path569" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#FEFEFE"
+           d="M110.706,33.753l-6.969-5.805h0.062l6.906,5.754V33.753z"
+           id="path570" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#FDFDFD"
+           d="M110.706,33.804l-7.027-5.855h0.059l6.969,5.805V33.804z"
+           id="path571" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#FCFCFC"
+           d="M103.616,27.948l7.09,5.906v-0.051l-7.027-5.855H103.616z"
+           id="path572" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#FBFBFB"
+           d="M110.706,33.905l-7.148-5.957h0.059l7.09,5.906V33.905z"
+           id="path573" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#FAFAFA"
+           d="M110.706,33.956l-7.211-6.008h0.062l7.148,5.957V33.956z"
+           id="path574" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F9F9F9"
+           d="M110.706,34.007l-7.27-6.059h0.059l7.211,6.008V34.007z"
+           id="path575" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F8F8F8"
+           d="M103.374,27.948l7.332,6.109v-0.051l-7.27-6.059H103.374z"
+           id="path576" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F7F7F7"
+           d="M103.315,27.948l7.391,6.16v-0.051l-7.332-6.109H103.315z"
+           id="path577" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F6F6F6"
+           d="M110.706,34.159l-7.453-6.211h0.062l7.391,6.16V34.159z"
+           id="path578" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F6F6F5"
+           d="M103.19,27.948l7.516,6.262v-0.051l-7.453-6.211H103.19z"
+           id="path579" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F5F4F4"
+           d="M103.132,27.948l7.574,6.312V34.21l-7.516-6.262H103.132z"
+           id="path580" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F4F3F3"
+           d="M110.706,34.312l-7.633-6.363h0.059l7.574,6.312V34.312z"
+           id="path581" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F3F3F3"
+           d="M110.706,34.362l-7.695-6.414h0.062l7.633,6.363V34.362z"
+           id="path582" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F2F1F1"
+           d="M110.706,34.413l-7.758-6.465h0.062l7.695,6.414V34.413z"
+           id="path583" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F1F0F0"
+           d="M110.706,34.464l-7.816-6.516h0.059l7.758,6.465V34.464z"
+           id="path584" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#F0F0EF"
+           d="M102.827,27.948l7.879,6.566v-0.051l-7.816-6.516H102.827z"
+           id="path585" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#EFEEEE"
+           d="M102.769,27.948l7.938,6.617v-0.051l-7.879-6.566H102.769z"
+           id="path586" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#EEEDED"
+           d="M102.706,27.948l8,6.668v-0.051l-7.938-6.617H102.706z"
+           id="path587" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#EDEDED"
+           d="M110.706,34.667l-8.062-6.719h0.062l8,6.668V34.667z"
+           id="path588" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#ECEBEB"
+           d="M110.706,34.714l-8.121-6.766h0.059l8.062,6.719V34.714z"
+           id="path589" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#EBEAEA"
+           d="M110.706,34.769l-8.184-6.82h0.062l8.121,6.766V34.769z"
+           id="path590" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#EAEAE9"
+           d="M110.706,34.815l-8.242-6.867h0.059l8.184,6.82V34.815z"
+           id="path591" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E8E7E8"
+           d="M110.706,34.87l-8.305-6.922h0.062l8.242,6.867V34.87z"
+           id="path592" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E7E6E6"
+           d="M110.706,34.917l-8.363-6.969h0.059l8.305,6.922V34.917z"
+           id="path593" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E6E6E6"
+           d="M110.706,34.968l-8.426-7.02h0.062l8.363,6.969V34.968z"
+           id="path594" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E5E4E4"
+           d="M110.706,35.019l-8.484-7.07h0.059l8.426,7.02V35.019z"
+           id="path595" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E4E4E4"
+           d="M110.706,35.069l-8.547-7.121h0.062l8.484,7.07V35.069z"
+           id="path596" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E3E3E2"
+           d="M102.097,27.948l8.609,7.172v-0.051l-8.547-7.121H102.097z"
+           id="path597" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E3E2E2"
+           d="M110.706,35.171l-8.668-7.223h0.059l8.609,7.172V35.171z"
+           id="path598" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E2E1E1"
+           d="M110.706,35.222l-8.727-7.273h0.059l8.668,7.223V35.222z"
+           id="path599" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E1E0E0"
+           d="M110.706,35.272l-8.789-7.324h0.062l8.727,7.273V35.272z"
+           id="path600" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#E0DFDF"
+           d="M101.854,27.948l8.852,7.375v-0.051l-8.789-7.324H101.854z"
+           id="path601" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#DFDFDF"
+           d="M110.706,35.374l-8.914-7.426h0.062l8.852,7.375V35.374z"
+           id="path602" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#DDDDDD"
+           d="M101.733,27.948l8.973,7.477v-0.051l-8.914-7.426H101.733z"
+           id="path603" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#DCDCDC"
+           d="M101.675,27.948l9.031,7.527v-0.051l-8.973-7.477H101.675z"
+           id="path604" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#DBDBDA"
+           d="M110.706,35.526l-9.094-7.578h0.062l9.031,7.527V35.526z"
+           id="path605" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#DAD9D9"
+           d="M110.706,35.577l-9.156-7.629h0.062l9.094,7.578V35.577z"
+           id="path606" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D9D8D8"
+           d="M110.706,35.628l-9.215-7.68h0.059l9.156,7.629V35.628z"
+           id="path607" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D8D8D7"
+           d="M110.706,35.679l-9.277-7.73h0.062l9.215,7.68V35.679z"
+           id="path608" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D7D7D7"
+           d="M101.37,27.948l9.336,7.781v-0.051l-9.277-7.73H101.37z"
+           id="path609" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D6D5D5"
+           d="M110.706,35.78l-9.398-7.832h0.062l9.336,7.781V35.78z"
+           id="path610" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D5D5D5"
+           d="M110.706,35.831l-9.457-7.883h0.059l9.398,7.832V35.831z"
+           id="path611" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D5D4D4"
+           d="M110.706,35.882l-9.52-7.934h0.062l9.457,7.883V35.882z"
+           id="path612" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D4D3D3"
+           d="M110.706,35.933l-9.578-7.984h0.059l9.52,7.934V35.933z"
+           id="path613" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D3D2D2"
+           d="M110.706,35.983l-9.641-8.035h0.062l9.578,7.984V35.983z"
+           id="path614" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D2D1D2"
+           d="M110.706,36.034l-9.703-8.086h0.062l9.641,8.035V36.034z"
+           id="path615" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#D0D0D0"
+           d="M110.706,36.085l-9.762-8.137h0.059l9.703,8.086V36.085z"
+           id="path616" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#CFCFCE"
+           d="M110.706,36.136l-9.82-8.188h0.059l9.762,8.137V36.136z"
+           id="path617" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#CECDCE"
+           d="M110.706,36.183l-9.883-8.234h0.062l9.82,8.188V36.183z"
+           id="path618" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#CDCDCD"
+           d="M110.706,36.233l-9.945-8.285h0.062l9.883,8.234V36.233z"
+           id="path619" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#CCCCCC"
+           d="M100.702,27.948l10.004,8.336v-0.051l-9.945-8.285H100.702z"
+           id="path620" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#CCCBCB"
+           d="M100.64,27.948l10.066,8.387v-0.051l-10.004-8.336H100.64z"
+           id="path621" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#CACACA"
+           d="M100.581,27.948l10.125,8.438v-0.051l-10.066-8.387H100.581z"
+           id="path622" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C9C9C8"
+           d="M100.519,27.948l10.188,8.488v-0.051l-10.125-8.438H100.519z"
+           id="path623" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C8C7C7"
+           d="M110.706,36.487l-10.25-8.539h0.062l10.188,8.488V36.487z"
+           id="path624" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C7C7C7"
+           d="M110.706,36.538l-10.309-8.59h0.059l10.25,8.539V36.538z"
+           id="path625" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C6C6C6"
+           d="M110.706,36.589l-10.367-8.641h0.059l10.309,8.59V36.589z"
+           id="path626" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C5C5C5"
+           d="M110.706,36.64l-10.43-8.691h0.062l10.367,8.641V36.64z"
+           id="path627" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C4C4C4"
+           d="M110.706,36.69l-10.492-8.742h0.062l10.43,8.691V36.69z"
+           id="path628" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C2C2C3"
+           d="M100.155,27.948l10.551,8.793V36.69l-10.492-8.742H100.155z"
+           id="path629" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C2C2C2"
+           d="M110.706,36.792l-10.613-8.844h0.062l10.551,8.793V36.792z"
+           id="path630" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C1C1C0"
+           d="M110.706,36.843l-10.672-8.895h0.059l10.613,8.844V36.843z"
+           id="path631" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#C0C0C0"
+           d="M100.022,27.948l-0.02,0.023l10.703,8.922v-0.051l-10.672-8.895H100.022z"
+           id="path632" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#BFBFBF"
+           d="M110.706,36.944l-10.727-8.941l0.023-0.031l10.703,8.922V36.944z"
+           id="path633" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#BEBEBE"
+           d="M110.706,36.995L99.952,28.03l0.027-0.027l10.727,8.941V36.995z"
+           id="path634" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#BDBCBC"
+           d="M110.706,37.046l-10.777-8.984l0.023-0.031l10.754,8.965V37.046z"
+           id="path635" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#BCBCBC"
+           d="M110.706,37.097l-10.805-9.008l0.027-0.027l10.777,8.984V37.097z"
+           id="path636" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#BBBBBB"
+           d="M99.901,28.089l-0.023,0.031l10.828,9.027v-0.051L99.901,28.089z"
+           id="path637" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#BBBBBA"
+           d="M110.706,37.198l-10.852-9.047l0.023-0.031l10.828,9.027V37.198z"
+           id="path638" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B9B9B9"
+           d="M110.706,37.249l-10.879-9.066l0.027-0.031l10.852,9.047V37.249z"
+           id="path639" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B8B8B8"
+           d="M110.706,37.3l-10.902-9.09l0.023-0.027l10.879,9.066V37.3z"
+           id="path640" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B7B7B7"
+           d="M99.804,28.21l-0.027,0.031l10.93,9.109V37.3L99.804,28.21z"
+           id="path641" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B6B6B6"
+           d="M110.706,37.401l-10.953-9.133l0.023-0.027l10.93,9.109V37.401z"
+           id="path642" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B4B4B4"
+           d="M99.753,28.269L99.729,28.3l10.977,9.152v-0.051L99.753,28.269z"
+           id="path643" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B4B4B4"
+           d="M110.706,37.503l-11.004-9.172l0.027-0.031l10.977,9.152V37.503z"
+           id="path644" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B3B3B3"
+           d="M99.702,28.331l-0.023,0.027l11.027,9.191v-0.047L99.702,28.331z"
+           id="path645" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B2B2B2"
+           d="M110.706,37.604L99.651,28.39l0.027-0.031l11.027,9.191V37.604z"
+           id="path646" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B1B1B1"
+           d="M110.706,37.651l-11.078-9.23l0.023-0.031l11.055,9.215V37.651z"
+           id="path647" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#B0B0AF"
+           d="M110.706,37.702l-11.102-9.254l0.023-0.027l11.078,9.23V37.702z"
+           id="path648" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#AFAFAF"
+           d="M110.706,37.753l-11.125-9.273l0.023-0.031l11.102,9.254V37.753z"
+           id="path649" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#ADADAD"
+           d="M110.706,37.804l-11.152-9.293l0.027-0.031l11.125,9.273V37.804z"
+           id="path650" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#ADADAD"
+           d="M110.706,37.854L99.53,28.538l0.023-0.027l11.152,9.293V37.854z"
+           id="path651" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#ACACAC"
+           d="M110.706,37.905l-11.203-9.336l0.027-0.031l11.176,9.316V37.905z"
+           id="path652" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#ABABAB"
+           d="M110.706,37.956l-11.227-9.355l0.023-0.031l11.203,9.336V37.956z"
+           id="path653" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#AAA9AA"
+           d="M99.479,28.601l-0.023,0.027l11.25,9.379v-0.051L99.479,28.601z"
+           id="path654" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A9A9A9"
+           d="M110.706,38.058l-11.277-9.398l0.027-0.031l11.25,9.379V38.058z"
+           id="path655" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A8A8A8"
+           d="M110.706,38.108L99.405,28.69l0.023-0.031l11.277,9.398V38.108z"
+           id="path656" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A7A7A7"
+           d="M110.706,38.159l-11.328-9.441l0.027-0.027l11.301,9.418V38.159z"
+           id="path657" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A6A6A6"
+           d="M110.706,38.21l-11.352-9.461l0.023-0.031l11.328,9.441V38.21z"
+           id="path658" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A5A4A5"
+           d="M110.706,38.261l-11.375-9.484l0.023-0.027l11.352,9.461V38.261z"
+           id="path659" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A4A4A4"
+           d="M99.331,28.776l-0.027,0.031l11.402,9.504v-0.051L99.331,28.776z"
+           id="path660" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A4A3A3"
+           d="M110.706,38.362L99.28,28.839l0.023-0.031l11.402,9.504V38.362z"
+           id="path661" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A2A2A2"
+           d="M110.706,38.413L99.253,28.87l0.027-0.031l11.426,9.523V38.413z"
+           id="path662" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A1A1A1"
+           d="M99.253,28.87l-0.023,0.027l11.477,9.566v-0.051L99.253,28.87z"
+           id="path663" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#A09FA0"
+           d="M110.706,38.515l-11.5-9.586l0.023-0.031l11.477,9.566V38.515z"
+           id="path664" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#9F9F9F"
+           d="M110.706,38.565l-11.523-9.609l0.023-0.027l11.5,9.586V38.565z"
+           id="path665" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#9F9E9E"
+           d="M110.706,38.616l-11.551-9.629l0.027-0.031l11.523,9.609V38.616z"
+           id="path666" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#9D9D9D"
+           d="M110.706,38.667l-11.574-9.648l0.023-0.031l11.551,9.629V38.667z"
+           id="path667" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#9C9C9C"
+           d="M110.706,38.718l-11.602-9.672l0.027-0.027l11.574,9.648V38.718z"
+           id="path668" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#9B9A9A"
+           d="M110.706,38.769l-11.625-9.691l0.023-0.031l11.602,9.672V38.769z"
+           id="path669" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#9A9A9A"
+           d="M110.706,38.819l-11.648-9.711l0.023-0.031l11.625,9.691V38.819z"
+           id="path670" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#9A9999"
+           d="M99.058,29.108l-0.027,0.027l11.676,9.734v-0.051L99.058,29.108z"
+           id="path671" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#989898"
+           d="M99.03,29.136l-0.023,0.031l11.699,9.75V38.87L99.03,29.136z"
+           id="path672" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#979797"
+           d="M110.706,38.972l-11.727-9.773l0.027-0.031l11.699,9.75V38.972z"
+           id="path673" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#969595"
+           d="M98.979,29.198l-0.023,0.027l11.75,9.793v-0.047L98.979,29.198z"
+           id="path674" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#969595"
+           d="M110.706,39.069l-11.773-9.812l0.023-0.031l11.75,9.793V39.069z"
+           id="path675" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#949494"
+           d="M98.933,29.257l-0.027,0.027l11.801,9.836v-0.051L98.933,29.257z"
+           id="path676" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#939392"
+           d="M110.706,39.171l-11.824-9.855l0.023-0.031l11.801,9.836V39.171z"
+           id="path677" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#929292"
+           d="M110.706,39.222l-11.852-9.875l0.027-0.031l11.824,9.855V39.222z"
+           id="path678" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#919191"
+           d="M110.706,39.272l-11.875-9.895l0.023-0.031l11.852,9.875V39.272z"
+           id="path679" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#909090"
+           d="M110.706,39.323l-11.898-9.918l0.023-0.027l11.875,9.895V39.323z"
+           id="path680" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#8F8E8F"
+           d="M110.706,39.374l-11.922-9.938l0.023-0.031l11.898,9.918V39.374z"
+           id="path681" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#8E8E8E"
+           d="M110.706,39.425l-11.949-9.961l0.027-0.027l11.922,9.938V39.425z"
+           id="path682" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#8D8D8D"
+           d="M110.706,39.476l-11.973-9.98l0.023-0.031l11.949,9.961V39.476z"
+           id="path683" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#8C8C8C"
+           d="M110.706,39.526l-12-10l0.027-0.031l11.973,9.98V39.526z"
+           id="path684" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#8B8B8B"
+           d="M98.706,29.526l-0.023,0.027l12.023,10.023v-0.051L98.706,29.526z"
+           id="path685" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#89898A"
+           d="M110.706,39.628L98.659,29.585l0.023-0.031l12.023,10.023V39.628z"
+           id="path686" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#898989"
+           d="M110.706,39.679L98.632,29.616l0.027-0.031l12.047,10.043V39.679z"
+           id="path687" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#888888"
+           d="M110.706,39.729L98.608,29.644l0.023-0.027l12.074,10.062V39.729z"
+           id="path688" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#878787"
+           d="M110.706,39.78L98.581,29.675l0.027-0.031l12.098,10.086V39.78z"
+           id="path689" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#868686"
+           d="M98.581,29.675l-0.023,0.031l12.148,10.125V39.78L98.581,29.675z"
+           id="path690" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#858585"
+           d="M110.706,39.882L98.534,29.733l0.023-0.027l12.148,10.125V39.882z"
+           id="path691" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#848484"
+           d="M110.706,39.933L98.507,29.765l0.027-0.031l12.172,10.148V39.933z"
+           id="path692" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#838383"
+           d="M98.507,29.765l-0.023,0.031l12.223,10.188v-0.051L98.507,29.765z"
+           id="path693" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#828282"
+           d="M110.706,40.034l-12.25-10.211l0.027-0.027l12.223,10.188V40.034z"
+           id="path694" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#818080"
+           d="M110.706,40.085l-12.273-10.23l0.023-0.031l12.25,10.211V40.085z"
+           id="path695" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#808080"
+           d="M110.706,40.136l-12.297-10.25l0.023-0.031l12.273,10.23V40.136z"
+           id="path696" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#7E7E7E"
+           d="M110.706,40.187l-12.32-10.273l0.023-0.027l12.297,10.25V40.187z"
+           id="path697" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#7C7C7D"
+           d="M110.706,40.237L98.358,29.944l0.027-0.031l12.32,10.273V40.237z"
+           id="path698" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#7C7C7C"
+           d="M110.706,40.284L98.335,29.972l0.023-0.027l12.348,10.293V40.284z"
+           id="path699" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#7B7B7B"
+           d="M110.706,40.339L98.308,30.003l0.027-0.031l12.371,10.312V40.339z"
+           id="path700" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#7A7A7A"
+           d="M110.706,40.386L98.284,30.034l0.023-0.031l12.398,10.336V40.386z"
+           id="path701" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#797979"
+           d="M110.706,40.437L98.261,30.065l0.023-0.031l12.422,10.352V40.437z"
+           id="path702" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#787778"
+           d="M110.706,40.487L98.233,30.093l0.027-0.027l12.445,10.371V40.487z"
+           id="path703" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#777777"
+           d="M110.706,40.538L98.21,30.124l0.023-0.031l12.473,10.395V40.538z"
+           id="path704" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#767676"
+           d="M110.706,40.589L98.183,30.151l0.027-0.027l12.496,10.414V40.589z"
+           id="path705" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#757575"
+           d="M98.183,30.151l-0.023,0.031l12.547,10.457v-0.051L98.183,30.151z"
+           id="path706" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#747474"
+           d="M110.706,40.69l-12.57-10.477l0.023-0.031l12.547,10.457V40.69z"
+           id="path707" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#737373"
+           d="M110.706,40.741l-12.598-10.5l0.027-0.027l12.57,10.477V40.741z"
+           id="path708" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#727272"
+           d="M110.706,40.792l-12.621-10.52l0.023-0.031l12.598,10.5V40.792z"
+           id="path709" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#717171"
+           d="M98.085,30.272l-0.027,0.031l12.648,10.539v-0.051L98.085,30.272z"
+           id="path710" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#707070"
+           d="M110.706,40.894L98.034,30.331l0.023-0.027l12.648,10.539V40.894z"
+           id="path711" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#6F6F6F"
+           d="M110.706,40.944L98.011,30.362l0.023-0.031l12.672,10.562V40.944z"
+           id="path712" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#6E6E6E"
+           d="M110.706,40.995L97.987,30.394l0.023-0.031l12.695,10.582V40.995z"
+           id="path713" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#6D6D6D"
+           d="M110.706,41.046L97.96,30.421l0.027-0.027l12.719,10.602V41.046z"
+           id="path714" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#6C6B6C"
+           d="M110.706,41.097l-12.77-10.645l0.023-0.031l12.746,10.625V41.097z"
+           id="path715" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#6B6B6B"
+           d="M110.706,41.147L97.909,30.483l0.027-0.031l12.77,10.645V41.147z"
+           id="path716" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#6A6A69"
+           d="M110.706,41.198l-12.82-10.688l0.023-0.027l12.797,10.664V41.198z"
+           id="path717" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#696969"
+           d="M110.706,41.249L97.862,30.542l0.023-0.031l12.82,10.688V41.249z"
+           id="path718" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#686868"
+           d="M110.706,41.3L97.835,30.573l0.027-0.031l12.844,10.707V41.3z"
+           id="path719" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#676767"
+           d="M110.706,41.351l-12.895-10.75l0.023-0.027L110.706,41.3V41.351z"
+           id="path720" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#666666"
+           d="M110.706,41.401l-12.922-10.77l0.027-0.031l12.895,10.75V41.401z"
+           id="path721" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#656464"
+           d="M97.784,30.632l-0.023,0.027l12.945,10.793v-0.051L97.784,30.632z"
+           id="path722" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#646464"
+           d="M97.761,30.659l-0.023,0.031l12.969,10.812v-0.051L97.761,30.659z"
+           id="path723" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#636263"
+           d="M110.706,41.554L97.71,30.722l0.027-0.031l12.969,10.812V41.554z"
+           id="path724" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#626261"
+           d="M97.71,30.722l-0.023,0.027l13.02,10.855v-0.051L97.71,30.722z"
+           id="path725" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#616061"
+           d="M110.706,41.651L97.659,30.78l0.027-0.031l13.02,10.855V41.651z"
+           id="path726" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#606060"
+           d="M97.659,30.78l-0.023,0.031l13.07,10.895v-0.055L97.659,30.78z"
+           id="path727" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#5F5F5E"
+           d="M97.636,30.812l-0.023,0.027l13.094,10.914v-0.047L97.636,30.812z"
+           id="path728" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#5E5D5E"
+           d="M110.706,41.804L97.589,30.87l0.023-0.031l13.094,10.914V41.804z"
+           id="path729" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#5D5D5D"
+           d="M110.706,41.854L97.562,30.901l0.027-0.031l13.117,10.934V41.854z"
+           id="path730" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#5C5C5C"
+           d="M110.706,41.905L97.538,30.929l0.023-0.027l13.145,10.953V41.905z"
+           id="path731" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#5B5B5B"
+           d="M110.706,41.956L97.511,30.96l0.027-0.031l13.168,10.977V41.956z"
+           id="path732" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#5A5A5A"
+           d="M110.706,42.007L97.487,30.991l0.023-0.031l13.195,10.996V42.007z"
+           id="path733" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#595959"
+           d="M110.706,42.058L97.464,31.019l0.023-0.027l13.219,11.016V42.058z"
+           id="path734" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#585858"
+           d="M110.706,42.108L97.437,31.05l0.027-0.031l13.242,11.039V42.108z"
+           id="path735" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#575757"
+           d="M97.437,31.05l-0.023,0.031l13.293,11.078v-0.051L97.437,31.05z"
+           id="path736" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#565656"
+           d="M110.706,42.21l-13.32-11.102l0.027-0.027l13.293,11.078V42.21z"
+           id="path737" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#555555"
+           d="M110.706,42.261L97.362,31.14l0.023-0.031l13.32,11.102V42.261z"
+           id="path738" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#555554"
+           d="M110.706,42.312L97.339,31.171v-0.004l0.023-0.027l13.344,11.121V42.312z"
+           id="path739" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#535353"
+           d="M110.706,42.362L97.339,31.222v-0.051l13.367,11.141V42.362z"
+           id="path740" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#525252"
+           d="M110.706,42.413L97.339,31.272v-0.051l13.367,11.141V42.413z"
+           id="path741" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#515151"
+           d="M110.706,42.464L97.339,31.323v-0.051l13.367,11.141V42.464z"
+           id="path742" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#505050"
+           d="M97.339,31.374l13.367,11.141v-0.051L97.339,31.323V31.374z"
+           id="path743" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#4F4F4F"
+           d="M110.706,42.565L97.339,31.425v-0.051l13.367,11.141V42.565z"
+           id="path744" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#4E4E4E"
+           d="M97.339,31.472l13.367,11.145v-0.051L97.339,31.425V31.472z"
+           id="path745" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#4D4D4D"
+           d="M97.339,31.526l13.367,11.141v-0.051L97.339,31.472V31.526z"
+           id="path746" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#4C4C4C"
+           d="M110.706,42.718L97.339,31.573v-0.047l13.367,11.141V42.718z"
+           id="path747" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#4B4B4B"
+           d="M110.706,42.769L97.339,31.628v-0.055l13.367,11.145V42.769z"
+           id="path748" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#4A4A4A"
+           d="M97.339,31.675l13.367,11.145v-0.051L97.339,31.628V31.675z"
+           id="path749" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#494949"
+           d="M110.706,42.87L97.339,31.726v-0.051l13.367,11.145V42.87z"
+           id="path750" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#484848"
+           d="M97.339,31.776l13.367,11.145V42.87L97.339,31.726V31.776z"
+           id="path751" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#474747"
+           d="M97.339,31.827l13.367,11.145v-0.051L97.339,31.776V31.827z"
+           id="path752" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#464646"
+           d="M110.706,43.019L97.339,31.878v-0.051l13.367,11.145V43.019z"
+           id="path753" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#454545"
+           d="M110.706,43.073L97.339,31.929v-0.051l13.367,11.141V43.073z"
+           id="path754" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#444444"
+           d="M110.706,43.12L97.339,31.979v-0.051l13.367,11.145V43.12z"
+           id="path755" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#434343"
+           d="M110.706,43.171L97.339,32.03v-0.051l13.367,11.141V43.171z"
+           id="path756" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#424242"
+           d="M97.339,32.081l13.367,11.141v-0.051L97.339,32.03V32.081z"
+           id="path757" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#414141"
+           d="M97.339,32.132l13.367,11.141v-0.051L97.339,32.081V32.132z"
+           id="path758" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#404040"
+           d="M110.706,43.323L97.339,32.183v-0.051l13.367,11.141V43.323z"
+           id="path759" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#3F3F3F"
+           d="M97.339,32.233l13.367,11.141v-0.051L97.339,32.183V32.233z"
+           id="path760" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#3E3E3E"
+           d="M110.706,43.425L97.339,32.284v-0.051l13.367,11.141V43.425z"
+           id="path761" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#3D3D3D"
+           d="M110.706,43.476L97.339,32.335v-0.051l13.367,11.141V43.476z"
+           id="path762" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#3C3C3C"
+           d="M97.339,32.386l13.367,11.141v-0.051L97.339,32.335V32.386z"
+           id="path763" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#3B3B3B"
+           d="M110.706,43.577L97.339,32.437v-0.051l13.367,11.141V43.577z"
+           id="path764" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#3A3A3A"
+           d="M97.339,32.487l13.367,11.141v-0.051L97.339,32.437V32.487z"
+           id="path765" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#393939"
+           d="M110.706,43.679L97.339,32.538v-0.051l13.367,11.141V43.679z"
+           id="path766" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#383838"
+           d="M110.706,43.729L97.339,32.589v-0.051l13.367,11.141V43.729z"
+           id="path767" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#373737"
+           d="M97.339,32.64l13.367,11.141v-0.051L97.339,32.589V32.64z"
+           id="path768" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#363636"
+           d="M97.339,32.69l13.367,11.141V43.78L97.339,32.64V32.69z"
+           id="path769" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#353535"
+           d="M110.706,43.882L97.339,32.741V32.69l13.367,11.141V43.882z"
+           id="path770" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#343434"
+           d="M110.706,43.933L97.339,32.792v-0.051l13.367,11.141V43.933z"
+           id="path771" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#333333"
+           d="M110.706,43.983L97.339,32.843v-0.051l13.367,11.141V43.983z"
+           id="path772" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#323232"
+           d="M110.706,44.034L97.339,32.894v-0.051l13.367,11.141V44.034z"
+           id="path773" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#313131"
+           d="M110.706,44.085L97.339,32.94v-0.047l13.367,11.141V44.085z"
+           id="path774" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#303030"
+           d="M110.706,44.136L97.339,32.995V32.94l13.367,11.145V44.136z"
+           id="path775" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#2F2F2F"
+           d="M110.706,44.187L97.339,33.042v-0.047l13.367,11.141V44.187z"
+           id="path776" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#2E2E2E"
+           d="M110.706,44.237L97.339,33.097v-0.055l13.367,11.145V44.237z"
+           id="path777" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#2D2D2D"
+           d="M97.339,33.144l13.367,11.145v-0.051L97.339,33.097V33.144z"
+           id="path778" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#2C2C2C"
+           d="M97.339,33.194l13.367,11.145v-0.051L97.339,33.144V33.194z"
+           id="path779" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#2B2B2B"
+           d="M97.339,33.245l13.367,11.145v-0.051L97.339,33.194V33.245z"
+           id="path780" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#2A2A2A"
+           d="M97.339,33.296l13.367,11.145V44.39L97.339,33.245V33.296z"
+           id="path781" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#292929"
+           d="M110.706,44.487L97.339,33.347v-0.051l13.367,11.145V44.487z"
+           id="path782" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#282828"
+           d="M110.706,44.542L97.339,33.397v-0.051l13.367,11.141V44.542z"
+           id="path783" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#272727"
+           d="M110.706,44.589L97.339,33.448v-0.051l13.367,11.145V44.589z"
+           id="path784" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#262626"
+           d="M97.339,33.499l13.367,11.145v-0.055L97.339,33.448V33.499z"
+           id="path785" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#252525"
+           d="M110.706,44.69L97.339,33.55v-0.051l13.367,11.145V44.69z"
+           id="path786" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#242424"
+           d="M110.706,44.741L97.339,33.601V33.55l13.367,11.141V44.741z"
+           id="path787" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#232323"
+           d="M110.706,44.792L97.339,33.651v-0.051l13.367,11.141V44.792z"
+           id="path788" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#222222"
+           d="M110.706,44.843L97.339,33.702v-0.051l13.367,11.141V44.843z"
+           id="path789" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#212121"
+           d="M110.706,44.894L97.339,33.753v-0.051l13.367,11.141V44.894z"
+           id="path790" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#202020"
+           d="M110.706,44.944L97.339,33.804v-0.051l13.367,11.141V44.944z"
+           id="path791" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#1F1F1F"
+           d="M97.339,33.854l13.367,11.141v-0.051L97.339,33.804V33.854z"
+           id="path792" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#1E1E1E"
+           d="M110.706,45.046L97.339,33.905v-0.051l13.367,11.141V45.046z"
+           id="path793" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#1D1D1D"
+           d="M97.339,33.956l13.367,11.141v-0.051L97.339,33.905V33.956z"
+           id="path794" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#1C1C1C"
+           d="M110.706,45.147L97.339,34.007v-0.051l13.367,11.141V45.147z"
+           id="path795" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#1B1B1B"
+           d="M97.339,34.058l13.367,11.141v-0.051L97.339,34.007V34.058z"
+           id="path796" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#1A1A1A"
+           d="M110.706,45.249L97.339,34.108v-0.051l13.367,11.141V45.249z"
+           id="path797" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#191919"
+           d="M110.706,45.3L97.339,34.159v-0.051l13.367,11.141V45.3z"
+           id="path798" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#181818"
+           d="M110.706,45.351L97.339,34.21v-0.051L110.706,45.3V45.351z"
+           id="path799" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#171717"
+           d="M97.339,34.261l13.367,11.141v-0.051L97.339,34.21V34.261z"
+           id="path800" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#161616"
+           d="M110.706,45.452L97.339,34.312v-0.051l13.367,11.141V45.452z"
+           id="path801" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#151515"
+           d="M110.706,45.503L97.339,34.362v-0.051l13.367,11.141V45.503z"
+           id="path802" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#141414"
+           d="M110.706,45.554L97.339,34.409v-0.047l13.367,11.141V45.554z"
+           id="path803" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#131313"
+           d="M110.706,45.604L97.339,34.46v-0.051l13.367,11.145V45.604z"
+           id="path804" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#121212"
+           d="M110.706,45.655L97.339,34.511V34.46l13.367,11.145V45.655z"
+           id="path805" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#111111"
+           d="M97.339,34.562l13.367,11.145v-0.051L97.339,34.511V34.562z"
+           id="path806" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#111110"
+           d="M97.339,34.612l13.367,11.145v-0.051L97.339,34.562V34.612z"
+           id="path807" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#121211"
+           d="M110.706,45.808L97.339,34.663v-0.051l13.367,11.145V45.808z"
+           id="path808" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#131211"
+           d="M110.706,45.854L97.339,34.714v-0.051l13.367,11.145V45.854z"
+           id="path809" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#131211"
+           d="M110.706,45.909L97.339,34.765v-0.051l13.367,11.141V45.909z"
+           id="path810" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#121111"
+           d="M110.706,45.956L97.339,34.815v-0.051l13.367,11.145V45.956z"
+           id="path811" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#111110"
+           d="M97.339,34.866l13.367,11.141v-0.051L97.339,34.815V34.866z"
+           id="path812" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#11100F"
+           d="M97.339,34.917l13.367,11.141v-0.051L97.339,34.866V34.917z"
+           id="path813" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#10100F"
+           d="M110.706,46.108L97.339,34.968v-0.051l13.367,11.141V46.108z"
+           id="path814" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#0F0F0E"
+           d="M110.706,46.159L97.339,35.019v-0.051l13.367,11.141V46.159z"
+           id="path815" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#0E0E0D"
+           d="M110.706,46.21L97.339,35.069v-0.051l13.367,11.141V46.21z"
+           id="path816" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#0D0D0D"
+           d="M110.706,46.261L97.339,35.12v-0.051l13.367,11.141V46.261z"
+           id="path817" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#0C0C0C"
+           d="M97.339,35.171l13.367,11.141v-0.051L97.339,35.12V35.171z"
+           id="path818" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#0C0C0B"
+           d="M110.706,46.362L97.339,35.222v-0.051l13.367,11.141V46.362z"
+           id="path819" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#0A0A0A"
+           d="M97.339,35.272l13.367,11.141v-0.051L97.339,35.222V35.272z"
+           id="path820" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#080808"
+           d="M110.706,46.464L97.339,35.323v-0.051l13.367,11.141V46.464z"
+           id="path821" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           fill="#050404"
+           d="M110.706,46.515L97.339,35.374v-0.051l13.367,11.141V46.515z"
+           id="path822" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           d="M110.706,46.565L97.339,35.425v-0.051l13.367,11.141V46.565z"
+           id="path823" />
+        <path
+           clip-path="url(#XMLID_4_)"
+           d="M110.706,69.909l-10.598,12.715h-2.77V35.425l13.367,11.141V69.909z"
+           id="path824" />
+      </g>
+    </g>
+    <g
+       id="g825">
+      <linearGradient
+         id="XMLID_5_"
+         gradientUnits="userSpaceOnUse"
+         x1="77.0684"
+         y1="19.9146"
+         x2="73.2616"
+         y2="46.5612">
+        <stop
+           offset="0"
+           style="stop-color:#FFFFFF"
+           id="stop827" />
+        <stop
+           offset="0.648"
+           style="stop-color:#EAEB49"
+           id="stop828" />
+        <stop
+           offset="0.807"
+           style="stop-color:#E8E847"
+           id="stop829" />
+        <stop
+           offset="0.9255"
+           style="stop-color:#E0DE42"
+           id="stop830" />
+        <stop
+           offset="1"
+           style="stop-color:#D7D43D"
+           id="stop831" />
+        
+        
+        
+        
+        
+      </linearGradient>
+      <path
+         fill="url(#XMLID_5_)"
+         d="M98.354,80.253l-45.98-21.177L49.348,4.624l52.032,21.177L98.354,80.253z"
+         id="path837" />
+    </g>
+    <path
+       fill="#808080"
+       d="M62.099,9.803c0,0,37.043,15.315,38.273,15.825c-0.072,1.305-2.703,51.148-2.85,53.938    c-0.791-0.4-1.596-0.805-1.596-0.805l-0.879,1.738l3.291,1.126l4.049-57.267L62.495,7.915L62.099,9.803z"
+       id="path838" />
+    <g
+       id="g839">
+      <linearGradient
+         id="XMLID_6_"
+         gradientUnits="userSpaceOnUse"
+         x1="39.0718"
+         y1="22.875"
+         x2="75.4844"
+         y2="54.8057">
+        <stop
+           offset="0"
+           style="stop-color:#FFFFFF"
+           id="stop841" />
+        <stop
+           offset="1"
+           style="stop-color:#F1C779"
+           id="stop842" />
+        
+        
+        
+      </linearGradient>
+      <path
+         fill="url(#XMLID_6_)"
+         d="M95.933,83.881L49.955,62.706L36.643,14.909l52.032,21.176L95.933,83.881z"
+         id="path846" />
+    </g>
+    <path
+       fill="#808080"
+       d="M36.991,16.103c0,0,49.797,20.268,50.803,20.676c0.162,1.069,7.113,46.676,7.113,46.676l2.1,0.881    l-7.453-48.943L36.291,13.697L36.991,16.103z"
+       id="path847" />
+    <path
+       d="M45.478,38.523L23.302,52.346L0.188,69.083L0,80.131c0,0,2.901-2.112,4.041-2.941c0.009,4.864,0.034,19.362,0.034,19.362    v1.859l37.88,18.796l24.667-20.614c0,0,0-11.376,0-13.634c1.258-1.052,4.574-3.823,4.574-3.823v-6.48L47.975,36.968L45.478,38.523    z"
+       id="path848" />
+    <linearGradient
+       id="XMLID_7_"
+       gradientUnits="userSpaceOnUse"
+       x1="19.2388"
+       y1="100.0439"
+       x2="25.1037"
+       y2="93.0061">
+      <stop
+         offset="0"
+         style="stop-color:#BFBFBF"
+         id="stop850" />
+      <stop
+         offset="1"
+         style="stop-color:#555555"
+         id="stop851" />
+      
+      
+      
+    </linearGradient>
+    <path
+       fill="url(#XMLID_7_)"
+       d="M19.538,102.735V80.462l9.533,4.73v22.273L19.538,102.735z"
+       id="path855" />
+    <linearGradient
+       id="XMLID_8_"
+       gradientUnits="userSpaceOnUse"
+       x1="60.6426"
+       y1="98.1416"
+       x2="-44.5459"
+       y2="14.7789">
+      <stop
+         offset="0"
+         style="stop-color:#BFBFBF"
+         id="stop857" />
+      <stop
+         offset="1"
+         style="stop-color:#898989"
+         id="stop858" />
+      
+      
+      
+    </linearGradient>
+    <path
+       fill="url(#XMLID_8_)"
+       d="M63.622,69.853l-22.088,18.46v25.337L63.622,95.19V69.853z"
+       id="path862" />
+    <path
+       fill="#BFBFBF"
+       d="M21.847,81.499l-2.309-0.92v22.156l2.309-1.91V81.499z"
+       id="path863" />
+    <path
+       opacity="0.2"
+       d="M65.382,96.013l-23.399,21.134h14.336l29.963-23.897l-7.872-7.318l-12.273-4.365L65.382,96.013z"
+       id="path864" />
+    <linearGradient
+       id="XMLID_9_"
+       gradientUnits="userSpaceOnUse"
+       x1="44.8535"
+       y1="88.5908"
+       x2="-30.9075"
+       y2="72.0966">
+      <stop
+         offset="0"
+         style="stop-color:#FFFFFF"
+         id="stop866" />
+      <stop
+         offset="1"
+         style="stop-color:#E6E6E6"
+         id="stop867" />
+      
+      
+      
+    </linearGradient>
+    <path
+       fill="url(#XMLID_9_)"
+       d="M24.305,58.338L7.075,71.214v25.338l12.463,6.184V80.462l9.533,4.73v22.273l12.463,6.184V88.312    L24.305,58.338z"
+       id="path871" />
+    <linearGradient
+       id="XMLID_10_"
+       gradientUnits="userSpaceOnUse"
+       x1="36.8979"
+       y1="98.2432"
+       x2="10.6235"
+       y2="59.4555">
+      <stop
+         offset="0"
+         style="stop-color:#F75625"
+         id="stop873" />
+      <stop
+         offset="1"
+         style="stop-color:#FB0F0C"
+         id="stop874" />
+      
+      
+      
+    </linearGradient>
+    <path
+       fill="url(#XMLID_10_)"
+       d="M46.108,91.739L24.978,54.837L3.162,70.633l-0.06,3.529l21.191-15.425l21.815,37.446V91.739z"
+       id="path878" />
+    <path
+       fill="#FB0F0C"
+       d="M68.196,73.546L47.064,41.069L24.978,54.837l21.131,37.168L68.196,73.546z"
+       id="path879" />
+    <linearGradient
+       id="XMLID_11_"
+       gradientUnits="userSpaceOnUse"
+       x1="67.9756"
+       y1="75.6367"
+       x2="46.5123"
+       y2="93.9439">
+      <stop
+         offset="0"
+         style="stop-color:#F75625"
+         id="stop881" />
+      <stop
+         offset="1"
+         style="stop-color:#FB0F0C"
+         id="stop882" />
+      
+      
+      
+    </linearGradient>
+    <path
+       fill="url(#XMLID_11_)"
+       d="M68.196,73.546L46.108,92.005v4.188l22.088-18.46V73.546z"
+       id="path886" />
+    <path
+       opacity="0.2"
+       d="M68.196,73.546L46.108,92.005v4.188l22.088-18.46V73.546z"
+       id="path887" />
+    <path
+       opacity="0.2"
+       d="M24.293,58.737L7.075,71.316l-0.041,2.574L25.42,60.688L24.293,58.737z"
+       id="path888" />
+    <path
+       fill="#EAC510"
+       d="M54.61,55.478l-5.38,4.795v12.775l5.38-4.795V55.478z"
+       id="path889" />
+    <path
+       fill="#F7E219"
+       d="M42.369,56.935v4.049l6.862,12.064V60.272L42.369,56.935z"
+       id="path890" />
+    <path
+       fill="#F8F98B"
+       d="M47.748,52.141l-5.379,4.794l6.862,3.338l5.38-4.795L47.748,52.141z"
+       id="path891" />
+    <path
+       fill="#9F0F09"
+       d="M54.61,68.253l0.805-13.135l-7.667-2.978l6.862,3.337V68.253z"
+       id="path892" />
+    <path
+       opacity="0.2"
+       d="M48.017,53.612l-3.432,3.059l4.378,2.13l3.432-3.06L48.017,53.612z"
+       id="path893" />
+    <path
+       opacity="0.5"
+       d="M48.017,53.612l-3.432,3.059l4.378,2.13l-0.901-1.575L48.017,53.612z"
+       id="path894" />
+  </g>
+</svg>

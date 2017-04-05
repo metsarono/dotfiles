@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 20010904//EN"
+"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">
+<!-- Created with Sodipodi ("http://www.sodipodi.com/") -->
+<svg
+   width="58pt"
+   height="48pt"
+   viewBox="0 0 66.133 48.371"
+   overflow="visible"
+   enable-background="new 0 0 66.133 48.371"
+   xml:space="preserve"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:xml="http://www.w3.org/XML/1998/namespace"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   id="svg153"
+   sodipodi:version="0.32pre"
+   sodipodi:docname="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/filesystems/gnome-fs-regular.svg"
+   sodipodi:docbase="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/filesystems">
+  <defs
+     id="defs200" />
+  <sodipodi:namedview
+     id="base" />
+  <metadata
+     id="metadata154">
+    <sfw>
+      <slices />
+      <sliceSourceBounds
+         y="395.314"
+         x="263.433"
+         width="66.133"
+         height="48.371"
+         bottomLeftOrigin="true" />
+    </sfw>
+  </metadata>
+  <g
+     id="Layer_1"
+     stroke="#000000">
+    <g
+       id="Layer_1_2_">
+      <g
+         id="g157">
+        <linearGradient
+           id="XMLID_1_"
+           gradientUnits="userSpaceOnUse"
+           x1="-375.4331"
+           y1="104.5449"
+           x2="-356.3073"
+           y2="73.1708"
+           gradientTransform="matrix(0.4828 0.721 0.7677 -0.514 140.0518 339.5116)">
+          <stop
+             offset="0"
+             style="stop-color:#FDFEED"
+             id="stop159" />
+          <stop
+             offset="1"
+             style="stop-color:#FFF24B"
+             id="stop160" />
+        </linearGradient>
+        <path
+           fill="url(#XMLID_1_)"
+           stroke="none"
+           d="M22.404,44.751L5.074,24.075l29.248-13.037l25.701,21.264L22.404,44.751z"
+           id="path164" />
+      </g>
+      <path
+         stroke="none"
+         d="M1.69,23.299l20.231,23.972l41.486-14.191L34.804,8.516L1.69,23.299z"
+         id="path165" />
+      <g
+         id="g166">
+        <linearGradient
+           id="XMLID_2_"
+           gradientUnits="userSpaceOnUse"
+           x1="-375.4331"
+           y1="104.5449"
+           x2="-356.3073"
+           y2="73.1708"
+           gradientTransform="matrix(0.4828 0.721 0.7677 -0.514 140.0518 339.5116)">
+          <stop
+             offset="0.0056"
+             style="stop-color:#D9D8FF"
+             id="stop168" />
+          <stop
+             offset="0.514"
+             style="stop-color:#FDFEED"
+             id="stop169" />
+          <stop
+             offset="1"
+             style="stop-color:#9A99CD"
+             id="stop170" />
+        </linearGradient>
+        <path
+           fill="url(#XMLID_2_)"
+           stroke="none"
+           d="M22.404,44.751L5.074,24.075l29.248-13.037l25.701,21.264L22.404,44.751z"
+           id="path176" />
+      </g>
+      <g
+         id="g177">
+        <linearGradient
+           id="XMLID_3_"
+           gradientUnits="userSpaceOnUse"
+           x1="-313.0947"
+           y1="225.8115"
+           x2="-292.3098"
+           y2="191.7158"
+           gradientTransform="matrix(0.702 0.51 0.543 -0.7475 130.3028 333.4989)">
+          <stop
+             offset="0"
+             style="stop-color:#FDFEED"
+             id="stop179" />
+          <stop
+             offset="1"
+             style="stop-color:#FFF24B"
+             id="stop180" />
+        </linearGradient>
+        <path
+           fill="url(#XMLID_3_)"
+           stroke="none"
+           d="M38.013,42.094L3.422,23.729L24.475,2.548l34.592,18.365L38.013,42.094z"
+           id="path184" />
+      </g>
+      <path
+         stroke="none"
+         d="M0,24.278l38.356,20.365l24.133-24.28L24.134,0L0,24.278z"
+         id="path185" />
+      <g
+         id="g186">
+        <linearGradient
+           id="XMLID_4_"
+           gradientUnits="userSpaceOnUse"
+           x1="-200.6094"
+           y1="423.3213"
+           x2="-202.1694"
+           y2="387.4401"
+           gradientTransform="matrix(1 0 0 -1 232.9102 421.3594)">
+          <stop
+             offset="0.0056"
+             style="stop-color:#D9D8FF"
+             id="stop188" />
+          <stop
+             offset="0.514"
+             style="stop-color:#FDFEED"
+             id="stop189" />
+          <stop
+             offset="1"
+             style="stop-color:#9A99CD"
+             id="stop190" />
+        </linearGradient>
+        <path
+           fill="url(#XMLID_4_)"
+           stroke="none"
+           d="M38.013,42.094L3.422,23.729L24.475,2.548l34.592,18.365L38.013,42.094z"
+           id="path196" />
+      </g>
+      <path
+         a:adobe-blending-mode="multiply"
+         opacity="0.2"
+         stroke="none"
+         d="M1.954,24.939l27.714,18.106l-7.746,4.225l11.636-1.03     l6.32,2.131l6.807-7.987l19.448-6.391l-6.32-6.923l5.349-3.727l-5.523-1.63l-4.688,5.358l5.349,3.728l-17.018,6.922l-5.269,4.373     L1.954,24.939z"
+         id="path197" />
+      <path
+         a:adobe-blending-mode="multiply"
+         opacity="0.2"
+         stroke="none"
+         d="M56.563,28.922l-5.359,5.533l-5.755,2.439l9.373-10.063     L56.563,28.922z"
+         id="path198" />
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 20010904//EN"
+"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">
+<!-- Created with Sodipodi ("http://www.sodipodi.com/") -->
+<svg
+   width="48pt"
+   height="48pt"
+   viewBox="0 0 51.253 39.001"
+   overflow="visible"
+   enable-background="new 0 0 51.253 39.001"
+   xml:space="preserve"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:xml="http://www.w3.org/XML/1998/namespace"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   id="svg153"
+   sodipodi:version="0.32pre"
+   sodipodi:docname="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/devices/gnome-dev-firewire.svg"
+   sodipodi:docbase="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/devices">
+  <defs
+     id="defs210" />
+  <sodipodi:namedview
+     id="base" />
+  <metadata
+     id="metadata154">
+    <sfw>
+      <slices />
+      <sliceSourceBounds
+         y="399.999"
+         x="270.874"
+         width="51.253"
+         height="39.001"
+         bottomLeftOrigin="true" />
+    </sfw>
+  </metadata>
+  <g
+     id="Layer_1"
+     stroke="#000000">
+    <g
+       id="Layer_1_2_">
+      <path
+         stroke="none"
+         d="M0,17.678v11.417l22.406,9.721l19.768-17.679V9.719L19.767,0L0,17.678z"
+         id="path157" />
+      <path
+         opacity="0.2"
+         stroke="none"
+         d="M42.166,21.19L22.251,39.001h9.086L51.253,21.19v-4.331L42.08,12.94L42.166,21.19z"
+         id="path158" />
+      <linearGradient
+         id="XMLID_1_"
+         gradientUnits="userSpaceOnUse"
+         x1="-210.2817"
+         y1="384.7266"
+         x2="-211.7559"
+         y2="399.4676"
+         gradientTransform="matrix(1 0 0 -1 232.4341 409.75)">
+        <stop
+           offset="0"
+           style="stop-color:#F2F2F2"
+           id="stop160" />
+        <stop
+           offset="0.3121"
+           style="stop-color:#EEEEEE"
+           id="stop161" />
+        <stop
+           offset="0.6646"
+           style="stop-color:#E0E0E0"
+           id="stop162" />
+        <stop
+           offset="1"
+           style="stop-color:#CCCCCC"
+           id="stop163" />
+      </linearGradient>
+      <path
+         fill="url(#XMLID_1_)"
+         stroke="none"
+         d="M22.179,27.317L1.2,18.215L19.994,1.407l20.979,9.1L22.179,27.317z"
+         id="path171" />
+      <linearGradient
+         id="XMLID_2_"
+         gradientUnits="userSpaceOnUse"
+         x1="-214.186"
+         y1="370.1533"
+         x2="-220.7317"
+         y2="381.9145"
+         gradientTransform="matrix(1 0 0 -1 232.4341 409.75)">
+        <stop
+           offset="0"
+           style="stop-color:#E6E6E6"
+           id="stop173" />
+        <stop
+           offset="0.621"
+           style="stop-color:#C7C7C7"
+           id="stop174" />
+        <stop
+           offset="1"
+           style="stop-color:#B3B3B3"
+           id="stop175" />
+      </linearGradient>
+      <path
+         fill="url(#XMLID_2_)"
+         stroke="none"
+         d="M22.179,37.409L1.2,28.308V18.215l20.979,9.103V37.409z"
+         id="path181" />
+      <path
+         fill="#33CC33"
+         stroke="none"
+         d="M20.696,30.87l-3.631-1.576v-2.026l3.631,1.575V30.87z"
+         id="path182" />
+      <path
+         fill="#00FF00"
+         stroke="none"
+         d="M18.914,29.827l-1.663-0.722v-0.928l1.663,0.722V29.827z"
+         id="path183" />
+      <path
+         opacity="0.5"
+         stroke="none"
+         d="M20.696,29.437l-3.631-1.575v-1.096l3.631,1.575V29.437z"
+         id="path184" />
+      <linearGradient
+         id="XMLID_3_"
+         gradientUnits="userSpaceOnUse"
+         x1="-198.647"
+         y1="384.0615"
+         x2="-204.0448"
+         y2="388.2897"
+         gradientTransform="matrix(1 0 0 -1 232.4341 409.75)">
+        <stop
+           offset="0"
+           style="stop-color:#999999"
+           id="stop186" />
+        <stop
+           offset="0.6839"
+           style="stop-color:#7B7B7B"
+           id="stop187" />
+        <stop
+           offset="1"
+           style="stop-color:#6B6B6B"
+           id="stop188" />
+      </linearGradient>
+      <path
+         fill="url(#XMLID_3_)"
+         stroke="none"
+         d="M40.974,20.601L22.179,37.409V27.317l18.795-16.811V20.601z"
+         id="path194" />
+      <path
+         opacity="0.6"
+         fill="#FFFFFF"
+         stroke="none"
+         d="M40.988,11.269l-0.015-0.763l-0.608-0.264L22.183,26.509L1.71,17.792     L1.2,18.215l0.003,0.774l20.375,8.82v9.354l0.6,0.246l0.6-0.448v-9.404L40.988,11.269z"
+         id="path195" />
+      <path
+         a:adobe-blending-mode="multiply"
+         opacity="0.2"
+         stroke="none"
+         d="M40.988,19.111l-0.029-1.13L22.183,34.751L1.15,25.757     l0.053,1.075l20.976,8.959L40.988,19.111z"
+         id="path196" />
+      <path
+         fill="#999999"
+         stroke="none"
+         d="M23.033,9.763c-2.627,0.006-4.987,1.441-5.259,3.198c-0.132,0.852,0.24,1.65,1.046,2.25     c0.807,0.6,1.952,0.928,3.225,0.925c2.627-0.007,4.986-1.441,5.259-3.198c0.132-0.851-0.239-1.65-1.046-2.25     C25.451,10.089,24.306,9.76,23.033,9.763z M20.151,14.401c-0.518-0.385-0.756-0.898-0.671-1.444     c0.175-1.127,1.689-2.049,3.376-2.053c0.816-0.001,1.552,0.209,2.07,0.594c0.518,0.385,0.756,0.897,0.672,1.444     c-0.175,1.128-1.69,2.049-3.376,2.053C21.405,14.997,20.669,14.786,20.151,14.401z"
+         id="path197" />
+      <path
+         fill="#999999"
+         stroke="none"
+         d="M27.69,15.997l0.849-5.474l5.07,0.107l-0.499,5.425L27.69,15.997z"
+         id="path198" />
+      <path
+         fill="#999999"
+         stroke="none"
+         d="M14.447,16.004l5.805,2.813l1.545-1.325l-5.805-2.813L14.447,16.004z"
+         id="path199" />
+      <path
+         fill="#999999"
+         stroke="none"
+         d="M12.114,18.01l5.805,2.813l1.545-1.325l-5.805-2.813L12.114,18.01z"
+         id="path200" />
+      <path
+         fill="#999999"
+         stroke="none"
+         d="M14.017,7.777l1.142,1.316l6.671-2.857L20.688,4.92L14.017,7.777z"
+         id="path201" />
+      <path
+         fill="#999999"
+         stroke="none"
+         d="M15.673,9.687l1.142,1.316l6.671-2.857L22.345,6.83L15.673,9.687z"
+         id="path202" />
+      <path
+         fill="#FFFFFF"
+         stroke="none"
+         d="M23.033,9.165c-2.627,0.007-4.987,1.441-5.259,3.198c-0.132,0.851,0.24,1.65,1.046,2.25     c0.807,0.6,1.952,0.928,3.225,0.925c2.627-0.007,4.986-1.442,5.259-3.199c0.132-0.851-0.239-1.649-1.046-2.25     C25.451,9.491,24.306,9.162,23.033,9.165z M20.151,13.803c-0.518-0.385-0.756-0.897-0.671-1.444     c0.175-1.127,1.689-2.049,3.376-2.053c0.816-0.001,1.552,0.209,2.07,0.594c0.518,0.385,0.756,0.897,0.672,1.444     c-0.175,1.128-1.69,2.049-3.376,2.053C21.405,14.399,20.669,14.188,20.151,13.803z"
+         id="path203" />
+      <path
+         fill="#FFFFFF"
+         stroke="none"
+         d="M27.69,15.398l0.849-5.474l5.07,0.107l-0.499,5.425L27.69,15.398z"
+         id="path204" />
+      <path
+         fill="#FFFFFF"
+         stroke="none"
+         d="M14.447,15.406l5.805,2.813l1.545-1.326l-5.805-2.813L14.447,15.406z"
+         id="path205" />
+      <path
+         fill="#FFFFFF"
+         stroke="none"
+         d="M12.114,17.412l5.805,2.813l1.545-1.326l-5.805-2.813L12.114,17.412z"
+         id="path206" />
+      <path
+         fill="#FFFFFF"
+         stroke="none"
+         d="M14.017,7.18l1.142,1.316l6.671-2.857l-1.142-1.316L14.017,7.18z"
+         id="path207" />
+      <path
+         fill="#FFFFFF"
+         stroke="none"
+         d="M15.673,9.089l1.142,1.316l6.671-2.857l-1.141-1.316L15.673,9.089z"
+         id="path208" />
+    </g>
+  </g>
+</svg>

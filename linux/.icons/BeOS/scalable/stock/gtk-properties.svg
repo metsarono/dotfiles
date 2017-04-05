@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+<svg:svg
+   xmlns:svg="http://www.w3.org/2000/svg"
+   version="1.0"
+   width="98.830002"
+   height="124.289"
+   viewBox="0 0 98.83 124.289"
+   id="svg2"
+   xml:space="preserve"
+   style="overflow:visible"><svg:defs
+   id="defs59" />
+	<svg:g
+   id="Layer_1"
+   style="stroke:#000000">
+		<svg:path
+   d="M 0,4.271 L 0,86.772 L 77.387,124.289 L 77.387,37.513 L 0,0 L 0,4.271 z"
+   id="path5"
+   style="stroke:none" />
+		
+			<svg:linearGradient
+   x1="-147.4185"
+   y1="414.13431"
+   x2="-256.62079"
+   y2="426.42499"
+   id="XMLID_1_"
+   gradientUnits="userSpaceOnUse"
+   gradientTransform="matrix(1,0,0,-1,235.1665,481.6436)">
+			<svg:stop
+   id="stop8"
+   style="stop-color:#e6e6e6;stop-opacity:1"
+   offset="0" />
+			<svg:stop
+   id="stop10"
+   style="stop-color:#cccccc;stop-opacity:1"
+   offset="1" />
+			<midPointStop
+   offset="0"
+   style="stop-color:#E6E6E6" />
+			<midPointStop
+   offset="0.5"
+   style="stop-color:#E6E6E6" />
+			<midPointStop
+   offset="1"
+   style="stop-color:#CCCCCC" />
+		</svg:linearGradient>
+		<svg:path
+   d="M 74.145,119.642 L 2.682,85.093 L 2.682,4.271 L 74.146,38.821 L 74.145,119.642 z"
+   id="path12"
+   style="fill:url(#XMLID_1_);stroke:none" />
+		<svg:path
+   d="M 71.21,37.477 L 71.225,118.121 L 74.156,119.666 L 74.137,39.022 L 71.21,37.477 z"
+   id="path14"
+   style="fill:#9c9c9c;stroke:none" />
+		<svg:path
+   d="M 2.685,7.531 L 71.148,40.629 L 74.136,38.821 L 2.673,4.273 L 2.685,7.531 z"
+   id="path16"
+   style="fill:#ffffff;stroke:none" />
+		<svg:path
+   d="M 2.682,4.271 L 2.73,83.65 L 5.66,85.196 L 5.607,5.817 L 2.682,4.271 z"
+   id="path18"
+   style="fill:#ffffff;stroke:none" />
+		<svg:path
+   d="M 5.62,28.051 L 74.151,61.182 L 74.136,57.922 L 2.673,23.374 L 5.62,28.051 z"
+   id="path20"
+   style="fill:#9c9c9c;stroke:none" />
+		<svg:path
+   d="M 2.685,85.093 L 74.151,119.642 L 74.136,116.384 L 2.672,81.833 L 2.685,85.093 z"
+   id="path22"
+   style="fill:#9c9c9c;stroke:none" />
+		<svg:g
+   id="g24">
+			<svg:path
+   d="M 11.595,43.166 L 11.595,46.417 L 46.343,63.216 L 46.343,59.963 L 11.595,43.166 z"
+   id="path26"
+   style="fill:#262626;stroke:none" />
+			<svg:path
+   d="M 64.697,72.08 L 64.681,68.819 L 59.226,66.181 L 59.226,69.432 L 64.697,72.08 z"
+   id="path28"
+   style="fill:#262626;stroke:none" />
+		</svg:g>
+		<svg:g
+   id="g30">
+			<svg:path
+   d="M 11.595,53.696 L 11.595,56.947 L 46.343,73.745 L 46.343,70.493 L 11.595,53.696 z"
+   id="path32"
+   style="fill:#262626;stroke:none" />
+			<svg:path
+   d="M 64.697,82.609 L 64.681,79.349 L 59.226,76.71 L 59.226,79.962 L 64.697,82.609 z"
+   id="path34"
+   style="fill:#262626;stroke:none" />
+		</svg:g>
+		<svg:g
+   id="g36">
+			<svg:path
+   d="M 11.595,64.226 L 11.595,67.478 L 46.343,84.275 L 46.343,81.024 L 11.595,64.226 z"
+   id="path38"
+   style="fill:#262626;stroke:none" />
+			<svg:path
+   d="M 64.697,93.137 L 64.682,89.88 L 59.227,87.241 L 59.227,90.493 L 64.697,93.137 z"
+   id="path40"
+   style="fill:#262626;stroke:none" />
+		</svg:g>
+		<svg:g
+   id="g42">
+			<svg:path
+   d="M 11.595,74.755 L 11.595,78.007 L 46.343,94.805 L 46.343,91.552 L 11.595,74.755 z"
+   id="path44"
+   style="fill:#262626;stroke:none" />
+			<svg:path
+   d="M 64.697,103.667 L 64.681,100.409 L 59.226,97.77 L 59.226,101.022 L 64.697,103.667 z"
+   id="path46"
+   style="fill:#262626;stroke:none" />
+		</svg:g>
+		<svg:path
+   d="M 98.369,117.566 L 76.82,104.43 L 76.824,123.913 L 98.83,123.932 L 98.369,117.566 z"
+   id="path48"
+   style="opacity:0.2;stroke:none" />
+		<svg:path
+   d="M 2.685,29.842 L 71.124,62.927 L 74.136,61.131 L 2.673,26.582 L 2.685,29.842 z"
+   id="path50"
+   style="fill:#ffffff;stroke:none" />
+		<svg:g
+   id="g52">
+			<svg:path
+   d="M 11.595,18.255 L 11.595,21.507 L 46.343,38.306 L 46.343,35.052 L 11.595,18.255 z"
+   id="path54"
+   style="fill:#262626;stroke:none" />
+			<svg:path
+   d="M 64.697,47.168 L 64.681,43.908 L 59.226,41.27 L 59.226,44.522 L 64.697,47.168 z"
+   id="path56"
+   style="fill:#262626;stroke:none" />
+		</svg:g>
+	</svg:g>
+</svg:svg>
