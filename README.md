@@ -2,6 +2,9 @@
 
 ## Installation
 
+### Configure Keyboard
+```sudo dpkg-reconfigure keyboard-configuration```
+
 ### Installing git and stow
 #### Arch
 ```sudo pacman -S git stow```
