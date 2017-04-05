@@ -38,3 +38,16 @@ git submodule update --recursive --remote
 ```sudo apt install vim zsh```
 #### MacOS
 ```homebrew install vim zsh```
+
+### Updating fonts
+```fc-cache -f $fond_dir```
+
+### Installing Rxvt-Unicode
+#### Arch
+```sudo pacman -S rxvt-unicode```
+#### Debian
+```sudo apt install rxvt-unicode```
+
+#### Load .Xresources
+```xrdb ~/.Xresources```
+

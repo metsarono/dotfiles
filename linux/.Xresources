@@ -43,43 +43,36 @@ UXTerm*toolBar:            false
 
 URxvt*termName:rxvt-unicode-256color
 Xft.antialias:  true
-!Xft.autohint:   true
+Xft.autohint:   true
 Xft.hinting:    true
 Xft.hintstyle:  hintslight
-!Xft.lcdfilter:  lcdlight
+Xft.lcdfilter:  lcdlight
 Xft.rgba:       rgb
 Xft.dpi:        96
 
 URxvt*transparent:false
 
 URxvt.cursorColor:#505050
-*background: #333333
-*foreground: #C5C8C6
-!black
-*color0: #282A2E
-!*color8: #373B41
-*color8: #505050
-! red
-*color1: #A54242
-*color9: #CC6666
-! green
-*color2: #8C9440
-*color10: #B5BD68
-! yellow
-*color3: #DE935F
-*color11: #F0C674
-! blue
-*color4: #5F819D
-*color12: #81A2BE
-! magenta
-*color5: #85678F
-*color13: #B294BB
-! cyan
-*color6: #5E8D87
-*color14: #8ABEB7
-! white
-*color7: #707880
-*color15: #C5C8C6
+
+urxvt*foreground: #C5C8C6
+urxvt*background: #333333
+
+*color0:  #2E3436
+*color1:  #a40000
+*color2:  #4E9A06
+*color3:  #C4A000
+*color4:  #3465A4
+*color5:  #75507B
+*color6:  #ce5c00
+*color7:  #babdb9
+*color8:  #555753
+*color9:  #EF2929
+*color10: #8AE234
+*color11: #FCE94F
+*color12: #729FCF
+*color13: #AD7FA8
+*color14: #fcaf3e
+*color15: #EEEEEC
 
 !Fonts
 URxvt*font: xft:Inconsolata\ for\ Powerline:pixelsize=14
@@ -88,7 +81,7 @@ URxvt*font: xft:Inconsolata\ for\ Powerline:pixelsize=14
 URxvt*scrollBar:false
 
 ! Size of my terminal
-URxvt.geometry:98x36+800+570
+URxvt.geometry:112x37+800+570
 URxvt.imLocale:en_US.UTF8
 
 URxvt*skipBuiltinGlyphs: true
