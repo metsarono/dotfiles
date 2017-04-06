@@ -1,7 +1,7 @@
 #!/bin/zsh
 # My .zshrc
-# Jerome Leclanche <jerome@leclan.ch>
-# https://github.com/jleclanche/dotfiles/blob/master/.zshrc
+# Tiago Pires <tiago@tiagopires.com>
+# https://github.com/metsarono/dotfiles/blob/master/.zshrc
 
 ##
 # Somebody set us up the prompt
@@ -9,37 +9,6 @@
 
 # Let's have some colors first
 autoload -U colors && colors
-
-#if [[ -e /usr/share/zsh/site-contrib/powerline.zsh ]]; then
-#	# Powerline support is enabled if available, otherwise use a regular PS1
-#	. /usr/share/zsh/site-contrib/powerline.zsh
-#	VIRTUAL_ENV_DISABLE_PROMPT=true
-#elif [[ -e $HOME/.local/lib/python2.7/site-packages/powerline/bindings/zsh/powerline.zsh ]]; then
-    #statements
-#    . $HOME/.local/lib/python2.7/site-packages/powerline/bindings/zsh/powerline.zsh
-#    VIRTUAL_ENV_DISABLE_PROMPT=true
-#else
-	# Default colors:
-	# Cyan for users, red for root, magenta for system users
-	local _time="%{$fg[yellow]%}[%*]"
-	local _path="%B%{$fg[green]%}%(8~|...|)%7~"
-	local _usercol
-	if [[ $EUID -lt 1000 ]]; then
-		# red for root, magenta for system users
-		_usercol="%(!.%{$fg[red]%}.%{$fg[magenta]%})"
-	else
-		_usercol="$fg[cyan]"
-	fi
-	local _user="%{$_usercol%}%n@%M"
-	local _prompt="%{$fg[white]%}${(r:$SHLVL*2::%#:)}"
-
-	PROMPT="$_time $_user $_path $_prompt%b%f%k "
-
-	RPROMPT='${vcs_info_msg_0_}' # git branch
-	if [[ ! -z "$SSH_CLIENT" ]]; then
-		RPROMPT="$RPROMPT ⇄" # ssh icon
-	fi
-#fi
 
 ##
 # Environment variables
@@ -75,7 +44,6 @@ path=(~/bin $path)
 # NOTE: this needs to be a directory with 0755 permissions, otherwise you will
 # get "insecure" warnings on shell load!
 fpath=($XDG_CONFIG_HOME/zsh/completion $fpath)
-
 
 ##
 # zsh configuration
@@ -115,7 +83,6 @@ alias egrep="egrep --color=auto"
 alias dmesg="dmesg --color=auto"
 # make less accept color codes and re-output them
 alias less="less -R"
-
 
 ##
 # Completion system
@@ -382,72 +349,20 @@ if [[ $LANG == "C"  || $LANG == "" ]]; then
 	>&2 echo "$fg[red]The \$LANG variable is not set. This can cause a lot of problems.$reset_color"
 fi
 
-# Syntax highlighting plugin
-#if [[ -e /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
-#	source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-#fi
+# load zplug
+source ~/.zplug/init.zsh
 
-#if [[ -e /usr/share/zsh/plugins/zsh-history-substring-search/zsh-history-substring-search.zsh ]]; then
-#	source /usr/share/zsh/plugins/zsh-history-substring-search/zsh-history-substring-search.zsh
-#fi
+zplug "modules/history",    from:prezto                                                                                                                                
+zplug "modules/utility",    from:prezto                                                                                                                                
+zplug "modules/ruby",       from:prezto                                                                                                                                
+zplug "modules/ssh",        from:prezto                                                                                                                                
+zplug "modules/terminal",   from:prezto                                                                                                                                
+zplug "modules/directory",  from:prezto 
+zplug "frmendes/geometry"
 
-# bind UP and DOWN arrow keys
-#zmodload zsh/terminfo
-#bindkey "$terminfo[kcuu1]" history-substring-search-up
-#bindkey "$terminfo[kcud1]" history-substring-search-down
-
-# # bind P and N for EMACS mode
-#bindkey -M emacs '^P' history-substring-search-up
-#bindkey -M emacs '^N' history-substring-search-down
-
-# # bind k and j for VI mode
-#bindkey -M vicmd 'k' history-substring-search-up
-#bindkey -M vicmd 'j' history-substring-search-down
-
-# load zgen
-source "${HOME}/.zgen/zgen.zsh"
-
-# check if there's no init script
-if ! zgen saved; then
-    echo "Creating a zgen save"
-
-    zgen oh-my-zsh
-
-    # plugins
-    zgen oh-my-zsh plugins/git
-    zgen oh-my-zsh plugins/sudo
-    zgen oh-my-zsh plugins/command-not-found
-    zgen load maverick2000/zsh2000
-    # zgen load thvitt/tvline
-    # zgen load zsh-users/zsh-syntax-highlighting
-    zgen load zsh-users/zsh-autosuggestions
-    zgen load zsh-users/zsh-completions
-    zgen load zsh-users/zsh-history-substring-search
-    zgen load zsh-users/zsh-syntax-highlighting
-
-    # bulk load
-    zgen loadall <<EOPLUGINS
-	  zsh-users/zsh-history-substring-search
-	  maverick2000/zsh2000
-	  thvitt/tvline
-	  zsh-users/zsh-syntax-highlighting
-	  zsh-users/zsh-autosuggestions
-	  zsh-users/zsh-completions
-	  zsh-users/zsh-history-substring-search
-	  zsh-users/zsh-syntax-highlighting
-EOPLUGINS
-    # ^ can't indent this EOPLUGINS
-
-    # completions
-    zgen load zsh-users/zsh-completions src
-
-    # theme
-    zgen oh-my-zsh /custom/themes/tvline
-
-    # save all to init script
-    zgen save
-fi
-
+zplug "zsh-users/zsh-completions", defer:0
+zplug "zsh-users/zsh-autosuggestions",          defer:2, on:"zsh-users/zsh-completions" 
+zplug load
 
 # Enable autosuggestions automatically
 #zle-line-init() {
@@ -465,20 +380,5 @@ export KEYTIMEOUT=1
 export EDITOR=/usr/bin/vim
 export VISUAL=/usr/bin/vim
 
-# if [ "$TMUX" = "" ]; then tmux; fi
-
-#if [ -e /usr/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf ]; then
-#      tmux source "/usr/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
-
-#elif [ -e /usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf ]; then
-#      tmux source "/usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
-
-#elif [ -e /usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf ]; then
-#      tmux source "/usr/local/lib/python2.7/site-packages/powerline/bindings/tmux/powerline.conf"
-#fi
-
 export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
 
-#if [[ $TERMINIX_ID ]]; then
-#       source /etc/profile.d/vte.sh
-#fi

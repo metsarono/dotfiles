@@ -52,36 +52,52 @@ Xft.dpi:        96
 
 URxvt*transparent:false
 
-URxvt.cursorColor:#505050
+! special
+*.foreground:   #34302d
+*.background:   #f5e7de
+*.cursorColor:  #34302d
 
-urxvt*foreground: #C5C8C6
-urxvt*background: #333333
+! black
+*.color0:       #666661
+*.color8:       #7f7f7a
 
-*color0:  #2E3436
-*color1:  #EF2929
-*color2:  #4E9A06
-*color3:  #C4A000
-*color4:  #3465A4
-*color5:  #75507B
-*color6:  #ce5c00
-*color7:  #babdb9
-*color8:  #555753
-*color9:  #EF2929
-*color10: #8AE234
-*color11: #FCE94F
-*color12: #729FCF
-*color13: #AD7FA8
-*color14: #fcaf3e
-*color15: #EEEEEC
+! red
+*.color1:       #992e2e
+*.color9:       #b23636
+
+! green
+*.color2:       #4c3226
+*.color10:      #664233
+
+! yellow
+*.color3:       #a67c53
+*.color11:      #bf8f60
+
+! blue
+*.color4:       #4c7399
+*.color12:      #5986b2
+
+! magenta
+*.color5:       #bf9986
+*.color13:      #d9ae98
+
+! cyan
+*.color6:       #d97742
+*.color14:      #f2854a
+
+! white
+*.color7:       #34302d
+*.color15:      #4c4742
+
 
 !Fonts
-URxvt*font: xft:Inconsolata\ for\ Powerline:pixelsize=14
+URxvt*font: xft:Roboto\ Mono\ for\ Powerline:pixelsize=13
 
 !Say no to scrollbars
 URxvt*scrollBar:false
 
 ! Size of my terminal
-URxvt.geometry:112x37+800+570
+URxvt.geometry:97x37
 URxvt.imLocale:en_US.UTF8
 
 URxvt*skipBuiltinGlyphs: true
