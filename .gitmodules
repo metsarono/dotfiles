@@ -50,14 +50,6 @@
     path = all/.vim/bundle/vim-obsession
     url = git://github.com/tpope/vim-obsession.git
 
-[submodule "all/.config/zsh/zgen"]
-    path = all/.config/zsh/zgen
-    url = git://github.com/tarjoilija/zgen.git
-
-[submodule "all/.zgen/robbyrussell/oh-my-zsh-master"]
-    path = all/.zgen/robbyrussell/oh-my-zsh-master
-    url = git://github.com/robbyrussell/oh-my-zsh.git
-
-[submodule "all/.zgen/robbyrussell/oh-my-zsh-master/cuctom/themes"]
-    path = all/.zgen/robbyrussell/oh-my-zsh-master/custom/themes
-    url = git://github.com/thvitt/tvline
+[submodule "all/.zplug"]
+    path = all/.zplug
+    url = git://github.com/zplug/zplug.git
