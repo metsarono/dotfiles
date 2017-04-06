@@ -4,6 +4,6 @@ rename ecwid.scss
 rename _ecwid.scss
 set showhidden true
 set show_hidden true
-open_with 
 
 delete
+open_with 

@@ -91,7 +91,7 @@ URxvt*transparent:false
 
 
 !Fonts
-URxvt*font: xft:Roboto\ Mono\ for\ Powerline:pixelsize=13
+URxvt*font: xft:Roboto\ Mono\ for\ Powerline:pixelsize=11
 
 !Say no to scrollbars
 URxvt*scrollBar:false

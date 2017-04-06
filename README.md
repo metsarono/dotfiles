@@ -48,3 +48,10 @@ git submodule update --recursive --remote
 #### Load .Xresources
 ```xrdb ~/.Xresources```
 
+### Install Powerline
+#### Debian
+```bash
+wget https://bootstrap.pypa.io/get-pip.py
+sudo python get-pip.py
+pip install powerline-status
+
