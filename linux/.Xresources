@@ -97,7 +97,7 @@ URxvt*font: xft:Roboto\ Mono\ for\ Powerline:pixelsize=11
 URxvt*scrollBar:false
 
 ! Size of my terminal
-URxvt.geometry:97x37
+URxvt.geometry:98x43
 URxvt.imLocale:en_US.UTF8
 
 URxvt*skipBuiltinGlyphs: true

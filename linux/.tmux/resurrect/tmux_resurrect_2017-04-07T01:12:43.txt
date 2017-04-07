@@ -1,0 +1,3 @@
+pane	0	2	:zsh	1	:*	0	:/home/dolch/.dotfiles	1	zsh	:
+window	0	2	1	:*	b2a0,98x42,0,0,3
+state	0	0

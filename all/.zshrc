@@ -354,7 +354,6 @@ source ~/.zplug/init.zsh
 
 zplug "modules/history",    from:prezto                                                                                                                                
 zplug "modules/utility",    from:prezto                                                                                                                                
-zplug "modules/ruby",       from:prezto                                                                                                                                
 zplug "modules/ssh",        from:prezto                                                                                                                                
 zplug "modules/terminal",   from:prezto                                                                                                                                
 zplug "modules/directory",  from:prezto 
