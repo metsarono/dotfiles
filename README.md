@@ -54,4 +54,23 @@ git submodule update --recursive --remote
 wget https://bootstrap.pypa.io/get-pip.py
 sudo python get-pip.py
 pip install powerline-status
+```
 
+## Windows installation using Chocolatey
+ 0.a Install with cmd.exe
+Run the following command:
+```bat
+@powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))" && SET "PATH=%PATH%;%ALLUSERSPROFILE%\chocolatey\bin"
+Install with PowerShell.exe
+```
+
+0.b With PowerShell, there is an additional step. You must ensure Get-ExecutionPolicy is not Restricted. We suggest using Bypass to bypass the policy to get things installed or AllSigned for quite a bit more security.
+
+Run Get-ExecutionPolicy. If it returns Restricted, then run Set-ExecutionPolicy AllSigned or Set-ExecutionPolicy Bypass.
+Now run the following command:
+```Powershell
+# Don't forget to ensure ExecutionPolicy above
+iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+```
+1. Install using [Chocolatey](https://chocolatey.org/) with `choco install keepass-keepasshttp`
+ 2. Restart KeePass if it is currently running to load the plugin
