@@ -53,8 +53,11 @@ git submodule update --recursive --remote
 ```bash
 wget https://bootstrap.pypa.io/get-pip.py
 sudo python get-pip.py
-pip install powerline-status
+sudo pip install powerline-status
 ```
+
+#### Install ZPlug ZSH Plugins
+```zplug install```
 
 ## Windows installation using Chocolatey
  0.a Install with cmd.exe
