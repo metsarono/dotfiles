@@ -36,7 +36,10 @@ git submodule update --recursive --remote
 
 ### Installing tools
 #### Arch
-```sudo pacman -S vim zsh ranger rxvt-unicode```
+```bash
+sudo pacman -S vim zsh ranger rxvt-unicode
+chsh -s $(which zsh)
+```
 #### Debian
 ```sudo apt install vim zsh ranger rxvt-unicode```
 #### MacOS
