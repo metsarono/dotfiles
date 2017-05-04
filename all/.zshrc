@@ -357,10 +357,10 @@ zplug "modules/utility",    from:prezto
 zplug "modules/ssh",        from:prezto                                                                                                                                
 zplug "modules/terminal",   from:prezto                                                                                                                                
 zplug "modules/directory",  from:prezto 
-zplug "frmendes/geometry"
+zplug "agnoster/agnoster-zsh-theme", as:theme
 
 zplug "zsh-users/zsh-completions", defer:0
-zplug "zsh-users/zsh-autosuggestions",          defer:2, on:"zsh-users/zsh-completions" 
+zplug "zsh-users/zsh-autosuggestions", defer:2, on:"zsh-users/zsh-completions" 
 zplug load
 
 # Enable autosuggestions automatically
