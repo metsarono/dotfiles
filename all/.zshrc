@@ -7,6 +7,19 @@
 # Somebody set us up the prompt
 #
 
+## POWERLEVEL9K SETTINGS ##
+POWERLEVEL9K_MODE='nerdfont-complete'
+POWERLEVEL9K_SHORTEN_DIR_LENGTH=2
+POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=(os_icon dir vcs)
+POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS=(status nvm node_version)
+
+POWERLEVEL9K_OS_ICON_BACKGROUND="white"
+POWERLEVEL9K_OS_ICON_FOREGROUND="blue"
+POWERLEVEL9K_DIR_HOME_FOREGROUND="white"
+POWERLEVEL9K_DIR_HOME_SUBFOLDER_FOREGROUND="white"
+POWERLEVEL9K_DIR_DEFAULT_FOREGROUND="white"
+##
+
 # Let's have some colors first
 autoload -U colors && colors
 
@@ -302,32 +315,32 @@ function zurl {
 #
 
 # Git plugin
-autoload -Uz vcs_info
-zstyle ":vcs_info:*" enable git
-zstyle ":vcs_info:(git*):*" get-revision true
-zstyle ":vcs_info:(git*):*" check-for-changes true
+#autoload -Uz vcs_info
+#zstyle ":vcs_info:*" enable git
+#zstyle ":vcs_info:(git*):*" get-revision true
+#zstyle ":vcs_info:(git*):*" check-for-changes true
 
-local _branch="%c%u%m %{$fg[green]%}%b%{$reset_color%}"
-local _repo="%{$fg[green]%}%r %{$fg[yellow]%}%{$reset_color%}"
-local _revision="%{$fg[yellow]%}%.7i%{$reset_color%}"
-local _action="%{$fg[red]%}%a%{$reset_color%}"
-zstyle ":vcs_info:*" stagedstr "%{$fg[yellow]%}✓%{$reset_color%}"
-zstyle ":vcs_info:*" unstagedstr "%{$fg[red]%}✗%{$reset_color%}"
-zstyle ":vcs_info:git*" formats "$_branch:$_revision - $_repo"
-zstyle ":vcs_info:git*" actionformats "$_branch:$_revision:$_action - $_repo"
-zstyle ':vcs_info:git*+set-message:*' hooks git-stash
+#local _branch="%c%u%m %{$fg[green]%}%b%{$reset_color%}"
+#local _repo="%{$fg[green]%}%r %{$fg[yellow]%}%{$reset_color%}"
+#local _revision="%{$fg[yellow]%}%.7i%{$reset_color%}"
+#local _action="%{$fg[red]%}%a%{$reset_color%}"
+#zstyle ":vcs_info:*" stagedstr "%{$fg[yellow]%}✓%{$reset_color%}"
+#zstyle ":vcs_info:*" unstagedstr "%{$fg[red]%}✗%{$reset_color%}"
+#zstyle ":vcs_info:git*" formats "$_branch:$_revision - $_repo"
+#zstyle ":vcs_info:git*" actionformats "$_branch:$_revision:$_action - $_repo"
+#zstyle ':vcs_info:git*+set-message:*' hooks git-stash
 # Uncomment to enable vcs_info debug mode
 # zstyle ':vcs_info:*+*:*' debug true
 
-function +vi-git-stash() {
-	if [[ -s "${hook_com[base]}/.git/refs/stash" ]]; then
-		hook_com[misc]="%{$fg_bold[grey]%}~%{$reset_color%}"
-	fi
-}
+#function +vi-git-stash() {
+#	if [[ -s "${hook_com[base]}/.git/refs/stash" ]]; then
+#		hook_com[misc]="%{$fg_bold[grey]%}~%{$reset_color%}"
+#	fi
+#}
 
-precmd() {
-	vcs_info
-}
+#precmd() {
+#	vcs_info
+#}
 
 # virtualenvwrapper support
 # Remember to set $PROJECT_HOME in your profile file!
@@ -357,7 +370,7 @@ zplug "modules/utility",    from:prezto
 zplug "modules/ssh",        from:prezto                                                                                                                                
 zplug "modules/terminal",   from:prezto                                                                                                                                
 zplug "modules/directory",  from:prezto 
-zplug "agnoster/agnoster-zsh-theme", as:theme
+zplug "bhilburn/powerlevel9k", use:powerlevel9k.zsh-theme
 
 zplug "zsh-users/zsh-completions", defer:0
 zplug "zsh-users/zsh-autosuggestions", defer:2, on:"zsh-users/zsh-completions" 
