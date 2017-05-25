@@ -216,6 +216,8 @@ alias perms="stat -c '%A %a %n'"
 # expand sudo aliases
 alias sudo="sudo "
 
+alias vi="nvim"
+alias vim="nvim"
 
 ##
 # Functions
