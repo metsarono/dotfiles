@@ -54,4 +54,6 @@
     path = all/.zplug
     url = git://github.com/zplug/zplug.git
 
-
+[submodule "all/.colors/base16-xfce4-terminal"]
+    path = all/.colors/base16-xfce4-terminal
+    url = git://github.com/afg984/base16-xfce4-terminal.git
