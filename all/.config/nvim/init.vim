@@ -613,8 +613,7 @@ Plug 'tpope/vim-sensible'
 Plug 'junegunn/seoul256.vim'
 Plug 'vim-airline/vim-airline'
 Plug 'vim-airline/vim-airline-themes'
-Plug 'freeo/vim-kalisi'
-Plug 'francoiscabrol/ranger.vim'
+Plug 'Soares/base16.nvim'
 Plug 'rbgrouleff/bclose.vim'
 " List ends here. Plugins become visible to Vim after this call.
 call plug#end()
@@ -632,8 +631,11 @@ cmap w!! w !sudo tee > /dev/null %
 " With the default leader key, just press \s to save any changes to the current file.
 noremap <Leader>s :update<CR>
 
+let base16colorspace=256  " Access colors present in 256 colorspace
 let g:airline_powerline_fonts = 1
-let g:airline_theme = "kalisi"
- 
-colorscheme kalisi
+"let g:airline_theme = "papercolor"
+let g:base16_airline=1
+let $NVIM_TUI_ENABLE_TRUE_COLOR=1 
+set termguicolors
+colorscheme atelier-plateau
 set background=light
