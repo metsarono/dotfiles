@@ -3,7 +3,10 @@
 ## Installation
 
 ### Configure Keyboard
-```sudo dpkg-reconfigure keyboard-configuration```
+```bash
+sudo dpkg-reconfigure keyboard-configuration
+setxkbmap us -variant colemak
+```
 
 ### Installing git and stow
 #### Arch
