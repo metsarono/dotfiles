@@ -65,6 +65,9 @@ sudo pip install powerline-status
 #### Install ZPlug ZSH Plugins
 ```zplug install```
 
+#### Copy XFCE4 Terminal Colorschemes
+```sudo \cp ~/.colors/base16-xfce4-terminal/colorschemes/*.theme /usr/share/xfce4/terminal/colorschemes```
+
 ## Windows installation using Chocolatey
  0.a Install with cmd.exe
 Run the following command:
