@@ -44,7 +44,10 @@ sudo pacman -S vim zsh ranger rxvt-unicode
 chsh -s $(which zsh)
 ```
 #### Debian
-```sudo apt install vim zsh ranger rxvt-unicode```
+```bash
+sudo apt install vim zsh ranger rxvt-unicode
+chsh -s $(which zsh)
+```
 #### MacOS
 ```homebrew install vim zsh ranger```
 
