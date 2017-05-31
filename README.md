@@ -63,7 +63,12 @@ sudo pip install powerline-status
 ```
 
 #### Install ZPlug ZSH Plugins
-```zplug install```
+```bash
+export ZPLUG_HOME=~/.dotfiles/all/.zplug
+git clone https://github.com/zplug/zplug $ZPLUG_HOME
+zsh
+zplug install
+```
 
 #### Copy XFCE4 Terminal Colorschemes
 ```sudo \cp ~/.colors/base16-xfce4-terminal/colorschemes/*.theme /usr/share/xfce4/terminal/colorschemes```
