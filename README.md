@@ -78,7 +78,7 @@ zplug install
 
 ## Compile and Install Synergy
 ```bash
-sudo apt-get install cmake make g++ xorg-dev libqt4-dev libcurl4-openssl-dev libavahi-compat-libdnssd-dev libssl-dev libx11-dev
+sudo apt install cmake make g++ xorg-dev libqt4-dev libcurl4-openssl-dev libavahi-compat-libdnssd-dev libssl-dev libx11-dev fakeroot lintian
 git clone https://github.com/symless/synergy.git
 cd synergy
 QT_SELECT=4 ./hm.sh conf -g1 
