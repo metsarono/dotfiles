@@ -76,6 +76,18 @@ zplug install
 #### Copy XFCE4 Terminal Colorschemes
 ```sudo \cp ~/.colors/base16-xfce4-terminal/colorschemes/*.theme /usr/share/xfce4/terminal/colorschemes```
 
+## Compile and Install Synergy
+```bash
+sudo apt-get install cmake make g++ xorg-dev libqt4-dev libcurl4-openssl-dev libavahi-compat-libdnssd-dev libssl-dev libx11-dev
+git clone https://github.com/symless/synergy.git
+cd synergy
+QT_SELECT=4 ./hm.sh conf -g1 
+./hm.sh build
+./hm.sh package deb
+sudo dpkg -i ./bin/synergy-master-stable-ec56ac4-Linux-x86_64.deb
+synergy &
+```
+
 ## Windows installation using Chocolatey
  0.a Install with cmd.exe
 Run the following command:
