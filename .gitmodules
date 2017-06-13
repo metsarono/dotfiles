@@ -55,5 +55,45 @@
     url = git://github.com/zplug/zplug.git
 
 [submodule "all/.colors/base16-xfce4-terminal"]
-    path = all/.colors/base16-xfce4-terminal
-    url = git://github.com/afg984/base16-xfce4-terminal.git
+   path = all/.colors/base16-xfce4-terminal
+   url = git://github.com/afg984/base16-xfce4-terminal.git
+
+[submodule "all/.vim/plugged/base16-vim"]
+   path = all/.vim/plugged/base16-vim
+   url = git://github.com/chriskempson/base16-vim
+
+[submodule "all/.vim/plugged/base16.nvim"]
+   path = all/.vim/plugged/base16.nvim
+   url = git://github.com/Soares/base16.nvim
+
+[submodule "all/.vim/plugged/bclose.vim"]
+   path = all/.vim/plugged/bclose.vim
+   url = git://github.com/junegunn/vim-plug.git
+
+[submodule "all/.vim/plugged/highlighter.nvim"]
+   path = all/.vim/plugged/highlighter.nvim
+   url = git://github.com/KeitaNakamura/highlighter.nvim.git
+
+[submodule "all/.vim/plugged/ranger.vim"]
+   path = all/.vim/plugged/ranger.vim
+   url = git://github.com/francoiscabrol/ranger.vim.git
+
+[submodule "all/.vim/plugged/seoul256.vim"]
+   path = all/.vim/plugged/seoul256.vim
+   url = git://github.com/junegunn/seoul256.vim.git
+
+[submodule "all/.vim/plugged/vim-airline"]
+   path = all/.vim/plugged/vim-airline
+   url = git://github.com/vim-airline/vim-airline.git
+
+[submodule "all/.vim/plugged/vim-airline-themes"]
+   path = all/.vim/plugged/vim-airline-themes
+   url = git://github.com/vim-airline/vim-airline-themes.git
+
+[submodule "all/.vim/plugged/vim-kalisi"]
+   path = all/.vim/plugged/vim-kalisi
+   url = git://github.com/junegunn/vim-plug.git
+
+[submodule "all/.vim/plugged/vim-sensible"]
+   path = all/.vim/plugged/vim-sensible
+   url = git://github.com/tpope/vim-sensible.git
