@@ -4,6 +4,8 @@
 
 ### Configure Keyboard
 ```bash
+# Proxmox
+# sudo apt install console-data
 sudo dpkg-reconfigure keyboard-configuration
 setxkbmap us -variant colemak
 ```
