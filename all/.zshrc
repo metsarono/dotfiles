@@ -213,9 +213,6 @@ alias json="python -m json.tool"
 alias perms="stat -c '%A %a %n'"
 
 
-# expand sudo aliases
-alias sudo="sudo "
-
 #alias vi="nvim"
 #alias vim="nvim"
 
@@ -351,3 +348,6 @@ export EDITOR=/usr/bin/vim
 export VISUAL=/usr/bin/vim
 
 export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+
+# expand sudo aliases
+alias sudo="sudo "

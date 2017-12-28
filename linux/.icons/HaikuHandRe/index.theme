@@ -1,0 +1,6 @@
+[Icon Theme]
+Name=HaikuHand reHash
+Comment=Port from haiku. - Converted by GrynayS and retardTonic
+Example=left_ptr
+Inherits=core
+
