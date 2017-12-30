@@ -1,0 +1,65 @@
+#pixmap_path "icons"
+style "icon-style"
+{
+
+  stock["gtk-go-back"] = {{ "gtk-go-back.png", *, *, * }}
+  stock["gtk-go-down"] = {{ "gtk-go-down.png", *, *, * }}
+  stock["gtk-go-forward"] = {{ "gtk-go-forward.png", *, *, * }}
+
+  stock["gtk-go-up"] = {{ "gtk-go-up.png", *, *, * }}
+  stock["gtk-refresh"] = {{ "gtk-refresh.png", *, *, * }}
+  stock["gtk-stop"] = {{ "gtk-stop.png", *, *, * }}
+  stock["gtk-home"] = {{ "gtk-home.png", *, *, * }}
+  
+  stock["gtk-close"] = {{ "gtk-close.png", *, *, * }}
+  stock["gtk-copy"] = {{ "gtk-copy.png", *, *, * }}
+  stock["gtk-cut"] = {{ "gtk-cut.png", *, *, * }}
+  stock["gtk-delete"] = {{ "gtk-delete.png", *, *, * }}
+  stock["gtk-open"] = {{ "gtk-open.png", *, *, * }}
+  stock["gtk-new"] = {{ "gtk-new.png", *, *, * }}
+  stock["gtk-paste"] = {{ "gtk-paste.png", *, *, * }}
+  stock["gtk-print"] = {{ "gtk-print.png", *, *, * }}
+  stock["gtk-print-preview"] = {{ "gtk-print-preview.png", *, *, * }}
+  stock["gtk-bookmarks"] = {{ "gtk-bookmarks.png", *, *, * }}
+  stock["gtk-favorites"] = {{ "gtk-bookmarks.png", *, *, * }}
+  stock["gtk-add"] = {{ "gtk-add.png", *, *, * }}
+  stock["gtk-jump-to"] = {{ "gtk-jump-to.png", *, *, * }}
+  stock["gtk-help"] = {{ "gtk-help.png", *, *, * }}
+
+  stock["gtk-revert-to-saved"] ={{ "gtk-revert.png" }}
+
+
+
+  stock["gtk-goto-bottom"] =	{{ "gtk-go-bottom.png" }}
+  stock["gtk-goto-first"] =	{{ "gtk-go-first.png" }}
+  stock["gtk-goto-last"] =	{{ "gtk-go-last.png" }}
+  stock["gtk-goto-top"] =	{{ "gtk-go-top.png" }}
+
+  stock["gtk-apply"] = {{ "gtk-apply.png", *, *, * }}
+  stock["gtk-ok"] = {{ "gtk-ok.png", *, *, * }}
+  stock["gtk-cancel"] = {{ "gtk-cancel.png", *, *, * }}
+
+  stock["gtk-save-as"] = {{ "gtk-save-as.png", *, *, * }}
+  stock["gtk-save"] = {{ "gtk-save.png", *, *, * }}
+
+  stock["gtk-find"] = {{ "gtk-find.png", *, *, * }}
+  stock["gtk-find-and-replace"] = {{ "gtk-find-and-replace.png", *, *, * }}
+
+  stock["gtk-undo"] = {{ "gtk-undo.png", *, *, * }}
+  stock["gtk-redo"] = {{ "gtk-redo.png", *, *, * }}
+  stock["gtk-preferences"] = {{ "gtk-preferences.png", *, *, * }}
+
+ 
+  stock["gtk-zoom-100"] = {{ "gtk-zoom-100.png", *, *, * }}
+  stock["gtk-zoom-fit"] = {{ "gtk-zoom-fit.png", *, *, * }}
+  stock["gtk-zoom-in"] = {{ "gtk-zoom-in.png", *, *, * }}
+  stock["gtk-zoom-out"] = {{ "gtk-zoom-out.png", *, *, * }}
+ 
+  stock["volume-max"] = {{ "gtk-volume-max.png", *, *, * }}
+  stock["volume-med"] = {{ "gtk-volume-med.png", *, *, * }}
+  stock["volume-min"] = {{ "gtk-volume-min.png", *, *, * }}
+  stock["volume-mute"] = {{ "gtk-volume-mute.png", *, *, * }}
+  stock["volume-zero"] = {{ "gtk-volume-zero.png", *, *, * }}
+ 
+}
+class "GtkWidget" style "icon-style"

@@ -1,0 +1,5 @@
+[Icon Theme]
+Name=HaikuHand
+Comment= Port from haiku. - Converted by GrynayS
+Example=left_ptr
+Inherits=core

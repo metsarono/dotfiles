@@ -97,3 +97,7 @@
 [submodule "all/.vim/plugged/vim-sensible"]
    path = all/.vim/plugged/vim-sensible
    url = git://github.com/tpope/vim-sensible.git
+
+[submodule "linux/.icons/irix-icons-linux"]
+   path = all/.icons/irix-icons-linux
+   url = git://github.com/n-kremeris/irix-icons-linux

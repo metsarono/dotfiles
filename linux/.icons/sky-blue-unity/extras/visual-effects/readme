@@ -1,0 +1,3 @@
+copy all to /usr/share/gnome-control-center/pixmaps
+WARNING! This will replace/remove the standard icons, rename first! 
+
