@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!-- Created with Inkscape (http://www.inkscape.org/) -->
+
 <svg
    xmlns:dc="http://purl.org/dc/elements/1.1/"
    xmlns:cc="http://creativecommons.org/ns#"
@@ -9,25 +10,25 @@
    xmlns:xlink="http://www.w3.org/1999/xlink"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
-   inkscape:export-ydpi="90.000000"
-   inkscape:export-xdpi="90.000000"
-   inkscape:export-filename="/home/jimmac/Desktop/wi-fi.png"
-   width="48"
-   height="48"
+   inkscape:export-ydpi="30"
+   inkscape:export-xdpi="30"
+   inkscape:export-filename="/home/anon/.dotfiles/linux/.icons/BeOS-r5/16x16/actions/window-close.png"
+   width="51.200001"
+   height="51.200001"
    id="svg11300"
    sodipodi:version="0.32"
-   inkscape:version="0.46"
-   sodipodi:docbase="/home/dobey/Projects/gnome-icon-theme/scalable/emblems"
-   sodipodi:docname="emblem-unreadable.svg"
+   inkscape:version="0.92.1 r15371"
+   sodipodi:docname="window-close.svg"
    inkscape:output_extension="org.inkscape.output.svg.inkscape"
-   version="1.0">
+   version="1.0"
+   viewBox="0 0 48 48">
   <defs
      id="defs3">
     <inkscape:perspective
        sodipodi:type="inkscape:persp3d"
        inkscape:vp_x="0 : 24 : 1"
-       inkscape:vp_y="0 : 1000 : 0"
-       inkscape:vp_z="48 : 24 : 1"
+       inkscape:vp_y="0 : 999.99999 : 0"
+       inkscape:vp_z="47.999999 : 24 : 1"
        inkscape:persp3d-origin="24 : 16 : 1"
        id="perspective30" />
     <linearGradient
@@ -142,9 +143,9 @@
     <inkscape:perspective
        sodipodi:type="inkscape:persp3d"
        inkscape:vp_x="0 : 32 : 1"
-       inkscape:vp_y="0 : 1000 : 0"
-       inkscape:vp_z="64 : 32 : 1"
-       inkscape:persp3d-origin="32 : 21.333333 : 1"
+       inkscape:vp_y="0 : 999.99999 : 0"
+       inkscape:vp_z="63.999999 : 32 : 1"
+       inkscape:persp3d-origin="32 : 21.333332 : 1"
        id="perspective49" />
     <radialGradient
        r="8.5625"
@@ -259,8 +260,8 @@
     <inkscape:perspective
        id="perspective33"
        inkscape:persp3d-origin="24 : 16 : 1"
-       inkscape:vp_z="48 : 24 : 1"
-       inkscape:vp_y="0 : 1000 : 0"
+       inkscape:vp_z="47.999999 : 24 : 1"
+       inkscape:vp_y="0 : 999.99999 : 0"
        inkscape:vp_x="0 : 24 : 1"
        sodipodi:type="inkscape:persp3d" />
     <linearGradient
@@ -338,7 +339,7 @@
      inkscape:pageopacity="0.0"
      inkscape:pageshadow="2"
      inkscape:zoom="8"
-     inkscape:cx="26.720771"
+     inkscape:cx="6.283271"
      inkscape:cy="29.01803"
      inkscape:current-layer="layer1"
      showgrid="false"
@@ -354,7 +355,8 @@
      height="48px"
      borderlayer="true"
      inkscape:grid-points="false"
-     inkscape:guide-bbox="true" />
+     inkscape:guide-bbox="true"
+     inkscape:window-maximized="0" />
   <metadata
      id="metadata4">
     <rdf:RDF>
@@ -409,8 +411,9 @@
        transform="matrix(1.8719362,0,0,1.5205944,5.0000002,10.484903)" />
     <path
        style="fill:url(#linearGradient6945);fill-opacity:1;fill-rule:evenodd;stroke:#000000;stroke-width:1;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
-       d="M 14.82647,9.5500008 L 9.55,14.826471 L 19.22353,24.5 L 9.55,34.17353 L 14.82647,39.45 L 24.500002,29.776471 L 34.17352,39.45 L 39.45,34.17353 L 29.77647,24.5 L 39.45,14.826471 L 34.17352,9.5500008 L 24.500002,19.22353 L 14.82647,9.5500008 z "
-       id="path6930" />
+       d="M 14.82647,9.5500008 9.55,14.826471 19.22353,24.5 9.55,34.17353 14.82647,39.45 24.500002,29.776471 34.17352,39.45 39.45,34.17353 29.77647,24.5 39.45,14.826471 34.17352,9.5500008 24.500002,19.22353 Z"
+       id="path6930"
+       inkscape:connector-curvature="0" />
     <g
        inkscape:label="Layer 1"
        id="g2471"

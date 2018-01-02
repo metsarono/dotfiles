@@ -6,7 +6,7 @@
 # Most values can be set within GIMP by changing some options in the
 # Preferences dialog.
 
-(theme "CS6-black-2-blue")
+(theme "CS6-grey-3-blue")
 
 
 # end of gimprc
