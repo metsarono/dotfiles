@@ -73,6 +73,8 @@ export ZPLUG_HOME=~/.dotfiles/all/.zplug
 git clone https://github.com/zplug/zplug $ZPLUG_HOME
 zsh
 zplug install
+chsh -s /bin/zsh
+sudo reboot now
 ```
 
 #### Copy XFCE4 Terminal Colorschemes
