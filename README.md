@@ -51,8 +51,6 @@ sudo apt install vim zsh ranger rxvt-unicode
 chsh -s $(which zsh)
 ```
 #### Ubuntu
-Ubuntu
-
 ```sudo apt-get install software-properties-common
 sudo apt-get install python-software-properties
 sudo add-apt-repository ppa:neovim-ppa/stable
