@@ -55,7 +55,7 @@ chsh -s $(which zsh)
 sudo apt-get install python-software-properties
 sudo add-apt-repository ppa:neovim-ppa/stable
 sudo apt-get update
-sudo apt-get install neovim
+sudo apt-get install neovim zsh ranger rxvt-unicode
 sudo apt-get install python-dev python-pip python3-dev python3-pip
 sudo apt-get install python-dev python-pip python3-dev
 sudo apt-get install python3-setuptools
