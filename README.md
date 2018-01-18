@@ -95,6 +95,16 @@ sudo reboot now
 #### Copy XFCE4 Terminal Colorschemes
 ```sudo \cp ~/.colors/base16-xfce4-terminal/colorschemes/*.theme /usr/share/xfce4/terminal/colorschemes```
 
+## Plugins for VLC 2.x to support HEVC decoding using libde265
+```git clone https://github.com/strukturag/vlc-libde265.git 
+./autogen.sh
+./configure 
+make
+sudo make install
+sudo \ln -s /usr/local/lib/libde265_plugin.so /usr/lib/vlc/plugins/codec/libde265_plugin.so
+sudo \ln -s /usr/local/lib/libde265demux_plugin.so /usr/lib/vlc/plugins/demux/libde265demux_plugin.so
+```
+
 ## Compile and Install Synergy
 ```bash
 sudo apt install cmake make g++ xorg-dev libqt4-dev libcurl4-openssl-dev libavahi-compat-libdnssd-dev libssl-dev libx11-dev fakeroot lintian
