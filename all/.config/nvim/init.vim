@@ -615,6 +615,7 @@ Plug 'vim-airline/vim-airline'
 Plug 'vim-airline/vim-airline-themes'
 Plug 'Soares/base16.nvim'
 Plug 'rbgrouleff/bclose.vim'
+
 " List ends here. Plugins become visible to Vim after this call.
 call plug#end()
 
@@ -633,9 +634,6 @@ noremap <Leader>s :update<CR>
 
 let base16colorspace=256  " Access colors present in 256 colorspace
 let g:airline_powerline_fonts = 1
-"let g:airline_theme = "papercolor"
+let g:airline_theme = "base16_atelierdune"
 let g:base16_airline=1
-let $NVIM_TUI_ENABLE_TRUE_COLOR=1 
-set termguicolors
-colorscheme atelier-plateau
-set background=light
+set guicursor="\x1b[%p1%d q"

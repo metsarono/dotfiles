@@ -1,21 +1,49 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 20010904//EN"
-"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">
 <!-- Created with Sodipodi ("http://www.sodipodi.com/") -->
+
 <svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    id="svg287"
    sodipodi:version="0.32pre"
    width="32pt"
    height="32pt"
-   sodipodi:docbase="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/emblems/"
-   sodipodi:docname="/home/cschalle/gnome-themes-extras/Wasp/icons/scalable/emblems/emblem-noread.svg"
-   xmlns="http://www.w3.org/2000/svg"
-   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
-   xmlns:xlink="http://www.w3.org/1999/xlink">
+   sodipodi:docname="edit-clear.svg"
+   version="1.1"
+   inkscape:version="0.91 r13725"
+   inkscape:export-filename="/home/metsatron/.icons/BeOS-r5/16x16/actions/edit-clear.png"
+   inkscape:export-xdpi="36"
+   inkscape:export-ydpi="36">
+  <metadata
+     id="metadata22">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
   <defs
      id="defs289" />
   <sodipodi:namedview
-     id="base" />
+     id="base"
+     showgrid="false"
+     inkscape:zoom="5.9"
+     inkscape:cx="-4.7457627"
+     inkscape:cy="19.576271"
+     inkscape:window-width="1595"
+     inkscape:window-height="1413"
+     inkscape:window-x="65"
+     inkscape:window-y="0"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="svg287" />
   <g
      id="g190"
      style="font-size:12;stroke:#000000;overflow:visible;enable-background:new 0 0 256 256;"
@@ -36,9 +64,6 @@
          offset="1"
          style="stop-color:#B30000"
          id="stop193" />
-      
-      
-      
     </linearGradient>
     <path
        style="fill:url(#XMLID_5_);stroke:none;"
@@ -60,9 +85,6 @@
          offset="1"
          style="stop-color:#FF0000"
          id="stop200" />
-      
-      
-      
     </linearGradient>
     <path
        style="fill:url(#XMLID_6_);stroke:none;"
@@ -85,9 +107,6 @@
          offset="1"
          style="stop-color:#FFFFFF"
          id="stop207" />
-      
-      
-      
     </radialGradient>
     <path
        style="opacity:0.3;fill:url(#XMLID_7_);stroke:none;"
@@ -109,9 +128,6 @@
          offset="1"
          style="stop-color:#FFFFFF"
          id="stop214" />
-      
-      
-      
     </linearGradient>
     <path
        style="opacity:0.5;fill:url(#XMLID_8_);stroke:none;"

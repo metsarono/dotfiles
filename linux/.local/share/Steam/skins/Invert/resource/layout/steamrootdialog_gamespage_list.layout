@@ -1,0 +1,37 @@
+"resource/layout/steamrootdialog_gamespage_list.layout"
+{
+	controls
+	{
+		"GamesList"
+		{
+			tabposition=1
+		}
+	}
+
+	colors
+	{
+		ListPanel.PostSectionLeading	12
+	}	
+	
+	styles
+	{
+		ListPanelSectionHeader
+		{     
+			inset="2 0 0 0"
+			textcolor=TextHover
+			font-style="uppercase"
+			render_bg
+			{
+				0="gradient_horizontal( x0 - 1, y0, x0 + 250, y1 - 1, propertysheetbg111, Friends.ListHeaderFadeOut  )"
+			}    
+		} 
+	}
+	
+	layout
+	{
+		// content pages
+		place { control="GamesList" 		width=max height=max margin-left=1 margin-top=1 }
+
+	}
+
+}

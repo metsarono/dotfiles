@@ -2,9 +2,9 @@
 #
 # This file is written on GIMP startup and on every theme change.
 # It is NOT supposed to be edited manually. Edit your personal
-# gtkrc file instead (/home/anon/.gimp-2.8/gtkrc).
+# gtkrc file instead (/home/metsatron/.gimp-2.8/gtkrc).
 
-include "/home/anon/.gimp-2.8/themes/CS6-grey-3-blue/gtkrc"
-include "/home/anon/.gimp-2.8/gtkrc"
+include "/home/metsatron/.gimp-2.8/themes/CS6-grey-3-blue/gtkrc"
+include "/home/metsatron/.gimp-2.8/gtkrc"
 
 # end of themerc

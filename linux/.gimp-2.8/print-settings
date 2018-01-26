@@ -21,10 +21,10 @@ cover-before=none
 number-up=1
 page-set=all
 cups-number-up=1
-printer=Kodak_ESP_5250_AiO_Printer
+printer=Eastman-Kodak-Company-KODAK-ESP-5200-Series-AiO
 
 [image-setup]
-unit=1
-center-mode=3
+unit=2
+center-mode=0
 use-full-page=true
 crop-marks=false
