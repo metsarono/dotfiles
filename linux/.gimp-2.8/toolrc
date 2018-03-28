@@ -71,10 +71,10 @@
     (visible no))
 (GimpToolInfo "gimp-by-color-select-tool"
     (stock-id "gimp-tool-by-color-select")
-    (visible no))
+    (visible yes))
 (GimpToolInfo "gimp-iscissors-tool"
     (stock-id "gimp-tool-iscissors")
-    (visible no))
+    (visible yes))
 (GimpToolInfo "gimp-foreground-select-tool"
     (stock-id "gimp-tool-foreground-select")
     (visible no))
@@ -83,16 +83,16 @@
     (visible no))
 (GimpToolInfo "gimp-rotate-tool"
     (stock-id "gimp-tool-rotate")
-    (visible no))
+    (visible yes))
 (GimpToolInfo "gimp-scale-tool"
     (stock-id "gimp-tool-scale")
-    (visible no))
+    (visible yes))
 (GimpToolInfo "gimp-shear-tool"
     (stock-id "gimp-tool-shear")
-    (visible no))
+    (visible yes))
 (GimpToolInfo "gimp-perspective-tool"
     (stock-id "gimp-tool-perspective")
-    (visible no))
+    (visible yes))
 (GimpToolInfo "gimp-flip-tool"
     (stock-id "gimp-tool-flip")
     (visible no))

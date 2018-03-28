@@ -1,0 +1,215 @@
+[Icon Theme]
+Name=TDE-Classic
+Name[ca]=TDE-Clàssic
+Name[cs]=Klasický
+Name[cy]=Clasurol TDE
+Name[el]=TDE-Κλασικό
+Name[eo]=TDE-Klasika
+Name[es]=TDE-Clásico
+Name[et]=TDE klassikaline
+Name[eu]=TDE-Klasikoa
+Name[fa]=TDE کلاسیک
+Name[fi]=Klassinen TDE
+Name[fy]=TDE-klassyk
+Name[ga]=TDE Clasaiceach
+Name[gl]=TDE-Clásico
+Name[he]=קלסי של TDE
+Name[hi]=केडीई-क्लासिक
+Name[is]=TDE-klassíkt
+Name[it]=TDE classico
+Name[ja]=TDE クラシック
+Name[ka]=კლასიკური
+Name[mk]=TDE-Класик
+Name[ms]=TDE-Klasik
+Name[nb]=TDE-Klassisk
+Name[ne]=केडीई-पुरानो
+Name[nl]=TDE-klassiek
+Name[nn]=Klassisk TDE
+Name[nso]=Maemo a TDE
+Name[pl]=Klasyczny TDE
+Name[pt]=TDE-Clássico
+Name[pt_BR]=TDE Clássico
+Name[ro]=TDE Clasic
+Name[ru]=Классика
+Name[sk]=TDE klasická
+Name[sl]=TDE - Klasično
+Name[sr]=Класични TDE
+Name[sr@Latn]=Klasični TDE
+Name[sv]=TDE klassisk
+Name[ta]=TDE-பழைய
+Name[tg]=Классика
+Name[tr]=Klasik TDE
+Name[uk]=Класичний TDE
+Name[uz]=TDE klassika
+Name[uz@cyrillic]=TDE классика
+Name[ven]=TDE ya tshifhingani tsho fhelaho
+Name[vi]=TDE-Truyền thống
+Name[xh]=TDE-Endala
+Name[zh_CN]=TDE 经典
+Name[zh_TW]=TDE-古典
+Name[zu]=Okwasendulo kwe-TDE
+Comment=TDE Classic Icon Theme
+Comment[bg]=Класическата тема с икони за TDE
+Comment[br]=Giz arlun da gustum evit TDE
+Comment[bs]=TDE klasična tema ikona
+Comment[ca]=Tema d'icones TDE clàssic
+Comment[cs]=Klasický motiv ikon TDE
+Comment[cy]=Thema Eicon Clasurol TDE
+Comment[da]=TDE's klassiske ikontema
+Comment[de]=TDE-Classic Symboldesign
+Comment[el]=Κλασικό θέμα εικονιδίων του TDE
+Comment[eo]=TDE-klasika piktogrametoso
+Comment[es]=Tema de iconos TDE clásico
+Comment[et]=TDE klassikaline ikooniteema
+Comment[eu]=TDE-ren ikono gai klasikoa
+Comment[fa]=چهرۀ شمایل TDE کلاسیک
+Comment[fi]=Klassisen TDE:n kuvaketeema
+Comment[fr]=Thème d'icônes TDE Classique
+Comment[fy]=It klassike TDE-piktogramtema
+Comment[ga]=Téama Deilbhíní Clasaiceach TDE
+Comment[gl]=Os ícones clásicos de TDE
+Comment[he]=ערכת סמלים קלסית של TDE
+Comment[hi]=केडीई क्लासिक प्रतीक प्रसंग
+Comment[hu]=Hagyományos TDE-s ikontéma
+Comment[is]=TDE Klassískt táknmyndaþema
+Comment[it]=Il tema di TDE con icone classiche
+Comment[ja]=TDE クラシックアイコンテーマ
+Comment[ka]=TDE პიქტოგრამების კლასიკური თემა
+Comment[lt]=TDE Classic ženkliukų tema
+Comment[mk]=Класична тема за икони во TDE
+Comment[ms]=Tema Ikon Klasik TDE
+Comment[nb]=TDE Klassisk ikontema
+Comment[nds]=Dat klass'sche Lüttbildmuster vun TDE
+Comment[ne]=केडीई पुरानो प्रतिमा विषयवस्तु
+Comment[nl]=Het klassieke TDE-pictogramthema
+Comment[nn]=Klassisk TDE-ikontema
+Comment[nso]=Molaetsa wa Seemedi sa Maemo a TDE
+Comment[pa]=TDE ਟਕਸਾਲੀ ਆਈਕਾਨ ਸਰੂਪ
+Comment[pl]=Klasyczny motyw ikon TDE
+Comment[pt]=Tema de Ícones Clássico do TDE
+Comment[pt_BR]=Temas de Ícones Clássico do TDE
+Comment[ro]=Tematică de iconiţe TDE clasică
+Comment[ru]=Классическая тема значков TDE
+Comment[sk]=Klasická ikonová téma TDE
+Comment[sl]=Tema klasičnih ikon TDE
+Comment[sr]=Класична TDE-ова тема икона
+Comment[sr@Latn]=Klasična TDE-ova tema ikona
+Comment[sv]=Klassiskt TDE-ikontema
+Comment[ta]=TDE பழைய சின்ன பொருள்
+Comment[tg]=Мавзӯъи классикии пиктограммаи TDE
+Comment[tr]=TDE Klasik Simge Teması
+Comment[uk]=Класична тема піктограм TDE
+Comment[uz]=TDE klassik nishonchalar mavzusi
+Comment[uz@cyrillic]=TDE классик нишончалар мавзуси
+Comment[ven]=Thero ya Aikhono ya TDE ya tshifhinga tsho fhelaho
+Comment[vi]=Sắc thái Biểu tượng Truyền thống TDE
+Comment[xh]=Umxholo Wephawu lomfanekiso We TDE Wakudala
+Comment[zh_CN]=TDE 经典图标主题
+Comment[zh_TW]=TDE 古典圖示主題
+Comment[zu]=Ithimu Yophawu lwesithombe se-TDE Yasendulo
+DisplayDepth=32
+Example=exec
+Inherits=default
+LinkOverlay=link
+LockOverlay=lockoverlay
+ZipOverlay=zip
+DesktopDefault=32
+DesktopSizes=16,32,48,64
+ToolbarDefault=22
+ToolbarSizes=16,22,32
+MainToolbarDefault=22
+MainToolbarSizes=16,22,32
+SmallDefault=16
+SmallSizes=16
+PanelDefault=32
+PanelSizes=16,32,48
+Directories=16x16/actions,22x22/actions,16x16/apps,16x16/categories,22x22/categories,32x32/apps,32x32/categories,16x16/devices,32x32/devices,16x16/places,32x32/places,16x16/mimetypes,32x32/mimetypes,32x32/actions,48x48/apps,48x48/categories,48x48/devices,48x48/places,48x48/mimetypes,64x64/places,64x64/mimetypes,64x64 apps
+[16x16/actions]
+Size=16
+Context=Actions
+Type=Threshold
+[22x22/actions]
+Size=22
+Context=Actions
+Type=Threshold
+[22x22/categories]
+Size=22
+Context=Categories
+Type=Threshold
+[32x32/actions]
+Size=32
+Context=Actions
+Type=Threshold
+[16x16/apps]
+Size=16
+Context=Applications
+Type=Threshold
+[16x16/categories]
+Size=16
+Context=Categories
+Type=Threshold
+[16x16/devices]
+Size=16
+Context=Devices
+Type=Threshold
+[32x32/apps]
+Size=32
+Context=Applications
+Type=Threshold
+[32x32/categories]
+Size=32
+Context=Categories
+Type=Threshold
+[32x32/devices]
+Size=32
+Context=Devices
+Type=Threshold
+[16x16/places]
+Size=16
+Context=Places
+Type=Threshold
+[32x32/places]
+Size=32
+Context=Places
+Type=Threshold
+[16x16/mimetypes]
+Size=16
+Context=MimeTypes
+Type=Threshold
+[32x32/mimetypes]
+Size=32
+Context=MimeTypes
+Type=Threshold
+[48x48/apps]
+Size=48
+Context=Applications
+Type=Threshold
+[48x48/categories]
+Size=48
+Context=Categories
+Type=Threshold
+[48x48/devices]
+Size=48
+Context=Devices
+Type=Threshold
+[48x48/places]
+Size=48
+Context=Places
+Type=Threshold
+[48x48/mimetypes]
+Size=48
+Context=MimeTypes
+Type=Threshold
+[64x64/mimetypes]
+Size=64
+Context=MimeTypes
+Type=Threshold
+[64x64/places]
+Size=64
+Context=Places
+Type=Threshold
+[64x64/apps]
+Size=64
+Context=Applications
+Type=Threshold
+

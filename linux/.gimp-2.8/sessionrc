@@ -11,13 +11,13 @@
     (size 954 1144))
 (session-info "toplevel"
     (factory-entry "gimp-single-image-window")
-    (position 760 1440)
+    (position 799 221)
     (size 1920 1057)
     (open-on-exit)
     (aux-info
         (left-docks-width "58")
         (right-docks-width "226")
-        (maximized "yes"))
+        (maximized "no"))
     (gimp-toolbox
         (side left))
     (gimp-dock
@@ -37,7 +37,7 @@
                 (aux-info
                     (show-button-bar "true"))))
         (book
-            (position 445)
+            (position 543)
             (current-page 0)
             (dockable "gimp-layer-list"
                 (tab-style name)
@@ -56,7 +56,7 @@
                     (show-button-bar "true"))))
         (book
             (position 864)
-            (current-page 0)
+            (current-page 3)
             (dockable "gimp-navigation-view"
                 (tab-style name)
                 (aux-info
@@ -86,11 +86,11 @@
     (position 620 312))
 (session-info "toplevel"
     (factory-entry "gimp-file-save-dialog")
-    (position 454 47)
+    (position 845 1721)
     (size 720 540))
 (session-info "toplevel"
     (factory-entry "gimp-file-export-dialog")
-    (position 454 47)
+    (position 1557 489)
     (size 720 540))
 (session-info "toplevel"
     (factory-entry "gimp-scale-tool-dialog")
@@ -100,7 +100,7 @@
     (position 1104 256))
 (session-info "toplevel"
     (factory-entry "gimp-colorize-tool-dialog")
-    (position 1104 256))
+    (position 1707 212))
 (session-info "toplevel"
     (factory-entry "gimp-measure-tool-dialog")
     (position 1104 256))
@@ -116,23 +116,33 @@
     (size 729 636))
 (session-info "toplevel"
     (factory-entry "gimp-toolbox-color-dialog")
-    (position 813 456))
+    (position 844 1890))
 (session-info "toplevel"
     (factory-entry "gimp-shear-tool-dialog")
     (position 1104 256))
 (session-info "toplevel"
     (factory-entry "gimp-brightness-contrast-tool-dialog")
-    (position 197 521))
+    (position 2049 710))
 (session-info "toplevel"
     (factory-entry "gimp-color-balance-tool-dialog")
-    (position 572 66))
+    (position 1359 512))
 (session-info "toplevel"
     (factory-entry "gimp-levels-tool-dialog")
     (position 1119 227)
     (size 370 505))
 (session-info "toplevel"
     (factory-entry "gimp-hue-saturation-tool-dialog")
-    (position 1037 197))
+    (position 1228 469))
+(session-info "toplevel"
+    (factory-entry "gimp-desaturate-tool-dialog")
+    (position 955 1573))
+(session-info "toplevel"
+    (factory-entry "gimp-perspective-tool-dialog")
+    (position 1386 1154))
+(session-info "toplevel"
+    (factory-entry "gimp-curves-tool-dialog")
+    (position 1540 0)
+    (size 363 507))
 
 (hide-docks no)
 (single-window-mode yes)

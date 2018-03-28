@@ -25,6 +25,6 @@ printer=Eastman-Kodak-Company-KODAK-ESP-5200-Series-AiO
 
 [image-setup]
 unit=2
-center-mode=0
+center-mode=3
 use-full-page=true
 crop-marks=false

@@ -1,0 +1,146 @@
+* metsatron dotfiles
+
+** Installation
+
+*** Configure Keyboard
+
+#+BEGIN_EXAMPLE
+    # Proxmox
+    # sudo apt install console-data
+    sudo dpkg-reconfigure keyboard-configuration
+    setxkbmap us -variant colemak
+#+END_EXAMPLE
+
+*** Installing git and stow
+
+**** Arch
+
+=sudo pacman -S git stow= #### Debian
+
+#+BEGIN_EXAMPLE
+    sudo apt update
+    sudo apt install git stow
+#+END_EXAMPLE
+
+**** MacOS
+
+#+BEGIN_EXAMPLE
+    homebrew update
+    homebrew install git stow
+#+END_EXAMPLE
+
+*** Clone dotfiles
+
+#+BEGIN_EXAMPLE
+    git clone --recursive https://github.com/metsarono/dotfiles.git ~/.dotfiles
+    cd ~/.dotfiles
+    git submodule update --recursive --remote
+#+END_EXAMPLE
+
+*** Stowing dotfiles
+
+**** Arch
+
+=stow all linux arch= #### Debian =stow all linux debian= #### MacOS
+=stow all osx=
+
+*** Installing tools
+
+**** Arch
+
+#+BEGIN_EXAMPLE
+    sudo pacman -S vim zsh ranger rxvt-unicode
+    chsh -s $(which zsh)
+#+END_EXAMPLE
+
+**** Debian
+
+#+BEGIN_EXAMPLE
+    sudo apt install vim zsh ranger rxvt-unicode
+    chsh -s $(which zsh)
+#+END_EXAMPLE
+
+**** Ubuntu
+
+=sudo apt-get install software-properties-common sudo apt-get install python-software-properties sudo add-apt-repository ppa:neovim-ppa/stable sudo apt-get update sudo apt-get install neovim zsh ranger rxvt-unicode sudo apt-get install python-dev python-pip python3-dev python3-pip sudo apt-get install python-dev python-pip python3-dev sudo apt-get install python3-setuptools sudo easy_install3 pip sudo update-alternatives --install /usr/bin/vi vi /usr/bin/nvim 60 sudo update-alternatives --install /usr/bin/vim vim /usr/bin/nvim 60 sudo update-alternatives --install /usr/bin/editor editor /usr/bin/nvim 60=
+
+**** MacOS
+
+=homebrew install vim zsh ranger=
+
+*** Updating fonts
+
+=fc-cache -f $fond_dir=
+
+**** Load .Xresources
+
+=xrdb ~/.Xresources=
+
+*** Install Powerline
+
+**** Debian
+
+#+BEGIN_EXAMPLE
+    wget https://bootstrap.pypa.io/get-pip.py
+    sudo python get-pip.py
+    sudo pip install powerline-status
+#+END_EXAMPLE
+
+**** Install ZPlug ZSH Plugins
+
+#+BEGIN_EXAMPLE
+    export ZPLUG_HOME=~/.dotfiles/all/.zplug
+    git clone https://github.com/zplug/zplug $ZPLUG_HOME
+    zsh
+    zplug install
+    chsh -s /bin/zsh
+    sudo reboot now
+#+END_EXAMPLE
+
+**** Copy XFCE4 Terminal Colorschemes
+
+=sudo \cp ~/.colors/base16-xfce4-terminal/colorschemes/*.theme /usr/share/xfce4/terminal/colorschemes=
+
+** Plugins for VLC 2.x to support HEVC decoding using libde265
+
+=git clone https://github.com/strukturag/vlc-libde265.git  ./autogen.sh ./configure  make sudo make install sudo \ln -s /usr/local/lib/libde265_plugin.so /usr/lib/vlc/plugins/codec/libde265_plugin.so sudo \ln -s /usr/local/lib/libde265demux_plugin.so /usr/lib/vlc/plugins/demux/libde265demux_plugin.so=
+
+** Compile and Install Synergy
+
+#+BEGIN_EXAMPLE
+    sudo apt install cmake make g++ xorg-dev libqt4-dev libcurl4-openssl-dev libavahi-compat-libdnssd-dev libssl-dev libx11-dev fakeroot lintian
+    git clone https://github.com/symless/synergy.git
+    cd synergy
+    QT_SELECT=4 ./hm.sh conf -g1 
+    ./hm.sh build
+    ./hm.sh package deb
+    sudo dpkg -i ./bin/synergy-master-stable-ec56ac4-Linux-x86_64.deb
+    synergy &
+#+END_EXAMPLE
+
+** Windows installation using Chocolatey
+
+0.a Install with cmd.exe Run the following command:
+
+#+BEGIN_EXAMPLE
+    @powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))" && SET "PATH=%PATH%;%ALLUSERSPROFILE%\chocolatey\bin"
+    Install with PowerShell.exe
+#+END_EXAMPLE
+
+0.b With PowerShell, there is an additional step. You must ensure
+Get-ExecutionPolicy is not Restricted. We suggest using Bypass to bypass
+the policy to get things installed or AllSigned for quite a bit more
+security.
+
+Run Get-ExecutionPolicy. If it returns Restricted, then run
+Set-ExecutionPolicy AllSigned or Set-ExecutionPolicy Bypass. Now run the
+following command:
+
+#+BEGIN_EXAMPLE
+    # Don't forget to ensure ExecutionPolicy above
+    iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+#+END_EXAMPLE
+
+1. Install using [[https://chocolatey.org/][Chocolatey]] with
+   =choco install keepass-keepasshttp=
+2. Restart KeePass if it is currently running to load the plugin

@@ -99,5 +99,12 @@
    url = git://github.com/tpope/vim-sensible.git
 
 [submodule "linux/.icons/irix-icons-linux"]
-   path = all/.icons/irix-icons-linux
+   path = linux/.icons/irix-icons-linux
    url = git://github.com/n-kremeris/irix-icons-linux
+
+[submodule "all/.emacs.d"]
+   path = all/.emacs.d
+   url = git://github.com/syl20bnr/spacemacs
+[submodule "all/.emacs.d.bak"]
+	path = all/.emacs.d.bak
+	url = https://github.com/syl20bnr/spacemacs

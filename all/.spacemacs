@@ -31,6 +31,7 @@ values."
    ;; List of configuration layers to load.
    dotspacemacs-configuration-layers
    '(
+     vimscript
      markdown
      ;; ----------------------------------------------------------------
      ;; Example of useful layers you may want to use right away.
@@ -38,24 +39,35 @@ values."
      ;; <M-m f e R> (Emacs style) to install them.
      ;; ----------------------------------------------------------------
      helm
-     ;; auto-completion
-     ;; better-defaults
+     ;; ivy
+     auto-completion
+     better-defaults
      emacs-lisp
-     ;; git
-     ;; markdown
-     ;; org
-     ;; (shell :variables
-     ;;        shell-default-height 30
-     ;;        shell-default-position 'bottom)
-     ;; spell-checking
-     ;; syntax-checking
-     ;; version-control
+     ;; emoji
+     git
+     markdown
+     (org :variables
+          org-enable-github-support t)
+     (shell :variables
+             shell-default-height 30
+             shell-default-position 'bottom)
+     spell-checking
+     syntax-checking
+     version-control
+     themes-megapack
+     evil-commentary
+     html
+     javascript
+     habitica-loader
+     brzeemacs
      )
    ;; List of additional packages that will be installed without being
    ;; wrapped in a layer. If you need some configuration for these
    ;; packages, then consider creating a layer. You can also put the
    ;; configuration in `dotspacemacs/user-config'.
-   dotspacemacs-additional-packages '()
+   dotspacemacs-additional-packages '(
+     (habitica-loader :location local)
+     )
    ;; A list of packages that cannot be updated.
    dotspacemacs-frozen-packages '()
    ;; A list of packages that will not be installed and loaded.
@@ -127,8 +139,8 @@ values."
    ;; List of themes, the first of the list is loaded when spacemacs starts.
    ;; Press <SPC> T n to cycle to the next theme in the list (works great
    ;; with 2 themes variants, one dark and one light)
-   dotspacemacs-themes '(tango
-                         spacemacs-dark)
+   dotspacemacs-themes '(solarized-dark
+                         solarized-light)
    ;; If non nil the cursor color matches the state color in GUI Emacs.
    dotspacemacs-colorize-cursor-according-to-state t
    ;; Default font, or prioritized list of fonts. `powerline-scale' allows to
@@ -137,7 +149,7 @@ values."
                                :size 14
                                :weight Semibold
                                :width normal
-                               :powerline-scale 1.2)
+                               :powerline-scale 1.3)
    ;; The leader key
    dotspacemacs-leader-key "SPC"
    ;; The key used for Emacs commands (M-x) (after pressing on the leader key).
@@ -310,10 +322,11 @@ layers configuration.
 This is the place where most of your configurations should be done. Unless it is
 explicitly specified that a variable should be set before a package is loaded,
 you should place your code here."
-  (setq habitica-packages '(habitica))
-  (setq habitica-uid "2cb9ea4d-28fc-4732-a4a0-ab93ccb574f3")
-
-  )
-
+  (setq browse-url-browser-function 'browse-url-generic
+        browse-url-generic-program "seamonkey")
+  (setq org-startup-with-inline-images t)
+  (setq org-odt-category-map-alist
+        '(("__Figure__" "Illustration" "value" "Figure" org-odt--enumerable-image-p)))
+)
 ;; Do not write anything past this comment. This is where Emacs will
 ;; auto-generate custom variable definitions.
