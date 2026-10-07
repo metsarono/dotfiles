@@ -2225,11 +2225,10 @@ if [ -z "$TEXT" ]; then
     exit 0
 fi
 
-# Voice is an auxiliary rendering of the Telegram reply, not a second archive.
-# Bound pathological payloads so an accidental transcript/tool dump cannot
-# occupy the phone for tens of minutes. Set PVOX_REPLY_MAX_CHARS=0 to disable.
-MAX_CHARS="${PVOX_REPLY_MAX_CHARS:-4000}"
-case "$MAX_CHARS" in *[!0-9]*|'') MAX_CHARS=4000 ;; esac
+# Speak the whole reply (ruling 2026-10-07: voice notes must not be cut short).
+# Set PVOX_REPLY_MAX_CHARS=N to bound pathological payloads again; 0 or unset = no cap.
+MAX_CHARS="${PVOX_REPLY_MAX_CHARS:-0}"
+case "$MAX_CHARS" in *[!0-9]*|'') MAX_CHARS=0 ;; esac
 ORIGINAL_CHARS="${#TEXT}"
 if [ "$MAX_CHARS" -gt 0 ] && [ "$ORIGINAL_CHARS" -gt "$MAX_CHARS" ]; then
     TEXT="$(printf '%s' "$TEXT" | python3 -c '
