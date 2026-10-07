@@ -360,7 +360,7 @@ KITTEN_PY = os.path.expanduser("~/kitten-venv/bin/python")
 MODEL = os.environ.get("HONEY_VOICE_MODEL", "KittenML/kitten-tts-nano-0.8-int8")
 VOICE = os.environ.get("HONEY_VOICE", "")
 SPEED = os.environ.get("HONEY_VOICE_SPEED", "1.2")
-MAX_CHARS = int(os.environ.get("HONEY_VOICE_MAX_CHARS", "4000") or 0)
+MAX_CHARS = int(os.environ.get("HONEY_VOICE_MAX_CHARS", "0") or 0)  # 0 = speak the whole reply (2026-10-07)
 SYNTH = r"""
 import sys
 import numpy as np
