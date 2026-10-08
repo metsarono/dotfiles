@@ -1,0 +1,235 @@
+#+TITLE: Nano complete-series deployment fixtures
+#+DESCRIPTION: Offline pinned-source preflight, drift and preservation checks
+#+PROPERTY: header-args :mkdirp yes :results silent :comments no
+
+* Offline apply contract
+Run with =NANOBOT_TEST_ARCHIVE= pointing to the verified pinned source archive.
+The local UV fixture copies pristine files and logs arguments; it never installs
+packages or contacts a provider. The suite invokes only this checkout's scripts.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-nanobot-apply.py :comments no
+"""Offline Nano apply fixtures; the installer is a local copy/log fixture only."""
+from pathlib import Path
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+
+REPO = Path(os.environ["NANOBOT_TEST_REPO"]) if "NANOBOT_TEST_REPO" in os.environ else Path(__file__).resolve().parents[5]
+ARCHIVE = Path(os.environ["NANOBOT_TEST_ARCHIVE"])
+PYTHON = sys.executable or shutil.which("python3")
+if not PYTHON:
+    raise RuntimeError("python3 interpreter path is unavailable")
+APPLY = REPO / "linux/.local/bin/nanobot-apply"
+HEALTH = REPO / "linux/.local/bin/nanobot-health"
+MANAGED = ("agent/autocompact.py", "channels/telegram/runtime.py", "agent/tools/execution.py",
+           "agent/tools/registry.py", "agent/loop.py", "cli/gateway_runtime.py",
+           "agent/tools/search_isolation.py")
+
+class ApplyTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="nano-preflight-fixture-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.live = self.root / "live"
+        self.workspace = self.live / "workspace"
+        self.venv = self.workspace / ".venv"
+        self.site = self.venv / "site"
+        self.config = self.live / "config/config.json"
+        self.workspace.mkdir(parents=True)
+        self.config.parent.mkdir(parents=True)
+        self.config.parent.chmod(0o751)
+        self.config.write_text(json.dumps(dict(agents=dict(defaults=dict(modelPreset="chosen", idleCompactAfterMinutes=15)),
+             modelPresets=dict(chosen=dict(model="user-model",provider="user-provider")),
+             providers=dict(selected=dict(apiKey="private-fixture",apiBase="${PRIVATE_ENDPOINT}")),
+             channels=dict(telegram=dict(token="private-fixture-token")),unknownNative=dict(pairing="fixture"))))
+        self.config.chmod(0o640)
+        self.template = self.root / "template.json"
+        self.template.write_text(json.dumps(dict(agents=dict(defaults=dict(modelPreset="template",idleCompactAfterMinutes=0,idleCompactCheckIntervalSeconds=60)),
+             modelPresets=dict(template=dict(model="template-model",provider="template-provider")),
+             channels=dict(telegram=dict(token="${TOKEN}", enabled=True)),tools=dict(restrictToWorkspace=False))))
+        self.inputs = self.root / "inputs"
+        self.inputs.mkdir()
+        self.patches=[]
+        for name in ("cache-policy","voice-reply","tool-isolation","idle-prompt"):
+            p=self.inputs / (name+".patch")
+            shutil.copyfile(REPO / ("all/.bots/patches/nanobot-"+name+".patch"),p)
+            self.patches.append(p)
+        self.seam=self.inputs / "search.py"
+        shutil.copyfile(REPO / "all/.bots/patches/nanobot-search-isolation.py",self.seam)
+        self.pristine=self.root / "pristine"
+        with tarfile.open(ARCHIVE) as tar:tar.extractall(self.pristine,filter="data")
+        self.package=self.pristine / "nanobot_ai-0.3.5/nanobot"
+        self.site.mkdir(parents=True)
+        shutil.copytree(self.package,self.site / "nanobot")
+        self.stamp=self.venv / ".dotcortex-runtime-patches.sha256"
+        self.stamp.write_bytes(b"old-stamp\n")
+        self.native={}
+        for name in ("SOUL.md","USER.md","memory/MEMORY.md","HEARTBEAT.md",".nanobot/session/state.json",".nanobot/cron/jobs.json"):
+            p=self.workspace/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(("native-fixture-"+name).encode());p.chmod(0o640)
+            self.native[name]=p.read_bytes()
+        bindir=self.venv / "bin";bindir.mkdir()
+        python=bindir / "python"
+        python.write_text('#!'+PYTHON+'\nimport os,sys,json\nfrom pathlib import Path\n'
+            'if len(sys.argv)>2 and sys.argv[1]=="-c" and "site.getsitepackages" in sys.argv[2]:\n'
+            ' if os.environ.get("FIXTURE_DRIFT_INPUT"): Path(os.environ["FIXTURE_DRIFT_INPUT"]).write_text("drift")\n'
+            ' print(json.dumps([os.environ["FIXTURE_SITE"],"0.3.5"]))\n'
+            'else: raise SystemExit("unexpected fixture python call")\n')
+        python.chmod(0o755)
+        cli=bindir / "nanobot";cli.write_text('#!/bin/sh\necho "forbidden native initialization" >&2\nexit 99\n');cli.chmod(0o755)
+        home=self.root / "home"; tools=home / ".local/bin";tools.mkdir(parents=True)
+        uv=tools / "uv"
+        uv.write_text('#!'+PYTHON+'\nimport os,sys,json,shutil\nfrom pathlib import Path\n'
+            'with Path(os.environ["FIXTURE_INSTALLER_LOG"]).open("a") as log: log.write(json.dumps(sys.argv[1:])+"\\n")\n'
+            'if os.environ.get("FIXTURE_INSTALLER_FAIL"): raise SystemExit(31)\n'
+            'if sys.argv[1:3]==["pip","install"]:\n'
+            ' source=Path(os.environ["FIXTURE_PRISTINE"]); target=Path(os.environ["FIXTURE_SITE"])/"nanobot"\n'
+            ' shutil.copytree(source,target,dirs_exist_ok=True)\n'
+            ' if os.environ.get("FIXTURE_BAD_INSTALL"): (target/"agent/autocompact.py").write_text("wrong bytes")\n'
+            'else: raise SystemExit("unexpected installer action")\n')
+        uv.chmod(0o755)
+        self.log=self.root / "installer.log"
+        self.env=os.environ.copy();self.env.update(HOME=str(home),NANOBOT_WORKSPACE=str(self.workspace),NANOBOT_VENV=str(self.venv),
+            NANOBOT_CONFIG_DIR=str(self.config.parent),NANOBOT_CONFIG=str(self.config),NANOBOT_CONFIG_TEMPLATE=str(self.template),
+            NANOBOT_SOURCE_ARCHIVE=str(ARCHIVE),NANOBOT_CACHE_POLICY_PATCH=str(self.patches[0]),NANOBOT_VOICE_REPLY_PATCH=str(self.patches[1]),
+            NANOBOT_TOOL_PATCH=str(self.patches[2]),NANOBOT_IDLE_PROMPT_PATCH=str(self.patches[3]),
+            NANOBOT_SEARCH_ISOLATION=str(self.seam),FIXTURE_SITE=str(self.site),
+            FIXTURE_PRISTINE=str(self.package),FIXTURE_INSTALLER_LOG=str(self.log),PYTHONDONTWRITEBYTECODE="1")
+        self.env.pop("FIXTURE_DRIFT_INPUT",None)
+        self.env.pop("FIXTURE_INSTALLER_FAIL",None)
+        self.env.pop("FIXTURE_BAD_INSTALL",None)
+
+    def snapshot(self):
+        return {str(p.relative_to(self.live)):(p.stat().st_mode,p.read_bytes() if p.is_file() else None)
+                for p in [self.live,*self.live.rglob("*")]}
+
+    def run_apply(self,*args, program=APPLY):
+        return subprocess.run(["/bin/bash",str(program),*args],env=self.env,capture_output=True,text=True,timeout=30)
+
+    def unchanged_failure(self):
+        before=self.snapshot();result=self.run_apply()
+        self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertEqual(self.snapshot(),before)
+        self.assertFalse(self.log.exists(),"installer was invoked before preflight passed")
+
+    def expected(self):
+        target=self.root / "expected";shutil.copytree(self.package,target / "nanobot")
+        for p in self.patches:
+            subprocess.run(["git","apply","--check",str(p)],cwd=target,check=True,capture_output=True)
+            subprocess.run(["git","apply",str(p)],cwd=target,check=True,capture_output=True)
+        shutil.copyfile(self.seam,target / "nanobot/agent/tools/search_isolation.py")
+        expected = {rel:(target/"nanobot"/rel).read_bytes() for rel in MANAGED}
+        gnu = self.root / "gnu-expected"
+        shutil.copytree(self.package, gnu / "nanobot")
+        for p in self.patches:
+            result = subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i", str(p)], cwd=gnu,
+                                    check=True, capture_output=True, text=True)
+            self.assertNotIn("offset", result.stdout + result.stderr)
+            self.assertNotIn("fuzz", result.stdout + result.stderr)
+        shutil.copyfile(self.seam, gnu / "nanobot/agent/tools/search_isolation.py")
+        self.assertEqual(expected, {rel:(gnu/"nanobot"/rel).read_bytes() for rel in MANAGED})
+        return expected
+
+    def test_manifest_symlink_fails_before_all_mutation(self):
+        destination = self.root / "manifest-target"
+        self.stamp.rename(destination)
+        self.stamp.symlink_to(destination)
+        before = destination.read_bytes()
+        self.unchanged_failure()
+        self.assertEqual(destination.read_bytes(), before)
+
+    def test_absent_workspace_and_config_remain_absent_on_late_failure(self):
+        self.env["NANOBOT_WORKSPACE"] = str(self.live / "absent-workspace")
+        self.env["NANOBOT_VENV"] = str(self.live / "absent-workspace/.venv")
+        self.env["NANOBOT_CONFIG"] = str(self.live / "absent-config/config.json")
+        self.patches[-1].write_text("corrupt final patch\n")
+        self.unchanged_failure()
+
+    def test_late_patch_failure_is_before_all_mutation(self):
+        self.patches[-1].write_text("corrupt final patch\n");self.unchanged_failure()
+
+    def test_missing_patch_and_bad_seam_are_before_all_mutation(self):
+        self.env["NANOBOT_VOICE_REPLY_PATCH"]=str(self.inputs/"absent");self.unchanged_failure()
+        self.env["NANOBOT_VOICE_REPLY_PATCH"]=str(self.patches[1]);self.seam.write_text("def invalid(:\n");self.unchanged_failure()
+
+    def test_bad_current_template_and_managed_shape_are_before_all_mutation(self):
+        original=self.config.read_bytes()
+        for bad in (b"invalid",b"[]",b'{"x":NaN}',b'{"x":1e999}',b'{"x":1,"x":2}',b'{"agents":true}',b'{"agents":{"defaults":{"modelPreset":"absent"}}}'):
+            self.config.write_bytes(bad);self.unchanged_failure()
+        self.config.write_bytes(original)
+        self.template.write_text("[]");self.unchanged_failure()
+
+    def test_bad_artifact_and_path_are_before_all_mutation(self):
+        bad=self.root / "wrong.tar.gz";bad.write_bytes(b"not the pinned artifact")
+        for name in (bad,self.root / "missing",self.root):
+            self.env["NANOBOT_SOURCE_ARCHIVE"]=str(name);self.unchanged_failure()
+
+    def test_input_drift_at_gate_is_before_all_mutation(self):
+        self.env["FIXTURE_DRIFT_INPUT"]=str(self.patches[0]);self.unchanged_failure()
+
+    def test_success_matches_staged_bytes_and_preserves_private_native_state(self):
+        expected=self.expected();result=self.run_apply()
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        for rel,data in expected.items():self.assertEqual((self.site/"nanobot"/rel).read_bytes(),data)
+        config=json.loads(self.config.read_text());self.assertEqual(config["agents"]["defaults"]["modelPreset"],"chosen")
+        self.assertEqual(config["modelPresets"]["chosen"],dict(model="user-model",provider="user-provider"))
+        self.assertEqual(config["providers"]["selected"],dict(apiKey="private-fixture",apiBase="${PRIVATE_ENDPOINT}"))
+        self.assertEqual(config["channels"]["telegram"]["token"],"private-fixture-token")
+        self.assertEqual(config["unknownNative"],dict(pairing="fixture"))
+        self.assertEqual(config["agents"]["defaults"]["idleCompactAfterMinutes"],0)
+        for name,data in self.native.items():self.assertEqual((self.workspace/name).read_bytes(),data)
+        calls=[json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual(len(calls),1)
+        self.assertIn("nanobot-ai==0.3.5",calls[0])
+        self.assertIn("python-telegram-bot[socks,webhooks]>=22.6,<23.0",calls[0])
+        self.assertIn("python-socks[asyncio]>=2.8,<3.0",calls[0])
+        self.assertEqual(self.config.stat().st_mode&0o777,0o600)
+        self.assertEqual(self.config.parent.stat().st_mode&0o777,0o700)
+
+    def test_byte_drift_is_repaired_despite_stamp_and_markers(self):
+        self.assertEqual(self.run_apply().returncode,0)
+        p=self.site/"nanobot/agent/autocompact.py";expected=p.read_bytes();p.write_bytes(expected+b"\n# deliberate payload drift\n")
+        result=self.run_apply();self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(p.read_bytes(),expected)
+        self.assertEqual(len(self.log.read_text().splitlines()),2)
+
+    def test_stale_stamp_does_not_force_installer_when_bytes_match(self):
+        self.assertEqual(self.run_apply().returncode,0)
+        self.stamp.write_text("stale stamp")
+        self.assertEqual(self.run_apply().returncode,0)
+        self.assertEqual(len(self.log.read_text().splitlines()),1)
+        self.assertEqual(json.loads(self.stamp.read_text())["format"],"nanobot-seams.v1")
+
+    def test_installer_failure_fails_loud_after_gate(self):
+        self.env["FIXTURE_INSTALLER_FAIL"]="1";before=self.snapshot();result=self.run_apply()
+        self.assertNotEqual(result.returncode,0)
+        self.assertTrue(self.log.exists());self.assertEqual(self.snapshot(),before)
+
+    def test_wrong_installed_bytes_fail_before_stamp_or_config_publish(self):
+        self.env["FIXTURE_BAD_INSTALL"]="1";config=self.config.read_bytes();stamp=self.stamp.read_bytes()
+        result=self.run_apply();self.assertNotEqual(result.returncode,0)
+        self.assertEqual(self.config.read_bytes(),config);self.assertEqual(self.stamp.read_bytes(),stamp)
+
+    def test_help_unknown_arguments_and_health_are_read_only(self):
+        before=self.snapshot()
+        for program in (APPLY,HEALTH):
+            for flag,code in (("--help",0),("--unknown",2)):
+                result=self.run_apply(flag,program=program);self.assertEqual(result.returncode,code,result.stderr)
+        self.assertEqual(self.snapshot(),before);self.assertFalse(self.log.exists())
+        self.assertEqual(self.run_apply().returncode,0)
+        before=self.snapshot();calls=self.log.read_bytes()
+        self.env["NANOBOT_SOURCE_ARCHIVE"]=str(self.root/"absent")
+        result=self.run_apply(program=HEALTH);self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn("private-fixture",result.stdout+result.stderr)
+        self.assertEqual(self.snapshot(),before);self.assertEqual(self.log.read_bytes(),calls)
+        p=self.site/"nanobot/agent/tools/registry.py";p.write_bytes(p.read_bytes()+b"\n# drift\n")
+        before=self.snapshot();self.assertNotEqual(self.run_apply(program=HEALTH).returncode,0)
+        self.assertEqual(self.snapshot(),before);self.assertEqual(self.log.read_bytes(),calls)
+
+if __name__ == "__main__":unittest.main()
+#+END_SRC

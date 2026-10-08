@@ -3,6 +3,8 @@
 
 # An agent that runs as its own Unix user (Agent Boundaries phase 8: =agent-deepseek= first) cannot run the relay above: the relay ships audio to the phone over the operator's SSH identity, and holding that key is exactly what the separate user exists to prevent. So the relay is split at the user boundary (ruling 2026-09-26, "provided that the latency is the same"). The agent side only *drops* its hook payload into a spool directory; an operator-owned watcher picks each file up through inotify within milliseconds and feeds it to the unchanged =claude-hook-voice-reply=, so synthesis, voice choice, phone delivery, fallback host and play queue stay one code path.
 
+# The spool deliberately does not parse or rewrite reply text: it is a byte-preserving trust-boundary transport.  Its operator-owned destination is the hook above, which extracts and normalises the text before the shared spoken-character cap.  Ecco and DeepSeek therefore inherit the same speech boundary without a second implementation.
+
 # - Spool: =/var/spool/agent-voice=, owned by the operator, group =cortex=, mode =3730=. Agents (all in =cortex=) can create files but cannot list the directory or delete each other's files; the operator owns the directory and removes each file once spoken.
 # - Identity comes from the file's owning uid, never from the payload: =agent-deepseek= speaks as =DeepSeek=, =agent-opencode= as =Ecco=, any other =agent-NAME= as =Name=, and files owned by anyone else are discarded. A sandboxed agent cannot make itself speak in another agent's voice.
 # - Files older than two minutes are discarded rather than spoken (a watcher outage must not replay a backlog of stale replies), and a payload is capped at 64 KiB before the hook's own character cap applies.

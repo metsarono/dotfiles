@@ -15,9 +15,11 @@ import shutil
 import signal
 import socket
 import struct
+import subprocess
 import sys
 import termios
 import time
+import tomllib
 import tty
 import uuid
 
@@ -81,9 +83,134 @@ DEBUG_LOG_MAX_BYTES = env_int(
     "CODEX_IDLE_DEBUG_MAX_BYTES", 2 * 1024 * 1024, 65536
 )
 DEBUG = os.environ.get("CODEX_IDLE_COMPACTION_DEBUG", "") in {"1", "true", "yes"}
+ALLOW_OBSERVED_POLICY = os.environ.get(
+    "CODEX_CACHE_POLICY_ALLOW_OBSERVED", "0"
+).lower() in {"1", "true", "yes"}
 COMPACTION_TIMEOUT_SECONDS = env_float(
     "CODEX_IDLE_COMPACTION_TIMEOUT_SECONDS", 5 * 60, 1.0
 )
+
+
+def configured_cache_identity(argv: list[str]) -> tuple[str, str]:
+    """Read declared selection; unrecognized/custom endpoints stay unsupported."""
+    config_root = pathlib.Path(os.environ.get("CODEX_HOME", str(pathlib.Path.home() / ".codex"))).expanduser()
+    try:
+        config = tomllib.loads((config_root / "config.toml").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        config = {}
+    except (OSError, ValueError):
+        return "unknown", "unknown"
+    selected = dict(config)
+    overrides = []
+    launch_model = None
+    endpoint_known = not os.environ.get("OPENAI_BASE_URL")
+    for index, value in enumerate(argv):
+        if value.startswith("--model="):
+            launch_model = value.split("=", 1)[1]
+        elif value in {"--model", "-m"} and index + 1 < len(argv):
+            launch_model = argv[index + 1]
+        elif value in {"--profile", "-p"} or value.startswith("--profile="):
+            profile = value.split("=", 1)[1] if "=" in value else argv[index + 1] if index + 1 < len(argv) else ""
+            profiles = config.get("profiles", {})
+            row = profiles.get(profile) if isinstance(profiles, dict) else None
+            if not isinstance(row, dict):
+                return "unknown", "unknown"
+            selected.update(row)
+        elif value in {"--config", "-c"} and index + 1 < len(argv):
+            overrides.append(argv[index + 1])
+        elif value.startswith("--config="):
+            overrides.append(value.split("=", 1)[1])
+        elif value in {"--oss", "--local-provider"} or value.startswith("--local-provider="):
+            endpoint_known = False
+    for override in overrides:
+        try:
+            row = tomllib.loads(override)
+        except ValueError:
+            return "unknown", "unknown"
+        if any(key not in {"model", "model_provider", "model_reasoning_effort"} for key in row):
+            endpoint_known = False
+        selected.update(row)
+    provider = selected.get("model_provider", "openai")
+    providers = config.get("model_providers", {})
+    if provider != "openai" or not isinstance(providers, dict) or "openai" in providers:
+        endpoint_known = False
+    model = launch_model or os.environ.get("CODEX_IDLE_MODEL") or selected.get("model")
+    if not isinstance(model, str) or not model.strip() or model.strip() != model:
+        model = "unknown"
+    return model, "openai-codex-oauth" if endpoint_known else "unknown"
+
+
+def configured_model(argv: list[str]) -> str:
+    return configured_cache_identity(argv)[0]
+
+
+def validated_cache_decision(decision: object, provider: str, endpoint: str,
+                             model: str, allow_observed: bool = False) -> dict:
+    """Accept only the resolver's exact identity and ordered integer window."""
+    if not isinstance(decision, dict):
+        raise ValueError("cache-policy-not-object")
+    mode, confidence = decision.get("mode"), decision.get("confidence")
+    if mode == "fallback" and confidence == "fallback":
+        # The caller owns fallback timing; stdout cannot redefine its profile.
+        return decision
+    if not (mode == "measured" and confidence == "supported" or
+            allow_observed and mode == "observed" and confidence == "observed"):
+        raise ValueError("cache-policy-confidence-invalid")
+    def canonical(value: str) -> str:
+        return value.strip().lower().replace("_", "-")
+    expected_provider = canonical(provider)
+    expected_provider = {"openai-codex": "openai",
+                         "openai-codex-oauth": "openai"}.get(expected_provider, expected_provider)
+    expected_endpoint = canonical(endpoint)
+    if expected_provider == "openai" and expected_endpoint in {"openai", "openai-codex", "openai-codex-oauth"}:
+        expected_endpoint = "openai-codex-oauth"
+    expected_model = canonical(model)
+    if expected_provider == "anthropic":
+        expected_model = re.sub(r"-+", "-", re.sub(r"[ .]+", "-", expected_model)).strip("-")
+        if not expected_model.startswith("claude-"):
+            expected_model = "claude-" + expected_model
+    for key, expected in (("provider", expected_provider), ("endpoint_id", expected_endpoint), ("model", expected_model)):
+        if decision.get(key) != expected:
+            raise ValueError("cache-policy-identity-mismatch")
+    compact, expiry = decision.get("compact_before_seconds"), decision.get("cache_expires_seconds")
+    if (type(compact) is not int or type(expiry) is not int or
+            not 0 < compact < expiry or expiry > 2**31 - 1):
+        raise ValueError("cache-policy-window-invalid")
+    return decision
+
+
+def measured_window(model: str, endpoint: str = "openai-codex-oauth") -> tuple[int, int, dict]:
+    if model == "unknown" or endpoint == "unknown":
+        return IDLE_SECONDS, TTL_SECONDS, {"mode": "fallback", "reason": "identity-unknown"}
+    helper = pathlib.Path(os.environ.get(
+        "FLEET_CACHE_POLICY_HELPER", str(pathlib.Path.home() / "HelmCortex/FORGE/bin/cache-policy")
+    )).expanduser()
+    policy = pathlib.Path(os.environ.get(
+        "FLEET_CACHE_POLICY_PATH",
+        str(pathlib.Path.home() / "HelmCortex/ROOTS/DotRoot/agent-session/centre/data/cache-policy.json"),
+    )).expanduser()
+    if not helper.is_file() or not policy.is_file():
+        return IDLE_SECONDS, TTL_SECONDS, {
+            "mode": "fallback",
+            "reason": "policy-unavailable",
+        }
+    try:
+        command = [str(helper), "resolve", "--policy", str(policy), "--harness", "codex",
+                   "--provider", "openai", "--endpoint", endpoint,
+                   "--model", model, "--fallback-compact", str(IDLE_SECONDS),
+                   "--fallback-cache", str(TTL_SECONDS)]
+        if ALLOW_OBSERVED_POLICY:
+            command.append("--allow-observed")
+        completed = subprocess.run(
+            command,
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        decision = validated_cache_decision(json.loads(completed.stdout), "openai", endpoint, model, ALLOW_OBSERVED_POLICY)
+        if decision["mode"] == "fallback":
+            return IDLE_SECONDS, TTL_SECONDS, decision
+        return decision["compact_before_seconds"], decision["cache_expires_seconds"], decision
+    except (OSError, TypeError, ValueError, KeyError, OverflowError, subprocess.SubprocessError):
+        return IDLE_SECONDS, TTL_SECONDS, {"mode": "fallback", "reason": "resolver-error"}
 TERMINAL_CLEANUP_BYTES = (
     b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l"
     b"\x1b[?1005l\x1b[?1006l\x1b[?1015l"
@@ -550,6 +677,7 @@ class Supervisor:
         self.compaction_requested_at: float | None = None
         self.compaction_ignore_next_stop = False
         self.current_tokens: int | None = None
+        self._refresh_current_cache_window()
         self.last_normal_stop: float | None = None
         self.last_local_input: float | None = None
         self.last_local_input_classification: str | None = None
@@ -580,6 +708,9 @@ class Supervisor:
             "session_id": self.session_id,
             "status": self.status,
             "current_input_context_tokens": self.current_tokens,
+            "model": self.model,
+            "endpoint_id": self.endpoint,
+            "cache_policy": self.cache_policy,
             "dirty": self.dirty,
             "compacting": self.compacting,
             "compaction_ignore_next_stop": self.compaction_ignore_next_stop,
@@ -639,7 +770,7 @@ class Supervisor:
         self._debug(f"cancelled:{reason} channel={short_id(self.channel)}")
         self._write_state()
 
-    def arm(self) -> None:
+    def arm(self, preserve_transition: bool = False) -> None:
         if not (
             self.enabled
             and self.dirty
@@ -650,15 +781,36 @@ class Supervisor:
             and self.timer_deadline is None
         ):
             return
+        self._refresh_current_cache_window()
         self.timer_generation += 1
-        self.timer_deadline = self.last_normal_stop + IDLE_SECONDS
+        self.timer_deadline = self.last_normal_stop + self.compact_after_seconds
         self.timer_kind = "compact"
-        self.last_state_transition = "armed"
+        if not preserve_transition:
+            self.last_state_transition = "armed"
         self._debug(
             f"armed channel={short_id(self.channel)} "
-            f"delay={IDLE_SECONDS}"
+            f"delay={self.compact_after_seconds} policy={self.cache_policy.get('mode')}"
         )
         self._write_state()
+
+    def _refresh_current_cache_window(self) -> None:
+        # The installed hook forwards lifecycle facts only. No authenticated
+        # model/endpoint observation exists here; declarations must not guess it.
+        self.model, self.endpoint = "unknown", "unknown"
+        self.compact_after_seconds, self.cache_expires_seconds, self.cache_policy = measured_window(self.model, self.endpoint)
+
+    def _refresh_cache_policy_for_action(self) -> bool:
+        self._refresh_current_cache_window()
+        deadline = self.last_normal_stop + self.compact_after_seconds if self.last_normal_stop else None
+        if deadline is not None and deadline > now():
+            self.timer_generation += 1
+            self.timer_deadline = deadline
+            self.timer_kind = "compact"
+            self.last_state_transition = "policy-refreshed-rearmed"
+            self._write_state()
+            return False
+        self._write_state()
+        return True
 
     def _compaction_failed(self, reason: str) -> None:
         if not self.compacting:
@@ -688,9 +840,10 @@ class Supervisor:
         # The failure is already being handled at the Stop/timeout boundary;
         # do not consume the next genuine turn's Stop hook as a late failure.
         self.compaction_ignore_next_stop = False
-        self.cancel("compaction-recovered")
-        self.arm()
         self.last_state_transition = "compaction-recovered"
+        self.cancel("compaction-recovered")
+        self.last_state_transition = "compaction-recovered"
+        self.arm(preserve_transition=True)
         self._debug(
             f"compaction-recovered channel={short_id(self.channel)} reason={reason}"
         )
@@ -855,8 +1008,8 @@ class Supervisor:
         if purpose == "compact":
             if not self.dirty:
                 return "clean"
-            if now() - self.last_normal_stop >= TTL_SECONDS:
-                return "cache-already-cold"
+            if MIN_TOKENS > 0 and self.current_tokens is None:
+                return "token-count-unknown"
             if self.current_tokens is not None and self.current_tokens < MIN_TOKENS:
                 return "below-token-threshold"
         elif purpose != "manual":
@@ -873,6 +1026,9 @@ class Supervisor:
             self.last_gate_rejection_reason = "stale-timer"
             self.last_state_transition = "gate-refused:stale-timer"
             self._write_state()
+            return False
+        if (purpose == "compact" and expected_generation is not None
+                and not self._refresh_cache_policy_for_action()):
             return False
         reason = self._gate_reason(purpose)
         if reason:
@@ -1310,6 +1466,8 @@ def main(argv: list[str]) -> int:
         print("Environment: CODEX_IDLE_COMPACTION_DEBUG,")
         print("CODEX_IDLE_COMPACT_SECONDS, CODEX_IDLE_COMPACT_TTL_SECONDS,")
         print("CODEX_IDLE_COMPACT_MIN_TOKENS,")
+        print("CODEX_CACHE_POLICY_ALLOW_OBSERVED,")
+        print("FLEET_CACHE_POLICY_HELPER, FLEET_CACHE_POLICY_PATH,")
         print("CODEX_IDLE_COMPACTION_TIMEOUT_SECONDS,")
         print("CODEX_IDLE_INPUT_ESCAPE_TIMEOUT_SECONDS,")
         print("CODEX_WARM_HERDR_AGENT, CODEX_WARM_HERDR_HEARTBEAT_SECONDS,")

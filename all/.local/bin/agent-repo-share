@@ -17,7 +17,7 @@
 # group; the script warns when the invoking shell's umask is stricter.
 
 
-# [[file:../../../agents.org::*Script: agent-repo-share (dry-run by default)][Script: agent-repo-share (dry-run by default):1]]
+# [[file:../../../agents-users.org::*Script: agent-repo-share (dry-run by default)][Script: agent-repo-share (dry-run by default):1]]
 # ~/DotCortex/all/.local/bin/agent-repo-share
 # Group-share a git repo with cortex for agent users. DRY-RUN unless --apply.
 set -euo pipefail

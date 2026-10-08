@@ -7,3 +7,7 @@ ductor_workdir="/home/agent-codex"
 # keeps honey-codex delegations in its own hub (incident 2026-09-16).
 ductor_port="8800"
 ductor_log_group="gille"
+# The agent's Guix node (agent-guix-apply). It comes after ~/.local/bin, so the
+# hand-copied node there wins until cutover step 4 removes it
+# (agents-bots-honey.org, "Flying Fox and Possum lanes").
+ductor_path_add="/home/agent-codex/.guix-extra-profiles/agent/agent/bin"

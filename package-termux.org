@@ -522,43 +522,140 @@ fi
 The on-device renderer can take seconds before it emits sound. This gate
 forwards its 24 kHz signed 16-bit mono PCM byte-for-byte and emits
 =player_started= only when the first non-silent sample arrives. Empty or
-silence-only renders never claim audible playback. The phone's receipt poll
-still has coarse latency; this is a truthful start boundary, not lip-sync.
+silence-only renders never claim audible playback. After that boundary it
+quantizes 200 ms RMS windows into a bounded 0–100 envelope and streams those
+levels through the validated receipt helper. The audio loop never waits for a
+new helper process per window: one helper remains open for the playback.
 
 #+BEGIN_SRC python :tangle termux/.local/bin/pvox-pcm-start-gate :shebang "#!/data/data/com.termux/files/usr/bin/python3"
-"""Forward signed 16-bit PCM and announce the first audible sample."""
+"""Forward signed 16-bit PCM and emit truthful start plus bounded RMS levels."""
 
+from array import array
+import math
 import os
 import subprocess
 import sys
 
 
+DEFAULT_WINDOW_SAMPLES = 4_800  # 200 ms at 24 kHz: five visual updates/second.
+
+
+def level_from_energy(total: int, count: int) -> int:
+    if not count or total <= 0:
+        return 0
+    rms = math.sqrt(total / count)
+    if rms < 8:
+        return 0
+    dbfs = 20 * math.log10(min(rms / 32768.0, 1.0))
+    # Speech mostly occupies -50..-10 dBFS. Quantize and bound before it leaves
+    # the phone; the HUD needs an envelope, never raw audio or text.
+    return max(0, min(100, round((dbfs + 50.0) * 2.5)))
+
+
+class LevelSink:
+    def __init__(self, speaker: str | None, playback: str | None):
+        self.speaker = speaker
+        self.playback = playback
+        self.process: subprocess.Popen[str] | None = None
+
+    def start(self) -> None:
+        if not self.speaker or not self.playback or os.environ.get("PVOX_LEVELS_OFF"):
+            return
+        try:
+            self.process = subprocess.Popen(
+                ["pvox-speech-receipt", "levels", self.speaker, self.playback],
+                stdin=subprocess.PIPE,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            self.process = None
+
+    def emit(self, level: int) -> None:
+        if not self.process or not self.process.stdin:
+            return
+        try:
+            self.process.stdin.write(f"{level}\n")
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self.close()
+
+    def close(self) -> None:
+        process, self.process = self.process, None
+        if not process:
+            return
+        if process.stdin:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+def emit_started(speaker: str | None, playback: str | None) -> None:
+    if not speaker or not playback:
+        return
+    try:
+        subprocess.run(
+            ["pvox-speech-receipt", "player_started", speaker, playback],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+
 def main():
     speaker = os.environ.get("PVOX_SPEAKER_ID")
     playback = os.environ.get("PVOX_PLAYBACK_ID")
+    try:
+        window_samples = max(240, int(os.environ.get("PVOX_LEVEL_WINDOW_SAMPLES", DEFAULT_WINDOW_SAMPLES)))
+    except ValueError:
+        window_samples = DEFAULT_WINDOW_SAMPLES
     started = False
-    # read1 returns the first available chunk; read(4096) could wait for a
-    # full buffer and add visible latency to short streamed sentences.
-    while chunk := sys.stdin.buffer.read1(4096):
-        if not started and len(chunk) >= 2:
-            # PCM is little-endian, but zero is zero in either byte order.
-            # Ignore digital silence; do not delay or alter the audio stream.
-            for offset in range(0, len(chunk) - 1, 2):
-                if chunk[offset] or chunk[offset + 1]:
+    sink = LevelSink(speaker, playback)
+    energy = sample_count = 0
+    carry = b""
+    try:
+        # read1 returns the first available chunk; read(4096) could wait for a
+        # full buffer and add visible latency to short streamed sentences.
+        while chunk := sys.stdin.buffer.read1(4096):
+            analysis = carry + chunk
+            usable = len(analysis) - (len(analysis) % 2)
+            carry = analysis[usable:]
+            samples = array("h")
+            samples.frombytes(analysis[:usable])
+            if sys.byteorder != "little":
+                samples.byteswap()
+            for sample in samples:
+                if not started and sample:
                     started = True
-                    if speaker and playback:
-                        try:
-                            subprocess.run(
-                                ["pvox-speech-receipt", "player_started", speaker, playback],
-                                check=False,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                            )
-                        except OSError:
-                            pass
-                    break
-        sys.stdout.buffer.write(chunk)
-        sys.stdout.buffer.flush()
+                    emit_started(speaker, playback)
+                    sink.start()
+                if started:
+                    energy += sample * sample
+                    sample_count += 1
+                    if sample_count >= window_samples:
+                        sink.emit(level_from_energy(energy, sample_count))
+                        energy = sample_count = 0
+            # Analysis is observational: preserve every input byte and flush
+            # promptly so the meter cannot add buffering to the audio path.
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+        if started and sample_count:
+            sink.emit(level_from_energy(energy, sample_count))
+    finally:
+        sink.close()
 
 
 if __name__ == "__main__":
@@ -568,17 +665,24 @@ if __name__ == "__main__":
 * Phone-local playback receipts for the read-only StarFox HUD
 
 The caller supplies a generated opaque ID and a known speaker slug. This
-helper appends only lifecycle metadata, never voice text or audio. The fleet
-observes the phone-local journal by read-only SSH pull; no phone credential
-or inbound HTTP endpoint is needed.
+helper appends lifecycle metadata to the durable journal and mirrors it into a
+bounded low-latency journal. Its =levels= mode accepts only integer 0–100 RMS
+envelopes on stdin and writes those only to the bounded journal: no voice text
+or raw audio ever leaves the playback pipe. The fleet follows that journal by
+read-only SSH; no phone credential or inbound HTTP endpoint is needed.
 
 #+BEGIN_SRC bash :tangle termux/.local/bin/pvox-speech-receipt :shebang "#!/data/data/com.termux/files/usr/bin/bash"
 set -euo pipefail
-[ "$#" -eq 3 ] || exit 2
-KIND="$1"; SPEAKER="$2"; PLAYBACK="$3"
-case "$KIND" in queued|player_started|player_exited) ;; *) exit 2 ;; esac
+[ "$#" -ge 1 ] || exit 2
+KIND="$1"
+case "$KIND" in
+  levels) [ "$#" -eq 3 ] || exit 2 ;;
+  queued|player_started|player_exited) [ "$#" -eq 3 ] || exit 2 ;;
+  *) exit 2 ;;
+esac
+SPEAKER="$2"; PLAYBACK="$3"
 case "$SPEAKER" in
-  helmastra|helmductor|auryn|fable|claudeificus|haiku|orcinus-orca|ecco-dolphinus|hermes-agent|gemma|pclip) ;;
+  helmastra|helmductor|auryn|fable|claudeificus|haiku|nanobot|orcinus-orca|ecco-dolphinus|hermes-agent|gemma|pclip) ;;
   *) exit 2 ;;
 esac
 case "$PLAYBACK" in ""|*[!A-Za-z0-9_-]*) exit 2 ;; esac
@@ -587,16 +691,50 @@ umask 077
 RECEIPT_DIR="${PVOX_RECEIPT_DIR:-$HOME/.cache}"
 mkdir -p "$RECEIPT_DIR"
 JOURNAL="$RECEIPT_DIR/pvox-speech-events.jsonl"
-[ ! -L "$JOURNAL" ] || exit 1
-printf '{"kind":"%s","agent":"%s","playback_id":"%s","recorded_at":%s}\n' \
-  "$KIND" "$SPEAKER" "$PLAYBACK" "$(date +%s)" >> "$JOURNAL"
+LIVE_JOURNAL="$RECEIPT_DIR/pvox-speech-live.jsonl"
+[ ! -L "$JOURNAL" ] && [ ! -L "$LIVE_JOURNAL" ] || exit 1
+LIVE_MAX_BYTES="${PVOX_SPEECH_LIVE_MAX_BYTES:-262144}"
+case "$LIVE_MAX_BYTES" in ""|*[!0-9]*) LIVE_MAX_BYTES=262144 ;; esac
+
+rotate_live() {
+  [ -f "$LIVE_JOURNAL" ] || return 0
+  SIZE="$(wc -c < "$LIVE_JOURNAL" 2>/dev/null || printf 0)"
+  [ "$SIZE" -le "$LIVE_MAX_BYTES" ] || : > "$LIVE_JOURNAL"
+}
+
+append_live() {
+  rotate_live
+  printf '%s\n' "$1" >> "$LIVE_JOURNAL"
+}
+
+if [ "$KIND" = levels ]; then
+  rotate_live
+  COUNT=0
+  while IFS= read -r LEVEL; do
+    case "$LEVEL" in ""|*[!0-9]*) continue ;; esac
+    [ "$LEVEL" -le 100 ] || continue
+    LINE="$(printf '{"kind":"level","agent":"%s","playback_id":"%s","level":%s,"recorded_at":%s}' \
+      "$SPEAKER" "$PLAYBACK" "$LEVEL" "$(date +%s.%3N)")"
+    printf '%s\n' "$LINE" >> "$LIVE_JOURNAL"
+    COUNT=$((COUNT + 1))
+    [ $((COUNT % 128)) -ne 0 ] || rotate_live
+  done
+  exit 0
+fi
+
+LINE="$(printf '{"kind":"%s","agent":"%s","playback_id":"%s","recorded_at":%s}' \
+  "$KIND" "$SPEAKER" "$PLAYBACK" "$(date +%s)")"
+printf '%s\n' "$LINE" >> "$JOURNAL"
+append_live "$LINE"
 #+END_SRC
 
 * Detached S24 WAV player with truthful receipts
 
 SSH success means the complete WAV was received and a detached child was
-launched. The child alone emits player-start and player-exit receipts while
-holding the same persistent queue lock as termux-kitten-say.
+launched. The child holds the same persistent queue lock as
+=termux-kitten-say= and routes resampled 24 kHz PCM through the same start/RMS
+gate, so shipped WAV and on-device Kitten playback share one truthful envelope
+path. The child alone emits the terminal receipt.
 
 #+BEGIN_SRC bash :tangle termux/.local/bin/pvox-phone-play :shebang "#!/data/data/com.termux/files/usr/bin/bash"
 set -euo pipefail
@@ -619,9 +757,18 @@ nohup bash -c '
   command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
   exec 9>"$HOME/.pvox-reply-play.lock"
   flock -w "${PVOX_REPLY_LOCK_WAIT:-14400}" 9 || exit 0
-  pvox-speech-receipt player_started "$SPEAKER" "$PLAYBACK" >/dev/null 2>&1 || true
-  if command -v sox >/dev/null 2>&1; then sox -q "$F" -d
-  else exit 9; fi
+  if command -v sox >/dev/null 2>&1 && command -v pvox-pcm-start-gate >/dev/null 2>&1; then
+    export PVOX_SPEAKER_ID="$SPEAKER" PVOX_PLAYBACK_ID="$PLAYBACK"
+    set -o pipefail
+    sox -q "$F" -t raw -r 24000 -e signed-integer -b 16 -c 1 - \
+      | pvox-pcm-start-gate \
+      | sox -q -t raw -r 24000 -e signed-integer -b 16 -c 1 - -d
+  elif command -v sox >/dev/null 2>&1; then
+    pvox-speech-receipt player_started "$SPEAKER" "$PLAYBACK" >/dev/null 2>&1 || true
+    sox -q "$F" -d
+  else
+    exit 9
+  fi
 ' _ "$F" "$SPEAKER" "$PLAYBACK" </dev/null >/dev/null 2>&1 &
 #+END_SRC
 

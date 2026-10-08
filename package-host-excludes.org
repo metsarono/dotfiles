@@ -12,9 +12,9 @@ The nala/flatpak/appimage lanes had no per-machine scoping — a single global m
 Default behaviour with no rows for a host is unchanged: nothing is excluded, every lane behaves exactly as it did before this file existed.
 
 * Exclude data — SSV manifest
-Columns: =HOST LANE ID NOTE=. =HOST= is the =hostname -s= value. =LANE= is one of =nala | flatpak | appimage | guix=. =ID= is the nala package name / flatpak app-id / appimage =APPIMG_NAME= / guix profile name. =NOTE= is a freeform reason and may contain spaces or quotes — it is never parsed, only =$1/$2/$3= matter. Comments (=#=) and blank lines are allowed. Deployed to =~/.provision/host-excludes.ssv=.
+Columns: =HOST LANE ID NOTE=. =HOST= is the =hostname -s= value. =LANE= is one of =nala | flatpak | appimage | guix | stow | stow-hook=. =ID= is the nala package name / flatpak app-id / appimage =APPIMG_NAME= / guix profile name; for =stow= it is a =$HOME=-relative path that is never linked, for =stow-hook= the name of a post-stow helper that is skipped (see [[*Stow lanes: host traits for the home layout][Stow lanes]]). =NOTE= is a freeform reason and may contain spaces or quotes — it is never parsed, only =$1/$2/$3= matter. Comments (=#=) and blank lines are allowed. Deployed to =~/.provision/host-excludes.ssv=.
 
-#+BEGIN_SRC text :tangle all/.provision/host-excludes.ssv :padline no :comments none
+#+BEGIN_SRC text :tangle all/.provision/host-excludes.ssv :padline no :comments none :noweb yes
 # HOST LANE ID NOTE
 kikin-kushi nala gparted "headless: no display"
 kikin-kushi nala audacity "headless GUI"
@@ -67,6 +67,9 @@ kikin-kushi nala libbamf3-dev "headless: no host dock; plank build dep"
 kikin-kushi nala bamfdaemon "headless: no host dock; clears distro plank drift (Mètsàtron 2026-09-11)"
 kikin-kushi nala libxml2-utils "headless: no host dock; plank build dep (xmllint)"
 kikin-kushi nala libdbusmenu-gtk3-dev "headless: no host dock; plank build dep"
+# Honey (hostname beelink) carries the headless trait in the stow lanes: no icon
+# or GTK themes, no desktop/WM config, no Obsidian stub (see "Stow lanes").
+beelink <<headless-trait>>
 #+END_SRC
 
 DEFERRED, do NOT exclude (Mètsàtron 2026-09-11): =guix sanctuary-cde/gnustep/nscde/mide/qtile= — the retro-desktops stay for now; qtile plus a neovim desktop are a future add.
@@ -192,4 +195,327 @@ if HOST_EXCLUDES="$ssv" HOST_EXCLUDES_HOSTNAME=kikin-kushi "$HELPER" nala audaci
 fi
 
 printf '%s\n' 'host-excludes fixtures: ok'
+#+END_SRC
+
+* Stow lanes: host traits for the home layout
+The package lanes above decide what gets /installed/ on a host; the two stow lanes decide what gets /linked into =$HOME=/ there. Same file, same helper, same key (=hostname -s=), so a host fact such as "headless" stays a capability of the host, as [[file:layers.org][layers.org]] asks, and never becomes a competing file in a host overlay.
+
+- =stow <path>=: =<path>= is =$HOME=-relative (=.config/bspwm=, =HelmCortex=). =safe-stow= passes it to every package as =--ignore='^<path>'= (Stow anchors the pattern at the end itself), so nothing at or under it is linked, from any layer.
+- =stow-hook <name>=: a post-stow helper =safe-stow= skips on this host (today only =icons-home-sync=, which links the icon and theme roots that the packages' own =.stow-local-ignore= already keep away from Stow).
+
+Two Stow facts shape the rows:
+
+1. *Folding happens before ignoring.* When the target directory does not exist yet, Stow links the whole package directory and never looks inside, so an ignored file below it is exposed anyway (checked with Stow 2.4.1: =--ignore='^d/a'= still plans =LINK: d => pkg/d=). A path is therefore only safe at a directory Stow cannot fold past: a directory several layers share (=.config=), or the top of a tree that is wholly excluded (=.xsessionrc.d=, =HelmCortex=, =.config/environment.d=). The fixture tests below stow the resolved stack into an empty target, where folding is greediest, and fail if any excluded path is still exposed.
+2. *=stow -D= honours ignores too.* A restow cannot remove links it now ignores, so switching a trait on leaves the old links behind. =dotcortex-stow-excludes prune= removes exactly those: symlinks at or under an excluded path that resolve into the checkout (Stow's links and =icons-home-sync='s alike), then directories that only became empty because of it. Real files are never touched. =safe-stow= runs it with =--apply= before stowing; on a host without stow rows it finds nothing and changes nothing.
+
+** The headless trait
+A trait is a named block of stow-lane rows without a host column. A host opts in with one line in the manifest above, =<hostname> <<headless-trait>>=: Org's noweb expansion repeats the text before a reference on every line it expands, so each row gains the host. Honey (=beelink=) is the first host with it. It is not given to kikin-kushi: its Cortex sanctuary projects the X230 desktop, icons included (sanctuary-cortex.org).
+
+The second group (awesome to picom) was added on Mètsàtron's review of the first draft (2026-09-28). =.config/autostart= also holds =herdr-web.desktop= and =ssh-agent-session-sync.desktop=; XDG autostart entries only fire when a graphical session starts, so on a headless host they never ran. =.config/VSCodium= is shipped by both =all/= and =linux/=; one row covers both.
+
+=.gtkrc-2.0= and =.config/gtk-3.0= are not listed because no layer on Honey ships them (the T480s/X230 overlays and the sanctuaries own theirs); what an account has there is its own skeleton.
+
+#+NAME: headless-trait
+#+BEGIN_SRC text
+stow .icons "headless: cursor and icon themes (icons-home-sync)"
+stow .local/share/icons "headless: icon themes (icons-home-sync)"
+stow .themes "headless: GTK and WM themes (icons-home-sync)"
+stow .local/share/themes "headless: GTK themes (icons-home-sync)"
+stow-hook icons-home-sync "headless: no icon or theme roots to sync"
+stow .config/bspwm "headless: no window manager"
+stow .config/sxhkd "headless: no hotkey daemon"
+stow .config/kitty "headless: no GUI terminal"
+stow .config/rofi "headless: no launcher"
+stow .config/Thunar "headless: no file manager"
+stow .config/GTKmenu "headless: the bspwm GTK menu"
+stow .config/environment.d "headless: graphical-session env (GTK appmenu, flatpak exports)"
+stow .xsessionrc.d "headless: X login hooks"
+stow .face "headless: display-manager avatar"
+stow .gimp-2.8 "headless: GIMP config"
+stow HelmCortex "headless: all/HelmCortex holds only the vault's .obsidian stub; no vault on this host"
+stow .config/awesome "headless: no window manager"
+stow .config/i3 "headless: no window manager"
+stow .config/xfce4 "headless: no XFCE panel"
+stow .config/autostart "headless: XDG autostart runs only in a graphical session"
+stow .config/Kvantum "headless: Qt widget themes"
+stow .config/qt5ct "headless: Qt5 appearance"
+stow .config/VSCodium "headless: GUI editor settings"
+stow .conky "headless: desktop monitor widgets"
+stow .icewm "headless: no window manager"
+stow .picom.conf "headless: no compositor"
+#+END_SRC
+
+** Helper — dotcortex-stow-excludes
+Reads the *repo* copy of the manifest (=all/.provision/host-excludes.ssv= of the checkout it lives in, like =dotcortex-layers=), so a pull takes effect on the next restow even before the stowed copy updates. =HOST_EXCLUDES= and =HOST_EXCLUDES_HOSTNAME= override it, as for =host-excludes=.
+
+- =dotcortex-stow-excludes paths= prints the stow-lane paths for this host.
+- =dotcortex-stow-excludes ignore-args= prints one =--ignore='^<escaped path>'= argument per line, for =safe-stow=.
+- =dotcortex-stow-excludes skip-hook <name>= exits 0 when this host skips that post-stow helper.
+- =dotcortex-stow-excludes prune [--apply] [--target DIR] [--repo DIR]= lists (or with =--apply= removes) the links described above. =--target= defaults to =$HOME=, =--repo= to this checkout; point =--repo= at the checkout the target is actually stowed from.
+
+A stow-lane path is refused unless it is plain (letters, digits, =._/-=, no =..=), so an ID can never widen into a regex or climb out of the target.
+
+#+BEGIN_SRC python :tangle all/.local/bin/dotcortex-stow-excludes :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
+"""Host stow lanes from host-excludes.ssv (package-host-excludes.org, "Stow lanes")."""
+
+import argparse
+import os
+import re
+import socket
+import sys
+from pathlib import Path
+
+PLAIN = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
+
+
+def repo_root():
+    # all/.local/bin/dotcortex-stow-excludes -> the checkout is three levels up.
+    candidate = Path(os.path.realpath(__file__)).parents[3]
+    if (candidate / "all").is_dir():
+        return candidate
+    return Path.home() / "DotCortex"
+
+
+def manifest():
+    env = os.environ.get("HOST_EXCLUDES")
+    return Path(env) if env else repo_root() / "all/.provision/host-excludes.ssv"
+
+
+def hostname():
+    return os.environ.get("HOST_EXCLUDES_HOSTNAME") or socket.gethostname().split(".", 1)[0]
+
+
+def rows(lane):
+    path = manifest()
+    if not path.is_file():
+        return []
+    host, found = hostname(), []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        fields = line.split()
+        if not fields or fields[0].startswith("#") or len(fields) < 3:
+            continue
+        if fields[0] == host and fields[1] == lane:
+            if lane == "stow" and (not PLAIN.match(fields[2]) or ".." in fields[2].split("/")):
+                sys.exit(f"dotcortex-stow-excludes: {path}:{lineno}: refused stow path {fields[2]!r}")
+            found.append(fields[2])
+    return found
+
+
+def resolves_into(link, repo):
+    target = os.path.realpath(link)
+    return target == repo or target.startswith(repo + os.sep)
+
+
+def prune(target, repo, apply):
+    """(link, destination) pairs at or under excluded paths that resolve into repo."""
+    repo = os.path.realpath(repo)
+    removed = []
+    for rel in rows("stow"):
+        top = os.path.join(target, rel)
+        if os.path.islink(top):
+            if resolves_into(top, repo):
+                removed.append((top, os.readlink(top)))
+            continue
+        if not os.path.isdir(top):
+            continue
+        for dirpath, dirnames, filenames in os.walk(top):
+            for name in sorted(dirnames + filenames):
+                path = os.path.join(dirpath, name)
+                if os.path.islink(path) and resolves_into(path, repo):
+                    removed.append((path, os.readlink(path)))
+    if apply:
+        # Directories that held a removed link (up to its excluded top) may go once empty;
+        # a directory that never held one is left alone, even if empty.
+        touched = set()
+        for rel in rows("stow"):
+            top = os.path.join(target, rel)
+            for path, _dest in removed:
+                if path == top or path.startswith(top + os.sep):
+                    parent = os.path.dirname(path)
+                    while parent == top or parent.startswith(top + os.sep):
+                        touched.add(parent)
+                        parent = os.path.dirname(parent)
+        for path, _dest in removed:
+            os.unlink(path)
+        for path in sorted(touched, key=lambda d: -d.count(os.sep)):
+            if os.path.isdir(path) and not os.path.islink(path) and not os.listdir(path):
+                os.rmdir(path)
+    return removed
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("paths")
+    sub.add_parser("ignore-args")
+    hook = sub.add_parser("skip-hook")
+    hook.add_argument("name")
+    pr = sub.add_parser("prune")
+    pr.add_argument("--apply", action="store_true")
+    pr.add_argument("--target", default=os.path.expanduser("~"))
+    pr.add_argument("--repo", default=str(repo_root()))
+    args = parser.parse_args()
+
+    if args.cmd == "paths":
+        for rel in rows("stow"):
+            print(rel)
+    elif args.cmd == "ignore-args":
+        for rel in rows("stow"):
+            print("--ignore=^" + re.escape(rel))
+    elif args.cmd == "skip-hook":
+        return 0 if args.name in rows("stow-hook") else 1
+    elif args.cmd == "prune":
+        verb = "remove" if args.apply else "would remove"
+        found = prune(args.target, args.repo, args.apply)
+        for path, dest in found:
+            print(f"{verb} {path} -> {dest}")
+        print(f"dotcortex-stow-excludes: host {hostname()}: {len(found)} link(s) "
+              f"{'removed' if args.apply else 'to remove (dry-run)'}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+#+END_SRC
+
+** Stow lane tests
+Run with =python3 all/.local/share/dotcortex/tests/test-dotcortex-stow-excludes.py -v= from the repo root. No root, never touches =$HOME=: prune runs against a scratch target and a scratch checkout, and Stow only ever simulates (=-n=) into an empty scratch directory.
+
+- Only =beelink= has stow rows; every other registered host gets no =--ignore= argument, no prune and no skipped hook, so its stow plan is byte-identical to before.
+- Stowing Honey's resolved stack with its arguments into an empty target (where folding is greediest) exposes nothing at or under an excluded path.
+- =prune= lists and removes only links into the checkout at or under excluded paths, keeps real files and foreign links, and removes only directories it emptied.
+- A stow path that could widen into a regex or climb out of the target is refused.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-dotcortex-stow-excludes.py :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
+"""Tests for the host stow lanes (package-host-excludes.org, "Stow lanes")."""
+
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+HELPER = ROOT / "all/.local/bin/dotcortex-stow-excludes"
+LAYERS = ROOT / "all/.local/bin/dotcortex-layers"
+MANIFEST = ROOT / "all/.provision/host-excludes.ssv"
+OTHER_HOSTS = ("x230", "ThinkPad-T480s", "t480", "kikin-kushi", "localhost")
+
+
+def run(*args, host="beelink", manifest=MANIFEST, check=True):
+    env = dict(os.environ, HOST_EXCLUDES=str(manifest), HOST_EXCLUDES_HOSTNAME=host)
+    return subprocess.run([str(HELPER), *args], env=env, capture_output=True, text=True, check=check)
+
+
+class LaneTests(unittest.TestCase):
+    def test_only_honey_has_stow_rows(self):
+        self.assertIn("--ignore=^\\.config/bspwm", run("ignore-args").stdout.splitlines())
+        self.assertEqual(run("skip-hook", "icons-home-sync", check=False).returncode, 0)
+        for host in OTHER_HOSTS:
+            self.assertEqual(run("ignore-args", host=host).stdout, "", host)
+            self.assertEqual(run("skip-hook", "icons-home-sync", host=host, check=False).returncode, 1, host)
+            with tempfile.TemporaryDirectory() as tmp:
+                out = run("prune", "--target", tmp, "--repo", str(ROOT), host=host)
+                self.assertEqual(out.stdout, "", host)
+
+    def test_trait_rows_use_only_stow_lanes(self):
+        for line in MANIFEST.read_text(encoding="utf-8").splitlines():
+            fields = line.split()
+            if fields and fields[0] == "beelink":
+                self.assertIn(fields[1], {"stow", "stow-hook"}, line)
+
+    def test_unsafe_paths_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for bad in ("../outside", ".config/*", "a/../../b", "/etc"):
+                manifest = Path(tmp) / "m.ssv"
+                manifest.write_text(f'beelink stow {bad} "x"\n')
+                out = run("ignore-args", manifest=manifest, check=False)
+                self.assertNotEqual(out.returncode, 0, bad)
+
+
+@unittest.skipUnless(shutil.which("stow"), "GNU Stow is not installed")
+class FoldingTests(unittest.TestCase):
+    def test_honey_stack_exposes_no_excluded_path(self):
+        pkgs = subprocess.run([str(LAYERS), "resolve", "--host", "beelink", "--user", "metsatron"],
+                              capture_output=True, text=True, check=True).stdout.split()
+        ignores = run("ignore-args").stdout.split()
+        excluded = run("paths").stdout.split()
+        with tempfile.TemporaryDirectory() as target:
+            out = subprocess.run(["stow", "-n", "-v", f"--target={target}", "--ignore=\\.bak\\.", *ignores, *pkgs],
+                                 cwd=ROOT, capture_output=True, text=True)
+            self.assertNotIn("All operations aborted", out.stderr + out.stdout)
+            links = {}
+            for line in (out.stderr + out.stdout).splitlines():
+                if m := re.match(r"UNLINK: (\S+)", line):
+                    links.pop(m.group(1), None)
+                elif m := re.match(r"LINK: (\S+) => (\S+)", line):
+                    links[m.group(1)] = m.group(2)
+        exposed = []
+        for rel, dest in links.items():
+            src = ROOT / re.sub(r"^(\.\./)+[^/]+/", "", dest)
+            reached = [rel]
+            if src.is_dir() and not src.is_symlink():
+                reached += [str(Path(rel) / p.relative_to(src)) for p in src.rglob("*")]
+            for path in reached:
+                if any(path == e or path.startswith(e + "/") for e in excluded):
+                    exposed.append(path)
+        self.assertEqual(exposed[:10], [], f"{len(exposed)} excluded paths still linked")
+
+
+class PruneTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "DotCortex"
+        self.home = self.tmp / "home"
+        for rel in ("all/.config/bspwm/bspwmrc", "all/.config/git/config", "all/.face",
+                    "linux/.icons/Chicago95/index.theme"):
+            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / rel).write_text("x\n")
+        (self.home / ".config/bspwm").mkdir(parents=True)
+        (self.home / ".config/git").mkdir(parents=True)
+        (self.home / ".icons/own").mkdir(parents=True)
+        os.symlink("../../../DotCortex/all/.config/bspwm/bspwmrc", self.home / ".config/bspwm/bspwmrc")
+        os.symlink("../../../DotCortex/all/.config/git/config", self.home / ".config/git/config")
+        os.symlink("../DotCortex/all/.face", self.home / ".face")
+        os.symlink(str(self.repo / "linux/.icons/Chicago95"), self.home / ".icons/Chicago95")
+        (self.home / ".icons/own/cursor").write_text("mine\n")
+        os.symlink("/usr/share/icons/Adwaita", self.home / ".icons/Adwaita")
+        self.manifest = self.tmp / "m.ssv"
+        self.manifest.write_text('beelink stow .config/bspwm "x"\nbeelink stow .face "x"\nbeelink stow .icons "x"\n')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def prune(self, *extra):
+        return run("prune", "--target", str(self.home), "--repo", str(self.repo), *extra, manifest=self.manifest)
+
+    def test_dry_run_lists_and_changes_nothing(self):
+        listed = self.prune().stdout.splitlines()
+        self.assertEqual(len(listed), 3, listed)
+        self.assertTrue(all(line.startswith("would remove ") for line in listed))
+        self.assertTrue((self.home / ".config/bspwm/bspwmrc").is_symlink())
+
+    def test_apply_removes_only_repo_links_and_emptied_dirs(self):
+        self.prune("--apply")
+        self.assertFalse((self.home / ".config/bspwm").exists(), "emptied dir should go")
+        self.assertFalse((self.home / ".face").is_symlink())
+        self.assertFalse((self.home / ".icons/Chicago95").is_symlink())
+        self.assertTrue((self.home / ".config/git/config").is_symlink(), "not excluded")
+        self.assertEqual((self.home / ".icons/own/cursor").read_text(), "mine\n")
+        self.assertTrue((self.home / ".icons/Adwaita").is_symlink(), "foreign link kept")
+        self.assertTrue((self.home / ".config").is_dir())
+        self.assertEqual(self.prune().stdout, "", "second prune finds nothing")
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+** Honey scope marker
+With its launchers moved to the service lane ([[file:agents-bots-honey.org][agents-bots-honey.org]]), the =honey/= overlay would be empty, and the resolver refuses a layer without a directory. Like the T480's (=package-dnf.org=), the overlay keeps only its machine scope marker.
+
+#+BEGIN_SRC text :tangle honey/.local/share/dotcortex/scopes/honey :padline no :comments none
+machine-scope=honey
 #+END_SRC

@@ -1,0 +1,10 @@
+# /etc/conf.d/claude-warm: compat for the bare (pre-instance) service.
+warm_user="gille"
+warm_socket=""
+warm_session="warm"
+xdg="/run/warm"
+warm_log_mode="0644"
+warm_agent="honey-opus"
+warm_cwd="/home/gille/metsatron-peer"
+warm_args="--model claude-opus-4-8"
+warm_path="/home/gille/.local/bin:/usr/local/bin:/usr/bin:/bin"

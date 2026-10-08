@@ -360,13 +360,14 @@ class ResultOrderTests(unittest.TestCase):
             {"provider": "claude", "label": "Claude Code"},
             {"provider": "opencode-go", "label": "OpenCode Go"},
             {"provider": "openrouter", "label": "OpenRouter"},
+            {"provider": "mistral", "label": "Mistral"},
             {"provider": "codex", "label": "Gillean · Codex", "remote": "Gillean"},
             {"provider": "claude", "label": "Gillean · Claude Code", "remote": "Gillean"},
         ]
         self.assertEqual(
             [item["label"] for item in self.ai_usage.order_results(items)],
             ["Codex", "Gillean · Codex", "Claude Code", "Gillean · Claude Code",
-             "OpenCode Go", "OpenRouter"],
+             "OpenCode Go", "OpenRouter", "Mistral"],
         )
 
     def test_remote_panels_keep_file_order_and_unknowns_go_last(self):
@@ -380,6 +381,194 @@ class ResultOrderTests(unittest.TestCase):
             [item["label"] for item in self.ai_usage.order_results(items)],
             ["Codex", "Gillean · Codex", "X230 · Codex", "NeuralWatt"],
         )
+
+
+MISTRAL_WHOAMI_FIXTURE = {
+    "plan_type": "API",
+    "plan_name": "FREE",
+    "prompt_switching_to_pro_plan": True,
+    "organization_kind": "S",
+    "customer_id": "25587b01-3447-483d-b6ac-7bc2caf053f3",
+    "api_base": "https://api.mistral.ai",
+    "vibe_base": "https://chat.mistral.ai",
+    "primitive_access_scope": "personal_and_shared",
+}
+
+MISTRAL_BUDGET_FIXTURE = {
+    "usage_percentage": 61.051076,
+    "initial_budget": 30,
+    "currency": "USD",
+    "reset_at": "2026-11-01T00:00:00Z",
+    "api_budget": {
+        "usage_percentage": 61.051076,
+        "initial_budget": 30,
+        "currency": "USD",
+        "reset_at": "2026-11-01T00:00:00Z",
+    },
+    "vibe_budget": {
+        "usage_percentage": 0.53698893,
+        "initial_budget": 300,
+        "currency": "USD",
+        "reset_at": "2026-11-01T00:00:00Z",
+    },
+}
+
+
+def _no_cookie_jar(ai_usage):
+    """Patch helper: disable the admin-trpc cookie path for whoami-era tests."""
+    return patch.object(ai_usage, "_mistral_cookie_header", return_value="")
+
+
+class MistralProbeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ai_usage = load_ai_usage()
+
+    def test_no_credential_reports_missing(self):
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": ""}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             _no_cookie_jar(self.ai_usage):
+            result = self.ai_usage.fetch_mistral(1.0)
+        self.assertEqual(result["state"], "missing")
+        self.assertEqual(result["provider"], "mistral")
+        self.assertIn("MISTRAL_API_KEY", result["summary"])
+
+    def test_whoami_success_reports_plan_and_never_fabricates_percentage(self):
+        captured = {}
+
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            captured["token"] = token
+            captured["url"] = url
+            payload = json.loads(json.dumps(MISTRAL_WHOAMI_FIXTURE))
+            summary = summarize(payload) if summarize else ""
+            return {"provider": provider, "label": label, "state": "ok", "source": "api",
+                    "summary": summary, "raw": payload}
+
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key"}), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
+             _no_cookie_jar(self.ai_usage):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(captured["token"], "test-key")
+        self.assertEqual(result["state"], "ok")
+        self.assertEqual(result["identity"]["plan_name"], "FREE")
+        self.assertEqual(result["identity"]["customer_id"], "25587b01-3447-483d-b6ac-7bc2caf053f3")
+        # The fallback summary must stay truthful: no percentage number, explicit
+        # pointer to the console/Admin API for the actual usage figure.
+        self.assertIn("plan=FREE", result["summary"])
+        self.assertIn("usage % needs console session or Admin API key", result["summary"])
+        self.assertNotRegex(result["summary"], r"\d+(\.\d+)?%")
+
+    def test_budget_from_cookie_jar_reports_real_percentages(self):
+        """The admin-trpc path reports the console's real budget numbers."""
+        captured = {}
+
+        def fake_trpc(endpoint, params, timeout_seconds):
+            captured["endpoint"] = endpoint
+            return json.loads(json.dumps(MISTRAL_BUDGET_FIXTURE))
+
+        with patch.object(self.ai_usage, "_mistral_trpc", side_effect=fake_trpc):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(captured["endpoint"], "billing.budget")
+        self.assertEqual(result["state"], "ok")
+        self.assertEqual(result["source"], "admin-trpc")
+        self.assertEqual(result["identity"]["plan_name"], "Pro")
+        # Both budgets surface as real percentages with reset dates.
+        self.assertAlmostEqual(result["usage"]["secondary"]["usedPercent"], 61.051076)
+        self.assertAlmostEqual(result["usage"]["vibe"]["usedPercent"], 0.53698893)
+        self.assertEqual(result["usage"]["secondary"]["resetsAt"], "2026-11-01T00:00:00Z")
+        self.assertIn("$18.32/$30", result["summary"])
+        self.assertIn("61.1%", result["summary"])
+        self.assertIn("Vibe", result["summary"])
+        self.assertIn("resets 2026-11-01", result["summary"])
+
+    def test_budget_trpc_failure_falls_back_to_whoami(self):
+        """No cookie session -> whoami identity only, never a fabricated number."""
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            payload = json.loads(json.dumps(MISTRAL_WHOAMI_FIXTURE))
+            summary = summarize(payload) if summarize else ""
+            return {"provider": provider, "label": label, "state": "ok", "source": "api",
+                    "summary": summary, "raw": payload}
+
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key"}), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
+             _no_cookie_jar(self.ai_usage):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(result["state"], "ok")
+        self.assertEqual(result["identity"]["plan_name"], "FREE")
+        self.assertNotIn("usage", result)
+
+    def test_no_jar_configured_skips_budget_probe_and_says_so(self):
+        """MISTRAL_COOKIE_JAR unset => budget probe skipped, output says why,
+        and the fallback never fabricates a budget number."""
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            payload = json.loads(json.dumps(MISTRAL_WHOAMI_FIXTURE))
+            summary = summarize(payload) if summarize else ""
+            return {"provider": provider, "label": label, "state": "ok", "source": "api",
+                    "summary": summary, "raw": payload}
+
+        def fail_http(*args, **kwargs):
+            raise AssertionError("budget probe must not touch the network when the jar is unset")
+
+        # Empty cookie header => real _mistral_trpc returns None before any HTTP,
+        # so urlopen staying untouched proves the probe was skipped.
+        with patch.dict(os.environ, {"MISTRAL_COOKIE_JAR": "", "MISTRAL_API_KEY": "test-key"}), \
+             patch.object(self.ai_usage, "_mistral_cookie_header", return_value=""), \
+             patch.object(self.ai_usage.urllib.request, "urlopen", side_effect=fail_http), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(result["state"], "ok")
+        self.assertIn("MISTRAL_COOKIE_JAR not set", result["summary"])
+        # Plan identity still surfaces; no budget percentage is invented.
+        self.assertEqual(result["identity"]["plan_name"], "FREE")
+        self.assertNotIn("usage", result)
+
+    def test_tangled_script_has_no_home_paths(self):
+        """DotCortex is public: no username/host path may leak into the tangled
+        script. Fails if any '/home/' literal appears in ai-usage source."""
+        script = Path(self.ai_usage.__file__).read_text()
+        self.assertNotIn("/home/", script)
+
+    def test_http_error_surfaces_status_without_crashing(self):
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            return {"provider": provider, "label": label, "state": "error", "source": "api",
+                    "summary": f"{url} returned HTTP 401", "raw": None}
+
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "bad-key"}), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
+             _no_cookie_jar(self.ai_usage):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(result["state"], "error")
+        self.assertIn("HTTP 401", result["summary"])
+        self.assertNotIn("identity", result)
+
+    def test_mistral_is_registered_and_default_visible(self):
+        keys = [spec.key for spec in self.ai_usage.PROVIDERS]
+        self.assertIn("mistral", keys)
+        self.assertIn("mistral", self.ai_usage.DEFAULT_PROVIDER_KEYS)
+        self.assertIn("mistral", self.ai_usage.PROVIDER_DISPLAY_ORDER)
+
+    def test_renderer_shows_mistral_plan_line(self):
+        result = {
+            "provider": "mistral",
+            "label": "Mistral",
+            "state": "ok",
+            "source": "api",
+            "summary": "plan=FREE; type=API; usage % needs console session or Admin API key",
+            "raw": dict(MISTRAL_WHOAMI_FIXTURE),
+            "identity": {"plan_name": "FREE", "organization_kind": "S"},
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.ai_usage.render_text([result])
+        plain = self.ai_usage.ANSI_ESCAPE_RE.sub("", output.getvalue())
+        self.assertIn("Mistral", plain)
+        self.assertIn("Plan: FREE", plain)
+        self.assertIn("usage % needs console session or Admin API key", plain)
 
 
 if __name__ == "__main__":

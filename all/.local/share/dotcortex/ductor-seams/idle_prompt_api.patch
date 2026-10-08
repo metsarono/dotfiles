@@ -1,0 +1,90 @@
+--- a/ductor_bot/api/server.py
++++ b/ductor_bot/api/server.py
+@@ -96,11 +96,12 @@
+ class _SecureChannel:
+     """Encrypted WebSocket channel for post-auth communication."""
+ 
+-    __slots__ = ("_e2e", "ws")
+-
+-    def __init__(self, ws: web.WebSocketResponse, e2e: E2ESession) -> None:
++    __slots__ = ("_e2e", "ws", "idle_prompt_allowed")
++
++    def __init__(self, ws: web.WebSocketResponse, e2e: E2ESession, *, idle_prompt_allowed=False) -> None:
+         self.ws = ws
+         self._e2e = e2e
++        self.idle_prompt_allowed = idle_prompt_allowed
+ 
+     @property
+     def closed(self) -> bool:
+@@ -194,6 +195,9 @@
+         self._provider_info: list[dict[str, object]] = []
+         self._active_state_getter: Callable[[], tuple[str, str]] | None = None
+         self._busy_state_handler: Callable[[], Awaitable[dict[str, object]]] | None = None
++        self._idle_message_handler = None
++        self._idle_tasks: set[asyncio.Task] = set()
++        self._idle_stopping = False
+ 
+     # -- Handler wiring --------------------------------------------------------
+ 
+@@ -227,6 +231,9 @@
+ 
+     def set_busy_state_handler(self, handler: Callable[[], Awaitable[dict[str, object]]]) -> None:
+         self._busy_state_handler = handler
++
++    def set_idle_message_handler(self, handler) -> None:
++        self._idle_message_handler = handler
+ 
+ 
+     # -- Lifecycle -------------------------------------------------------------
+@@ -262,6 +269,12 @@
+ 
+     async def stop(self) -> None:
+         """Close all connections and shut down the server."""
++        self._idle_stopping = True
++        tasks = list(self._idle_tasks)
++        for task in tasks:
++            task.cancel()
++        await asyncio.gather(*tasks, return_exceptions=True)
++        self._idle_tasks.clear()
+         for ws in list(self._active_ws):
+             await ws.close(
+                 code=aiohttp.WSCloseCode.GOING_AWAY,
+@@ -401,7 +414,9 @@
+             return ws
+ 
+         key, e2e = auth_result
+-        channel = _SecureChannel(ws, e2e)
++        from ductor_bot.api.idle_prompt import idle_peer_allowed
++        channel = _SecureChannel(ws, e2e,
++                                 idle_prompt_allowed=idle_peer_allowed(self, request))
+ 
+         self._active_ws.add(ws)
+         try:
+@@ -534,6 +549,14 @@
+             return
+ 
+         msg_type = str(data.get("type", ""))
++
++        if msg_type == "idle_message":
++            if self._idle_message_handler is None:
++                await channel.send({"type": "idle_admission", "request_id": data.get("request_id"),
++                                    "session_key": key.storage_key, "status": "unavailable"})
++            else:
++                await self._idle_message_handler(channel, key, data)
++            return
+ 
+         if msg_type == "message":
+             text = str(data.get("text", "")).strip()
+--- a/ductor_bot/orchestrator/lifecycle.py
++++ b/ductor_bot/orchestrator/lifecycle.py
+@@ -165,6 +165,10 @@
+     from ductor_bot.api.busy_state import main_busy_state
+ 
+     server.set_busy_state_handler(lambda: main_busy_state(orch, server))
++    from ductor_bot.api.idle_prompt import handle_idle_message
++
++    server.set_idle_message_handler(
++        lambda channel, key, data: handle_idle_message(orch, server, channel, key, data))
+     server.set_file_context(
+         allowed_roots=resolve_allowed_roots(config.file_access, paths.workspace),
+         upload_dir=paths.api_files_dir,

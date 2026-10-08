@@ -13,11 +13,15 @@ signals, and is the only component permitted to write the automatic =/compact=
 submission.  Claude hook helpers communicate with the per-session Unix socket;
 they never write to a terminal.
 
-The default values intentionally match the Emacs governor: 55 minutes and a
+The fallback values intentionally match the Emacs governor: 55 minutes and a
 60-minute warm-cache TTL for the long profile, 4 minutes and 5 minutes for the
-short profile, and an absolute 70,000 current input-context threshold.  The
-environment variables documented in =--help= are the supervisor's configurable
-surface.  There is no automatic usage-credit TTL inference.
+short profile, and an absolute 70,000 current input-context threshold.  When
+the fleet cache policy has fresh supported evidence for the current endpoint
+and status-line model, the supervisor resolves it once while arming and again
+immediately before automatic action.  A later action deadline re-arms instead
+of compacting early.  Missing, stale, observed-only, or malformed policy falls
+back to the profile values; the environment variables documented in =--help=
+remain the explicit fallback surface.
 
 Re-arm law (sealed 2026-08-21, the second overnight no-compact hunt).  The
 timer is not one-shot-until-next-Stop.  It fires =IDLE_SECONDS= after the most
@@ -42,6 +46,15 @@ sat dormant for twenty hours, while the Opus session lost its own to one
 keystroke at 22:33 with the same dormancy.
 
 Last-session record (sealed 2026-08-21, the Claudeificus revive): the runtime dir under `$XDG_RUNTIME_DIR/claude-idle-compaction/<channel>/` is removed on exit, which left a bot that had just quit with no recoverable session id — and the operator sad. The supervisor now writes `~/.local/state/claude-idle-compaction/<channel>.last-session.json` and, when `CLAUDE_WARM_HERDR_AGENT` names the bot, `last-session.<Label>.json`, on every session bind and again at exit. `pokedex nurse` and `nurse-joy revive` read the label file as the resume source for a down bot; it is the record of the last truth, never a guess.
+
+
+Resolver output is untrusted: only exact endpoint/model identity, supported
+confidence and positive ordered integer windows select measured timing.
+Malformed output retains this consumer's fixed fallback. Automatic actions
+refresh policy and current declared model at their final gate; a later deadline
+preserves the idle window. Custom endpoint identity is never inferred.
+A rejected current snapshot cannot reuse the previous model for measured timing;
+its window falls back while the existing owner/session gate remains authoritative.
 
 * Versioned integration notes
 
@@ -156,6 +169,16 @@ reconnect attempts plus one =/reload-plugins= attempt.  The persistent guard
 log is private state under =XDG_STATE_HOME=; it contains event names and safe
 diagnostics, never prompts or channel message contents.
 
+Claude Code =2.1.291='s development-channel confirmation was verified in the
+installed =~/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe=
+bundle.  Its embedded =chunk-npatgfzx.js= names the title, both warning lines,
+the exact =Channels:= entries, the affirmative label, and the exit label.  The
+startup accepter requires that complete source-backed signature after ANSI
+removal, requires every displayed entry to be explicitly opted in, and sends
+one Enter at most.  A changed prompt, an unlisted entry, local input, any first
+turn lifecycle event, or expiry of the bounded startup window closes it without
+writing to the PTY.
+
 #+BEGIN_SRC python :tangle all/.local/bin/claude-warm :shebang "#!/usr/bin/env python3" :comments no
 """PTY-owning Claude launcher and per-session idle-compaction supervisor."""
 
@@ -213,6 +236,13 @@ CONTROL_COMMANDS = {
 INJECT_RE = re.compile(r"^/mcp reconnect ([A-Za-z0-9_.:-]{1,128})$")
 CHANNEL_DEATH_MARKER = "removedNames"
 CHANNEL_ATTACH_MARKER = "addedNames"
+DEVELOPMENT_CHANNEL_ENTRY_PATTERN = (
+    r"(?:server:[A-Za-z0-9_.:-]{1,160}|"
+    r"plugin:[A-Za-z0-9_.:-]{1,96}@[A-Za-z0-9_.:-]{1,96})"
+)
+DEVELOPMENT_CHANNEL_ENTRY_RE = re.compile(
+    rf"^{DEVELOPMENT_CHANNEL_ENTRY_PATTERN}$"
+)
 EXPECTED_COMPLETION_SYSTEM_SUBTYPES = frozenset(
     {"stop_hook_summary", "turn_duration", "away_summary"}
 )
@@ -336,6 +366,20 @@ def channel_arguments(argv: list[str]) -> list[str]:
             continue
         index += 1
     return specifications
+
+
+def accepted_development_channels() -> tuple[str, ...]:
+    """Return the exact, validated startup-confirmation opt-in entries."""
+    configured = os.environ.get("CLAUDE_WARM_ACCEPT_DEV_CHANNELS", "")
+    if not configured:
+        return ()
+    entries = [entry.strip() for entry in configured.split(",")]
+    if not entries or any(
+        not entry or DEVELOPMENT_CHANNEL_ENTRY_RE.fullmatch(entry) is None
+        for entry in entries
+    ):
+        return ()
+    return tuple(dict.fromkeys(entries))
 
 
 def watched_server_names(argv: list[str]) -> tuple[str, ...]:
@@ -464,6 +508,74 @@ TTL_SECONDS = {
     "long": env_int("CLAUDE_IDLE_COMPACT_LONG_CACHE_TTL_SECONDS", 60 * 60),
     "short": env_int("CLAUDE_IDLE_COMPACT_SHORT_CACHE_TTL_SECONDS", 5 * 60),
 }
+
+
+def validated_cache_decision(decision: object, provider: str, endpoint: str,
+                             model: str, allow_observed: bool = False) -> dict:
+    """Accept only the resolver's exact identity and ordered integer window."""
+    if not isinstance(decision, dict):
+        raise ValueError("cache-policy-not-object")
+    mode, confidence = decision.get("mode"), decision.get("confidence")
+    if mode == "fallback" and confidence == "fallback":
+        # The caller owns fallback timing; stdout cannot redefine its profile.
+        return decision
+    if not (mode == "measured" and confidence == "supported" or
+            allow_observed and mode == "observed" and confidence == "observed"):
+        raise ValueError("cache-policy-confidence-invalid")
+    def canonical(value: str) -> str:
+        return value.strip().lower().replace("_", "-")
+    expected_provider = canonical(provider)
+    expected_provider = {"openai-codex": "openai",
+                         "openai-codex-oauth": "openai"}.get(expected_provider, expected_provider)
+    expected_endpoint = canonical(endpoint)
+    if expected_provider == "openai" and expected_endpoint in {"openai", "openai-codex", "openai-codex-oauth"}:
+        expected_endpoint = "openai-codex-oauth"
+    expected_model = canonical(model)
+    if expected_provider == "anthropic":
+        expected_model = re.sub(r"-+", "-", re.sub(r"[ .]+", "-", expected_model)).strip("-")
+        if not expected_model.startswith("claude-"):
+            expected_model = "claude-" + expected_model
+    for key, expected in (("provider", expected_provider), ("endpoint_id", expected_endpoint), ("model", expected_model)):
+        if decision.get(key) != expected:
+            raise ValueError("cache-policy-identity-mismatch")
+    compact, expiry = decision.get("compact_before_seconds"), decision.get("cache_expires_seconds")
+    if (type(compact) is not int or type(expiry) is not int or
+            not 0 < compact < expiry or expiry > 2**31 - 1):
+        raise ValueError("cache-policy-window-invalid")
+    return decision
+
+
+def measured_cache_window(model: str | None, profile: str) -> tuple[int, int, dict]:
+    fallback_idle = IDLE_SECONDS[profile]
+    fallback_ttl = TTL_SECONDS[profile]
+    if not model:
+        return fallback_idle, fallback_ttl, {"mode": "fallback", "reason": "model-unknown"}
+    if any(os.environ.get(name) for name in (
+        "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    )):
+        return fallback_idle, fallback_ttl, {"mode": "fallback", "reason": "endpoint-unknown"}
+    helper = pathlib.Path(os.environ.get(
+        "FLEET_CACHE_POLICY_HELPER", str(pathlib.Path.home() / "HelmCortex/FORGE/bin/cache-policy")
+    )).expanduser()
+    policy = pathlib.Path(os.environ.get(
+        "FLEET_CACHE_POLICY_PATH",
+        str(pathlib.Path.home() / "HelmCortex/ROOTS/DotRoot/agent-session/centre/data/cache-policy.json"),
+    )).expanduser()
+    try:
+        completed = subprocess.run(
+            [str(helper), "resolve", "--policy", str(policy), "--harness", "claude",
+             "--provider", "anthropic", "--endpoint", "anthropic-default",
+             "--model", model, "--fallback-compact", str(fallback_idle),
+             "--fallback-cache", str(fallback_ttl)],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        decision = validated_cache_decision(json.loads(completed.stdout), "anthropic", "anthropic-default", model)
+        if decision["mode"] == "fallback":
+            return fallback_idle, fallback_ttl, decision
+        return decision["compact_before_seconds"], decision["cache_expires_seconds"], decision
+    except (OSError, TypeError, ValueError, KeyError, OverflowError, subprocess.SubprocessError):
+        return fallback_idle, fallback_ttl, {"mode": "fallback", "reason": "resolver-error"}
 MIN_TOKENS = env_int("CLAUDE_IDLE_COMPACT_MIN_TOKENS", 70000)
 # An unknown transcript record fails closed (transcript-uncertain), but the
 # uncertainty must be a bounded caution, never a permanent veto: with the
@@ -510,11 +622,26 @@ INPUT_ESCAPE_TIMEOUT_SECONDS = env_float(
 CHANNEL_ATTACH_WAIT_SECONDS = env_int(
     "CLAUDE_IDLE_CHANNEL_ATTACH_WAIT_SECONDS", 30, 0
 )
+# A supervised session proves its lifecycle hooks are wired by sending any
+# event (SessionStart fires at launch).  None inside this window means the
+# idle timer can never arm: record it loudly (2026-09-30: Honey's Telegram
+# bots ran for days at status "starting", never compacting, hooks unwired).
+LIFECYCLE_WAIT_SECONDS = env_int(
+    "CLAUDE_IDLE_LIFECYCLE_WAIT_SECONDS", 180, 1
+)
 CHANNEL_RECOVERY_COOLDOWN_SECONDS = env_int(
     "CLAUDE_IDLE_CHANNEL_RECOVERY_COOLDOWN_SECONDS", 3, 0
 )
 CHANNEL_RECOVERY_CONFIRM_SECONDS = env_int(
     "CLAUDE_IDLE_CHANNEL_RECOVERY_CONFIRM_SECONDS", 5, 1
+)
+_development_channel_accept_window_seconds = env_float(
+    "CLAUDE_WARM_DEV_CHANNEL_ACCEPT_WINDOW_SECONDS", 60.0, 0.0
+)
+DEVELOPMENT_CHANNEL_ACCEPT_WINDOW_SECONDS = (
+    _development_channel_accept_window_seconds
+    if math.isfinite(_development_channel_accept_window_seconds)
+    else 60.0
 )
 DEBUG_LOG_MAX_BYTES = env_int(
     "CLAUDE_IDLE_CHANNEL_DEBUG_MAX_BYTES", 2 * 1024 * 1024, 65536
@@ -828,6 +955,82 @@ class ClaudeScreenClassifier:
             return None
         self.state = state
         return state
+
+
+class DevelopmentChannelPromptMatcher:
+    """Recognize only Claude Code 2.1.291's complete development dialog."""
+
+    BUFFER_BYTES = 64 * 1024
+    TITLE = "WARNING: Loading development channels"
+    WARNING = (
+        "--dangerously-load-development-channels is for local channel "
+        "development only. Do not use this option to run channels you have "
+        "downloaded off the internet."
+    )
+    APPROVED_CHANNELS_HELP = (
+        "Please use --channels to run a list of approved channels."
+    )
+    CONFIRM_LABEL = "I am using this for local development"
+    EXIT_LABEL = "Exit"
+    CHANNELS_RE = re.compile(
+        rf"Channels:\s*(?P<entries>{DEVELOPMENT_CHANNEL_ENTRY_PATTERN}"
+        rf"(?:\s*,\s*{DEVELOPMENT_CHANNEL_ENTRY_PATTERN})*)"
+    )
+
+    def __init__(self, opted_in: tuple[str, ...]):
+        self.opted_in = frozenset(opted_in)
+        self.raw = bytearray()
+        self.matched = False
+
+    def feed(self, data: bytes) -> tuple[str, ...] | None:
+        """Return the exact approved entries once, or fail closed."""
+        if self.matched or not self.opted_in or not data:
+            return None
+        self.raw.extend(data)
+        if len(self.raw) > self.BUFFER_BYTES:
+            del self.raw[:-self.BUFFER_BYTES]
+        visible = ClaudeScreenClassifier.ANSI_RE.sub(
+            "", bytes(self.raw).decode("utf-8", "replace")
+        )
+        visible = "".join(
+            character
+            for character in visible
+            if character in "\n\r\t" or ord(character) >= 0x20
+        )
+        normalized = re.sub(r"\s+", " ", visible)
+        title_at = normalized.rfind(self.TITLE)
+        if title_at < 0:
+            return None
+        candidate = normalized[title_at:]
+        position = 0
+        for marker in (self.TITLE, self.WARNING, self.APPROVED_CHANNELS_HELP):
+            found = candidate.find(marker, position)
+            if found < 0:
+                return None
+            position = found + len(marker)
+        channels = self.CHANNELS_RE.search(candidate, position)
+        if channels is None:
+            return None
+        confirm_at = candidate.find(self.CONFIRM_LABEL, channels.end())
+        exit_at = candidate.find(
+            self.EXIT_LABEL,
+            confirm_at + len(self.CONFIRM_LABEL) if confirm_at >= 0 else 0,
+        )
+        if confirm_at < 0 or exit_at < 0:
+            return None
+        # If a future renderer adds an entry shape this version does not know,
+        # its server:/plugin: prefix remains between the parsed list and the
+        # affirmative label.  Refuse rather than accepting a partial list.
+        remainder = candidate[channels.end():confirm_at]
+        if "server:" in remainder or "plugin:" in remainder:
+            return None
+        prompted = tuple(
+            entry.strip() for entry in channels.group("entries").split(",")
+        )
+        if not prompted or any(entry not in self.opted_in for entry in prompted):
+            return None
+        self.matched = True
+        return prompted
 
 
 class TerminalInputClassifier:
@@ -1648,6 +1851,16 @@ class Supervisor:
     def __init__(self, argv: list[str], executable: str):
         self.argv = argv
         self.executable = executable
+        self.development_channel_opt_ins = accepted_development_channels()
+        self.development_channel_prompt_matcher = DevelopmentChannelPromptMatcher(
+            self.development_channel_opt_ins
+        )
+        self.development_channel_accept_deadline: float | None = None
+        self.accepted_development_channels: tuple[str, ...] = ()
+        self.development_channel_accepted_at: float | None = None
+        self.development_channel_acceptance_closed_reason: str | None = (
+            None if self.development_channel_opt_ins else "not-configured"
+        )
         self.channel_specs = tuple(channel_arguments(argv))
         self.watched_servers = watched_server_names(argv)
         self.channel_process_patterns = channel_process_patterns()
@@ -1718,6 +1931,9 @@ class Supervisor:
         self.input_classifier = TerminalInputClassifier()
         self.cache_profile_requested = os.environ.get("CLAUDE_IDLE_CACHE_PROFILE", "auto")
         self.cache_profile = effective_profile(self.cache_profile_requested)
+        self.cache_idle_seconds = IDLE_SECONDS[self.cache_profile]
+        self.cache_ttl_seconds = TTL_SECONDS[self.cache_profile]
+        self.cache_policy = {"mode": "fallback", "reason": "startup"}
         self.timer_deadline: float | None = None
         self.timer_kind: str | None = None
         self.timer_generation = 0
@@ -1757,6 +1973,9 @@ class Supervisor:
         self.screen_classifier = ClaudeScreenClassifier()
         self.screen_state: str | None = None
         self.preservation_federation = PreservationFederationClient(self)
+        self.lifecycle_health = "pending"
+        self.lifecycle_deadline = monotonic() + LIFECYCLE_WAIT_SECONDS
+        self.lifecycle_alarm_path = self.state_root / f"{self.channel}.LIFECYCLE-HOOKS-MISSING"
         self._guard_log("supervisor-started")
         self._write_state()
 
@@ -1788,12 +2007,31 @@ class Supervisor:
                 str(self.transcript_project_dir) if self.transcript_project_dir else None
             ),
             "channel_specs": list(self.channel_specs),
+            "development_channel_accept_opt_ins": list(
+                self.development_channel_opt_ins
+            ),
+            "development_channel_accept_window_seconds": (
+                DEVELOPMENT_CHANNEL_ACCEPT_WINDOW_SECONDS
+            ),
+            "development_channel_accept_deadline": (
+                self.development_channel_accept_deadline
+            ),
+            "accepted_development_channels": list(
+                self.accepted_development_channels
+            ),
+            "development_channel_accepted_at": (
+                self.development_channel_accepted_at
+            ),
+            "development_channel_acceptance_closed_reason": (
+                self.development_channel_acceptance_closed_reason
+            ),
             "watched_servers": list(self.watched_servers),
             "channel_health": self.channel_health,
             "channel_marker_seen": self.channel_marker_seen,
             "channel_turn_seen": self.channel_turn_seen,
             "channel_attach_checked": self.channel_attach_checked,
             "channel_attach_deadline": self.channel_attach_deadline,
+            "lifecycle_health": self.lifecycle_health,
             "channel_recovery_pending": self.recovery_pending,
             "channel_recovery_awaiting": self.recovery_awaiting,
             "channel_recovery_ignore_next_stop": self.recovery_ignore_next_stop,
@@ -1833,6 +2071,7 @@ class Supervisor:
             "last_lifecycle_activity": self.last_lifecycle_activity,
             "cache_profile": self.cache_profile,
             "cache_profile_requested": self.cache_profile_requested,
+            "cache_policy": self.cache_policy,
             "timer_deadline": self.timer_deadline,
             "timer_kind": self.timer_kind,
             "timer_generation": self.timer_generation,
@@ -1855,7 +2094,7 @@ class Supervisor:
 
     def _guard_log(self, event: str, **fields: object) -> None:
         """Append one safe, durable channel-guard observation."""
-        if not self.watched_servers:
+        if not self.watched_servers and not self.development_channel_opt_ins:
             return
         payload = {
             "timestamp": now(),
@@ -1942,6 +2181,55 @@ class Supervisor:
         self.herdr.report_state(state, self.session_id)
         self._write_state()
 
+    def _close_development_channel_acceptance(self, reason: str) -> None:
+        """Permanently close this launch's one-shot startup confirmer."""
+        if (
+            self.accepted_development_channels
+            or self.development_channel_acceptance_closed_reason is not None
+        ):
+            return
+        self.development_channel_acceptance_closed_reason = reason
+        self._write_state()
+
+    def _expire_development_channel_acceptance(self) -> None:
+        """Close the confirmer when its monotonic startup window expires."""
+        if (
+            self.development_channel_accept_deadline is not None
+            and monotonic() >= self.development_channel_accept_deadline
+        ):
+            self._close_development_channel_acceptance("startup-window-expired")
+
+    def _maybe_accept_development_channel_prompt(self, data: bytes) -> None:
+        """Press Enter once for one complete, exact, opted-in startup dialog."""
+        if (
+            self.development_channel_acceptance_closed_reason is not None
+            or self.accepted_development_channels
+            or self.development_channel_accept_deadline is None
+        ):
+            return
+        if monotonic() >= self.development_channel_accept_deadline:
+            self._close_development_channel_acceptance("startup-window-expired")
+            return
+        prompted = self.development_channel_prompt_matcher.feed(data)
+        if prompted is None:
+            return
+        if self.master_fd is None:
+            self._close_development_channel_acceptance("pty-master-unavailable")
+            return
+        try:
+            write_all(self.master_fd, b"\r")
+        except OSError:
+            self._close_development_channel_acceptance("pty-write-failed")
+            return
+        self.accepted_development_channels = prompted
+        self.development_channel_accepted_at = now()
+        self.development_channel_acceptance_closed_reason = "accepted"
+        self._guard_log(
+            "development-channel-accepted",
+            channels=list(prompted),
+        )
+        self._write_state()
+
     def cancel(self, reason: str) -> None:
         """Invalidate the one-shot timer and retain the cancellation reason."""
         self.timer_deadline = None
@@ -1968,21 +2256,84 @@ class Supervisor:
             and not self.recovery_pending
         ):
             return
+        _, snapshot_error = self._read_snapshot()
+        self.cache_idle_seconds, self.cache_ttl_seconds, self.cache_policy = measured_cache_window(
+            self.current_model if snapshot_error is None else None, self.cache_profile
+        )
         self.timer_generation += 1
-        self.timer_deadline = self.last_normal_stop + IDLE_SECONDS[self.cache_profile]
+        self.timer_deadline = self.last_normal_stop + self.cache_idle_seconds
         self.timer_kind = "compact"
         self.last_state_transition = "armed"
         self._debug(
             f"armed channel={short_id(self.channel)} profile={self.cache_profile} "
-            f"delay={IDLE_SECONDS[self.cache_profile]}"
+            f"delay={self.cache_idle_seconds} policy={self.cache_policy.get('mode')}"
         )
         self._guard_log(
             "armed",
             kind="compact",
             profile=self.cache_profile,
-            delay=IDLE_SECONDS[self.cache_profile],
+            delay=self.cache_idle_seconds,
+            cache_expires=self.cache_ttl_seconds,
+            policy_mode=self.cache_policy.get("mode"),
+            policy_reason=self.cache_policy.get("reason"),
+            policy_confidence=self.cache_policy.get("confidence"),
+            policy_source_harness=self.cache_policy.get("source_harness"),
+            policy_provider=self.cache_policy.get("provider"),
+            policy_endpoint=self.cache_policy.get("endpoint_id"),
+            policy_model=self.cache_policy.get("model"),
+            policy_observed_at=self.cache_policy.get("observed_at"),
+            policy_sample_count=self.cache_policy.get("sample_count"),
+            policy_session_count=self.cache_policy.get("session_count"),
         )
         self._write_state()
+
+    def _refresh_cache_policy_for_action(self) -> bool:
+        """Refresh endpoint evidence before an automatic compaction fires.
+
+        A policy can be regenerated, expire, or resolve to a different model
+        while a timer is sleeping.  Refreshing only when the timer arms would
+        let that stale decision trigger a compaction too early.  Return false
+        after re-arming to the newly resolved deadline; manual injections do
+        not pass through this method.
+        """
+        # The snapshot is also the authoritative source for a mid-session
+        # model change.  Its validation remains in the final gate below.
+        _, snapshot_error = self._read_snapshot()
+        previous = self.cache_policy
+        self.cache_idle_seconds, self.cache_ttl_seconds, self.cache_policy = measured_cache_window(
+            self.current_model if snapshot_error is None else None, self.cache_profile
+        )
+        anchor = self._idle_anchor()
+        refreshed_deadline = (
+            anchor + self.cache_idle_seconds if anchor is not None else None
+        )
+        fields = {
+            "profile": self.cache_profile,
+            "delay": self.cache_idle_seconds,
+            "cache_expires": self.cache_ttl_seconds,
+            "previous_mode": previous.get("mode"),
+            "policy_mode": self.cache_policy.get("mode"),
+            "policy_reason": self.cache_policy.get("reason"),
+            "policy_confidence": self.cache_policy.get("confidence"),
+            "policy_source_harness": self.cache_policy.get("source_harness"),
+            "policy_provider": self.cache_policy.get("provider"),
+            "policy_endpoint": self.cache_policy.get("endpoint_id"),
+            "policy_model": self.cache_policy.get("model"),
+            "policy_observed_at": self.cache_policy.get("observed_at"),
+            "policy_sample_count": self.cache_policy.get("sample_count"),
+            "policy_session_count": self.cache_policy.get("session_count"),
+        }
+        if refreshed_deadline is not None and refreshed_deadline > now():
+            self.timer_generation += 1
+            self.timer_deadline = refreshed_deadline
+            self.timer_kind = "compact"
+            self.last_state_transition = "policy-refreshed-rearmed"
+            self._guard_log("policy-refreshed-rearmed", **fields)
+            self._write_state()
+            return False
+        self._guard_log("policy-refreshed-for-action", **fields)
+        self._write_state()
+        return True
 
     def _idle_anchor(self) -> float | None:
         """Return the most recent activity of any kind that moves the idle window."""
@@ -2001,7 +2352,7 @@ class Supervisor:
     def _idle_window_open(self) -> bool:
         """True while any activity is younger than the idle threshold."""
         anchor = self._idle_anchor()
-        return anchor is not None and now() - anchor < IDLE_SECONDS[self.cache_profile]
+        return anchor is not None and now() - anchor < self.cache_idle_seconds
 
     def rearm(self, reason: str) -> None:
         """Re-arm the compaction timer after a transient cancellation or refusal.
@@ -2028,7 +2379,7 @@ class Supervisor:
         anchor = self._idle_anchor()
         delay = float(COMPACT_RETRY_SECONDS)
         if anchor is not None:
-            delay = max(delay, anchor + IDLE_SECONDS[self.cache_profile] - now())
+            delay = max(delay, anchor + self.cache_idle_seconds - now())
         self.timer_generation += 1
         self.timer_deadline = now() + delay
         self.timer_kind = "compact"
@@ -2065,7 +2416,7 @@ class Supervisor:
             anchor = self._idle_anchor()
             if anchor is not None:
                 self.timer_deadline = max(
-                    self.timer_deadline, anchor + IDLE_SECONDS[self.cache_profile]
+                    self.timer_deadline, anchor + self.cache_idle_seconds
                 )
             self._write_state()
             return
@@ -2478,6 +2829,7 @@ class Supervisor:
             )
             if classification != "user-turn":
                 continue
+            self._close_development_channel_acceptance("transcript-user-turn")
             if self.last_normal_stop:
                 if self.transcript_activity_at and self.transcript_activity_at > self.last_normal_stop:
                     continue
@@ -2596,6 +2948,10 @@ class Supervisor:
         self.pid = pid
         self.master_fd = master_fd
         os.set_blocking(master_fd, False)
+        if self.development_channel_opt_ins:
+            self.development_channel_accept_deadline = (
+                monotonic() + DEVELOPMENT_CHANNEL_ACCEPT_WINDOW_SECONDS
+            )
         # Do not bind while the forked child may still expose the inherited
         # Herdr terminal before exec installs the forkpty slave.  The first
         # final-gate probe binds both values after the child is settled.
@@ -2714,6 +3070,49 @@ class Supervisor:
             self._guard_log("channel-attach-failed")
             self._notice("channel did not attach; the terminal session remains running")
             self._write_state()
+
+    def _note_lifecycle_event(self) -> None:
+        """Any valid hook event proves the lifecycle adapter reaches this supervisor."""
+        if self.lifecycle_health == "wired":
+            return
+        recovered = self.lifecycle_health == "missing"
+        self.lifecycle_health = "wired"
+        if recovered:
+            self._guard_log("lifecycle-hooks-recovered")
+            try:
+                self.lifecycle_alarm_path.unlink()
+            except OSError:
+                pass
+
+    def _check_lifecycle_hooks(self) -> None:
+        """Flag a session whose Claude never sends a lifecycle event after launch.
+
+        Without claude-hook-idle-event in the settings Claude actually loads
+        (an unstowed account, a --settings file that omits it, a missing
+        command on PATH), this supervisor never sees a Stop, so it never arms
+        the idle timer and never compacts, silently.  The terminal session is
+        left untouched; the fault goes to the guard log, the state file (and
+        so claude-warmctl list), the debug log, and a durable alarm file.
+        """
+        if self.lifecycle_health != "pending" or monotonic() < self.lifecycle_deadline:
+            return
+        self.lifecycle_health = "missing"
+        self.last_state_transition = "lifecycle-hooks-missing"
+        self._guard_log("lifecycle-hooks-missing", waited=LIFECYCLE_WAIT_SECONDS)
+        self._notice("no lifecycle hook event since launch; idle compaction cannot run")
+        try:
+            atomic_json(self.lifecycle_alarm_path, {
+                "timestamp": now(),
+                "channel": self.channel,
+                "pid": self.pid,
+                "waited_seconds": LIFECYCLE_WAIT_SECONDS,
+                "cause": "no lifecycle hook event since launch: claude-hook-idle-event is not "
+                         "registered in the settings Claude loads, not on its PATH, or Claude "
+                         "is blocked before its session started",
+            })
+        except OSError as error:
+            self._debug(f"lifecycle-alarm-write-failed channel={short_id(self.channel)} error={error}")
+        self._write_state()
 
     def _child_argv(self) -> list[str]:
         """Add private Claude debug capture only for channel sessions."""
@@ -2972,6 +3371,12 @@ class Supervisor:
             self._guard_log("gate-refused", purpose=purpose, reason="stale-timer")
             self._write_state()
             return False
+        if (
+            purpose == "compact"
+            and expected_generation is not None
+            and not self._refresh_cache_policy_for_action()
+        ):
+            return False
         reason = self._gate_reason(purpose)
         if reason:
             self.last_cancellation_reason = reason
@@ -3075,7 +3480,7 @@ class Supervisor:
                 cache=(
                     "unknown"
                     if cache_age is None
-                    else ("warm" if cache_age < TTL_SECONDS[self.cache_profile] else "cold")
+                    else ("warm" if cache_age < self.cache_ttl_seconds else "cold")
                 ),
                 queued_behind_turn=queued_behind_turn,
             )
@@ -3098,6 +3503,7 @@ class Supervisor:
         session_id = message.get("session_id")
         if event not in EVENTS or not isinstance(session_id, str) or not SESSION_RE.fullmatch(session_id):
             return {"ok": False, "error": "invalid-event"}
+        self._note_lifecycle_event()
         if event == "session-start":
             new_session = self.session_id != session_id
             if new_session and self.session_id and not self._same_project_transcript(
@@ -3156,6 +3562,7 @@ class Supervisor:
             return {"ok": True}
         if self.session_id != session_id:
             return {"ok": False, "error": "session-mismatch"}
+        self._close_development_channel_acceptance(f"lifecycle-{event}")
         current = now()
         if event == "stop":
             if message.get("stop_hook_active") is not False:
@@ -3510,6 +3917,7 @@ class Supervisor:
             )
         if not human:
             return
+        self._close_development_channel_acceptance("local-input")
         self.last_local_input = now()
         self.last_local_input_classification = ",".join(sorted(summary))
         if not pending:
@@ -3577,6 +3985,7 @@ class Supervisor:
             sys.stdout.flush()
         except OSError:
             self.shutdown_requested = True
+        self._maybe_accept_development_channel_prompt(data)
         if state is not None:
             self._report_screen_state(state)
         return True
@@ -3622,6 +4031,9 @@ class Supervisor:
                 self.herdr.heartbeat(self.screen_state, self.session_id)
                 self.preservation_federation.poll()
                 self._check_channel_attach()
+                self._expire_development_channel_acceptance()
+                if not child_exited:
+                    self._check_lifecycle_hooks()
                 self._flush_input_classifier()
                 if (
                     self.transcript_quiescence_deadline is not None
@@ -3688,6 +4100,14 @@ class Supervisor:
                     timeout = max(
                         0.0,
                         min(timeout, self.transcript_quiescence_deadline - now()),
+                    )
+                if self.development_channel_accept_deadline is not None:
+                    timeout = max(
+                        0.0,
+                        min(
+                            timeout,
+                            self.development_channel_accept_deadline - monotonic(),
+                        ),
                     )
                 timeout = min(timeout, max(0.0, self.next_transcript_poll - monotonic()))
                 next_preservation_poll = self.preservation_federation.next_poll
@@ -3788,6 +4208,9 @@ def list_sessions() -> int:
             continue
         state["live"] = child_alive(state.get("pid"))
         print(json.dumps(state, sort_keys=True))
+        if state["live"] and state.get("lifecycle_health") == "missing":
+            print(f"WARNING {state.get('channel')}: no lifecycle hook event since launch; "
+                  "claude-hook-idle-event is not wired, idle compaction cannot run", file=sys.stderr)
     if not found:
         print("no supervised Claude sessions")
     return 0
@@ -3861,6 +4284,8 @@ def main(argv: list[str]) -> int:
         print("CLAUDE_IDLE_INPUT_ESCAPE_TIMEOUT_SECONDS,")
         print("CLAUDE_IDLE_WATCHED_SERVERS, CLAUDE_IDLE_RECONNECT_SERVER,")
         print("CLAUDE_IDLE_CHANNEL_ATTACH_WAIT_SECONDS, CLAUDE_IDLE_CHANNEL_RECOVERY_COOLDOWN_SECONDS")
+        print("CLAUDE_WARM_ACCEPT_DEV_CHANNELS,")
+        print("CLAUDE_WARM_DEV_CHANNEL_ACCEPT_WINDOW_SECONDS")
         print("CLAUDE_WARM_HERDR_AGENT, CLAUDE_WARM_HERDR_HEARTBEAT_SECONDS,")
         print("CLAUDE_WARM_HERDR_REGISTRATION_TTL_MS")
         print("CLAUDE_WARM_PRESERVATION_* (all bindings are required; unset is inert)")

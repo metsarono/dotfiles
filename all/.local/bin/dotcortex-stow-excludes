@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Host stow lanes from host-excludes.ssv (package-host-excludes.org, "Stow lanes")."""
+
+import argparse
+import os
+import re
+import socket
+import sys
+from pathlib import Path
+
+PLAIN = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
+
+
+def repo_root():
+    # all/.local/bin/dotcortex-stow-excludes -> the checkout is three levels up.
+    candidate = Path(os.path.realpath(__file__)).parents[3]
+    if (candidate / "all").is_dir():
+        return candidate
+    return Path.home() / "DotCortex"
+
+
+def manifest():
+    env = os.environ.get("HOST_EXCLUDES")
+    return Path(env) if env else repo_root() / "all/.provision/host-excludes.ssv"
+
+
+def hostname():
+    return os.environ.get("HOST_EXCLUDES_HOSTNAME") or socket.gethostname().split(".", 1)[0]
+
+
+def rows(lane):
+    path = manifest()
+    if not path.is_file():
+        return []
+    host, found = hostname(), []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        fields = line.split()
+        if not fields or fields[0].startswith("#") or len(fields) < 3:
+            continue
+        if fields[0] == host and fields[1] == lane:
+            if lane == "stow" and (not PLAIN.match(fields[2]) or ".." in fields[2].split("/")):
+                sys.exit(f"dotcortex-stow-excludes: {path}:{lineno}: refused stow path {fields[2]!r}")
+            found.append(fields[2])
+    return found
+
+
+def resolves_into(link, repo):
+    target = os.path.realpath(link)
+    return target == repo or target.startswith(repo + os.sep)
+
+
+def prune(target, repo, apply):
+    """(link, destination) pairs at or under excluded paths that resolve into repo."""
+    repo = os.path.realpath(repo)
+    removed = []
+    for rel in rows("stow"):
+        top = os.path.join(target, rel)
+        if os.path.islink(top):
+            if resolves_into(top, repo):
+                removed.append((top, os.readlink(top)))
+            continue
+        if not os.path.isdir(top):
+            continue
+        for dirpath, dirnames, filenames in os.walk(top):
+            for name in sorted(dirnames + filenames):
+                path = os.path.join(dirpath, name)
+                if os.path.islink(path) and resolves_into(path, repo):
+                    removed.append((path, os.readlink(path)))
+    if apply:
+        # Directories that held a removed link (up to its excluded top) may go once empty;
+        # a directory that never held one is left alone, even if empty.
+        touched = set()
+        for rel in rows("stow"):
+            top = os.path.join(target, rel)
+            for path, _dest in removed:
+                if path == top or path.startswith(top + os.sep):
+                    parent = os.path.dirname(path)
+                    while parent == top or parent.startswith(top + os.sep):
+                        touched.add(parent)
+                        parent = os.path.dirname(parent)
+        for path, _dest in removed:
+            os.unlink(path)
+        for path in sorted(touched, key=lambda d: -d.count(os.sep)):
+            if os.path.isdir(path) and not os.path.islink(path) and not os.listdir(path):
+                os.rmdir(path)
+    return removed
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("paths")
+    sub.add_parser("ignore-args")
+    hook = sub.add_parser("skip-hook")
+    hook.add_argument("name")
+    pr = sub.add_parser("prune")
+    pr.add_argument("--apply", action="store_true")
+    pr.add_argument("--target", default=os.path.expanduser("~"))
+    pr.add_argument("--repo", default=str(repo_root()))
+    args = parser.parse_args()
+
+    if args.cmd == "paths":
+        for rel in rows("stow"):
+            print(rel)
+    elif args.cmd == "ignore-args":
+        for rel in rows("stow"):
+            print("--ignore=^" + re.escape(rel))
+    elif args.cmd == "skip-hook":
+        return 0 if args.name in rows("stow-hook") else 1
+    elif args.cmd == "prune":
+        verb = "remove" if args.apply else "would remove"
+        found = prune(args.target, args.repo, args.apply)
+        for path, dest in found:
+            print(f"{verb} {path} -> {dest}")
+        print(f"dotcortex-stow-excludes: host {hostname()}: {len(found)} link(s) "
+              f"{'removed' if args.apply else 'to remove (dry-run)'}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

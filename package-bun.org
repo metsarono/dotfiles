@@ -258,6 +258,59 @@ rm -f "$tmp_want" "$tmp_have"
 # ~/DotCortex/all/.local/bin/bun-apply
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+Usage: bun-apply [-h|--help]
+
+Reconcile the DotCortex Bun global-package and source-build manifests.
+Operational arguments are not accepted; configure an apply with environment variables.
+
+Options:
+  -h, --help              Show this help and exit before any apply or build work.
+
+Environment:
+  ENFORCE=0|1             Reconcile packages absent from the manifest (default: 1).
+  UNINSTALL=0|1           Remove extras when ENFORCE=1 (default: 1).
+  UPDATE=0|1              Update installed globals and source checkouts (default: 0).
+  BUN_BUILD_ONLY=NAME     Skip global add/remove work and run only the named build row.
+  DOTCORTEX_ROOT=PATH     Root for relative build paths and gate fallback
+                          (default: $HOME/DotCortex).
+  PROVISION_APPLY=1       Permit additive installs on a gated host; never removals.
+  BUN_INSTALL=PATH        Bun installation root (default: $HOME/.bun).
+  BUN_GLOBAL_DIR=PATH     Installed-global tree scanned by the Bun runner
+                          (default: $BUN_INSTALL/install/global).
+  BUN_GLOBAL_BIN_DIR=PATH Bun global executable directory exported by the runner
+                          (default: $BUN_INSTALL/bin).
+  BUN_BUILD_MANIFEST=PATH Source-build manifest (default:
+                          $DOTCORTEX_ROOT/all/.local/share/dotcortex/manifests/bun/build.ssv).
+  BUN_BUILD_STATE_ROOT=PATH
+                          Source-build fingerprint state (default:
+                          ${XDG_STATE_HOME:-$HOME/.local/state}/dotcortex/bun-build).
+  DOTCORTEX_BUN_ENV=PATH  Command wrapper used by source-build steps
+                          (default: $HOME/.local/bin/dotcortex-bun-env).
+  XDG_STATE_HOME=PATH     State base when BUN_BUILD_STATE_ROOT is unset.
+EOF
+}
+
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    -h|--help)
+      if [ "$#" -eq 1 ]; then
+        usage
+        exit 0
+      fi
+      echo "bun-apply: $1 does not accept additional arguments" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      echo "bun-apply: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
+
 MAN="$HOME/DotCortex/all/.local/share/dotcortex/manifests/bun/global.ssv"
 RUN="$HOME/.local/bin/dotcortex-bun-env"
 
@@ -407,6 +460,8 @@ if [ -x "$HOME/.local/bin/dotcortex-bun-build-lib" ]; then
     install_stamp="$state_dir/install.fp"
     build_stamp="$state_dir/build.fp"
 
+    bun_build_apply_extra_guards "$name" "$root_abs" "$ref" "$extra"
+
     install_effective="$(bun_build_effective_install_cmd "$root_abs" "$workdir_abs" "$install_cmd")"
     build_effective="$(bun_build_effective_build_cmd "$build_cmd")"
 
@@ -445,6 +500,412 @@ if [ -x "$HOME/.local/bin/dotcortex-bun-build-lib" ]; then
 fi
 
 echo "Done."
+#+END_SRC
+
+** Apply CLI contract tests
+
+These fixtures replace the Bun runner and source-build command with local logging
+stubs. They prove that help and rejected arguments cannot reach any apply seam,
+while a no-argument apply still reaches the selected build row.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-bun-apply.py :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
+import unittest
+
+
+HERE = Path(__file__).resolve()
+ROOT = HERE.parents[5]
+APPLY = ROOT / "all/.local/bin/bun-apply"
+BUILD_LIB = ROOT / "all/.local/bin/dotcortex-bun-build-lib"
+
+
+class BunApplyFixture:
+    def __init__(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="bun-apply-help-")
+        self.root = Path(self.temporary.name)
+        self.home = self.root / "home"
+        self.repo = self.home / "DotCortex"
+        self.bin = self.home / ".local/bin"
+        self.global_manifest = self.repo / "all/.local/share/dotcortex/manifests/bun/global.ssv"
+        self.build_manifest = self.root / "build.ssv"
+        self.state = self.root / "state"
+        self.global_dir = self.root / "bun-global"
+        self.source = self.root / "source"
+        self.call_log = self.root / "runner.log"
+        self.build_log = self.root / "build.log"
+
+        self.bin.mkdir(parents=True)
+        self.global_manifest.parent.mkdir(parents=True)
+        self.global_manifest.write_text("# PKG VERSION FLAGS REGISTRY EXTRA\n", encoding="utf-8")
+        self.global_dir.mkdir()
+        self.source.mkdir()
+        (self.source / "package.json").write_text('{"name":"fixture"}\n', encoding="utf-8")
+
+        runner = self.bin / "dotcortex-bun-env"
+        runner.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "printf 'runner:%s\\n' \"$*\" >> \"$BUN_TEST_CALL_LOG\"\n"
+            "exec \"$@\"\n",
+            encoding="utf-8",
+        )
+        runner.chmod(0o755)
+        os.symlink(BUILD_LIB, self.bin / "dotcortex-bun-build-lib")
+
+        rows = [
+            self._row("chosen", 'printf "%s\\n" chosen >> "$BUN_TEST_BUILD_LOG"'),
+            self._row("other", 'printf "%s\\n" other >> "$BUN_TEST_BUILD_LOG"'),
+        ]
+        self.build_manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        self.env = {
+            "HOME": str(self.home),
+            "PATH": "/usr/bin:/bin",
+            "DOTCORTEX_ROOT": str(self.repo),
+            "BUN_BUILD_MANIFEST": str(self.build_manifest),
+            "BUN_BUILD_STATE_ROOT": str(self.state),
+            "DOTCORTEX_BUN_ENV": str(runner),
+            "BUN_GLOBAL_DIR": str(self.global_dir),
+            "BUN_BUILD_ONLY": "chosen",
+            "ENFORCE": "0",
+            "UNINSTALL": "0",
+            "UPDATE": "0",
+            "BUN_TEST_CALL_LOG": str(self.call_log),
+            "BUN_TEST_BUILD_LOG": str(self.build_log),
+        }
+
+    def _row(self, name: str, build: str) -> str:
+        fields = [name, "local", str(self.source), "unused", "unused", ".", "none", build, "none"]
+        return shlex.join(fields)
+
+    def run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(APPLY), *args],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+        )
+
+    def assert_no_apply(self, case: unittest.TestCase) -> None:
+        case.assertFalse(self.call_log.exists(), "help/rejection reached the Bun runner")
+        case.assertFalse(self.build_log.exists(), "help/rejection ran a build command")
+        case.assertFalse(self.state.exists(), "help/rejection created build state")
+
+    def close(self) -> None:
+        self.temporary.cleanup()
+
+
+class BunApplyCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = BunApplyFixture()
+        self.addCleanup(self.fixture.close)
+
+    def test_long_help_prints_complete_usage_without_apply(self) -> None:
+        result = self.fixture.run("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(result.stdout.startswith("Usage: bun-apply [-h|--help]\n"))
+        for name in (
+            "ENFORCE", "UNINSTALL", "UPDATE", "BUN_BUILD_ONLY", "DOTCORTEX_ROOT",
+            "PROVISION_APPLY", "BUN_INSTALL", "BUN_GLOBAL_DIR", "BUN_GLOBAL_BIN_DIR",
+            "BUN_BUILD_MANIFEST", "BUN_BUILD_STATE_ROOT", "DOTCORTEX_BUN_ENV",
+            "XDG_STATE_HOME",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, result.stdout)
+        self.fixture.assert_no_apply(self)
+
+    def test_short_help_prints_usage_without_apply(self) -> None:
+        result = self.fixture.run("-h")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("Usage: bun-apply", result.stdout)
+        self.fixture.assert_no_apply(self)
+
+    def test_unknown_flag_fails_closed_with_usage(self) -> None:
+        result = self.fixture.run("--definitely-not-a-bun-apply-flag")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("unknown argument", result.stderr)
+        self.assertIn("Usage: bun-apply", result.stderr)
+        self.fixture.assert_no_apply(self)
+
+    def test_help_with_extra_argument_fails_closed(self) -> None:
+        result = self.fixture.run("--help", "unexpected")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("does not accept additional arguments", result.stderr)
+        self.assertIn("Usage: bun-apply", result.stderr)
+        self.fixture.assert_no_apply(self)
+
+    def test_no_argument_apply_preserves_selected_build_behavior(self) -> None:
+        result = self.fixture.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("== bun apply ==", result.stdout)
+        self.assertIn(">> [chosen] build:", result.stdout)
+        self.assertIn("Done.", result.stdout)
+        self.assertEqual(self.fixture.build_log.read_text(encoding="utf-8"), "chosen\n")
+        self.assertNotIn("other", self.fixture.build_log.read_text(encoding="utf-8"))
+        self.assertTrue(self.fixture.call_log.exists(), "valid apply did not reach the fake runner")
+        self.assertTrue((self.fixture.state / "chosen/build.fp").is_file())
+        self.assertFalse((self.fixture.state / "other").exists())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+#+END_SRC
+
+** Patch-series build guard tests
+
+These fake Git checkouts exercise the complete =bun-apply= integration. The
+fixture proves that only an exactly recorded prior patch series may be replaced;
+unknown tracked, staged, or untracked work is preserved by refusing the build.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-bun-build-patches.py :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
+import unittest
+
+
+HERE = Path(__file__).resolve()
+ROOT = HERE.parents[5]
+APPLY = ROOT / "all/.local/bin/bun-apply"
+BUILD_LIB = ROOT / "all/.local/bin/dotcortex-bun-build-lib"
+
+
+class PatchSeriesFixture:
+    def __init__(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="bun-patch-series-")
+        self.root = Path(self.temporary.name)
+        self.home = self.root / "home"
+        self.dotcortex = self.home / "DotCortex"
+        self.bin = self.home / ".local/bin"
+        self.global_manifest = self.dotcortex / "all/.local/share/dotcortex/manifests/bun/global.ssv"
+        self.build_manifest = self.root / "build.ssv"
+        self.state = self.root / "state"
+        self.global_dir = self.root / "bun-global"
+        self.checkout = self.root / "checkout"
+        self.patch = self.dotcortex / "patches/fixture.patch"
+        self.runner_log = self.root / "runner.log"
+
+        self.bin.mkdir(parents=True)
+        self.global_manifest.parent.mkdir(parents=True)
+        self.global_manifest.write_text("# PKG VERSION FLAGS REGISTRY EXTRA\n", encoding="utf-8")
+        self.patch.parent.mkdir(parents=True)
+        self.global_dir.mkdir()
+        self.checkout.mkdir()
+
+        self.git("init", "--quiet")
+        (self.checkout / "managed.txt").write_text("base\n", encoding="utf-8")
+        (self.checkout / "local.txt").write_text("untouched\n", encoding="utf-8")
+        self.git("add", "managed.txt", "local.txt")
+        self.git(
+            "-c", "user.name=DotCortex Test", "-c", "user.email=dotcortex@example.invalid",
+            "commit", "--quiet", "-m", "base",
+        )
+        self.ref = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("remote", "add", "origin", str(self.checkout))
+
+        runner = self.bin / "dotcortex-bun-env"
+        runner.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "printf 'runner:%s\\n' \"$*\" >> \"$BUN_PATCH_RUNNER_LOG\"\n"
+            "exec \"$@\"\n",
+            encoding="utf-8",
+        )
+        runner.chmod(0o755)
+        os.symlink(BUILD_LIB, self.bin / "dotcortex-bun-build-lib")
+
+        self.env = {
+            "HOME": str(self.home),
+            "PATH": "/usr/bin:/bin",
+            "DOTCORTEX_ROOT": str(self.dotcortex),
+            "BUN_BUILD_MANIFEST": str(self.build_manifest),
+            "BUN_BUILD_STATE_ROOT": str(self.state),
+            "DOTCORTEX_BUN_ENV": str(runner),
+            "BUN_GLOBAL_DIR": str(self.global_dir),
+            "BUN_BUILD_ONLY": "fixture",
+            "ENFORCE": "0",
+            "UNINSTALL": "0",
+            "UPDATE": "0",
+            "BUN_PATCH_RUNNER_LOG": str(self.runner_log),
+        }
+        self.write_patch("v1")
+        self.write_manifest()
+
+    def git(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(self.checkout), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def write_patch(self, value: str) -> None:
+        managed = self.checkout / "managed.txt"
+        previous = managed.read_text(encoding="utf-8")
+        managed.write_text(f"{value}\n", encoding="utf-8")
+        try:
+            diff = self.git("diff", "--binary", "--full-index", self.ref, "--", "managed.txt").stdout
+        finally:
+            managed.write_text(previous, encoding="utf-8")
+        if not diff:
+            raise AssertionError("fixture patch unexpectedly empty")
+        self.patch.write_text(diff, encoding="utf-8")
+
+    def write_manifest(self, *, allow_untracked: str = "") -> None:
+        extra = "patches=patches/fixture.patch"
+        if allow_untracked:
+            extra += f";allow-untracked={allow_untracked}"
+        fields = [
+            "fixture", "git", str(self.checkout), str(self.checkout), self.ref,
+            ".", "none", "true", "none", extra,
+        ]
+        self.build_manifest.write_text(shlex.join(fields) + "\n", encoding="utf-8")
+
+    def run(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(APPLY)],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+        )
+
+    def diff(self) -> str:
+        return self.git("diff", "--binary", "--full-index", self.ref).stdout
+
+    def close(self) -> None:
+        self.temporary.cleanup()
+
+
+class BunPatchSeriesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = PatchSeriesFixture()
+        self.addCleanup(self.fixture.close)
+
+    def assert_failed_without_mutation(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            (self.fixture.checkout / "managed.txt").read_text(encoding="utf-8"),
+            "base\n",
+        )
+
+    def test_pristine_checkout_applies_series_and_records_exact_state(self) -> None:
+        result = self.fixture.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("apply patch series (1 patches)", result.stdout)
+        self.assertEqual(
+            (self.fixture.checkout / "managed.txt").read_text(encoding="utf-8"),
+            "v1\n",
+        )
+        state = self.fixture.state / "fixture/patch-series"
+        self.assertEqual((state / "schema").read_text(encoding="utf-8"), "1\n")
+        self.assertTrue((state / "applied.patch").is_file())
+
+    def test_already_current_checkout_is_a_successful_noop(self) -> None:
+        self.fixture.git("apply", str(self.fixture.patch))
+        before = self.fixture.diff()
+        result = self.fixture.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("patch series current", result.stdout)
+        self.assertEqual(self.fixture.diff(), before)
+
+    def test_patch_version_change_replaces_only_recorded_prior_series(self) -> None:
+        first = self.fixture.run()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.fixture.write_patch("v2")
+
+        second = self.fixture.run()
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("replace recognized prior patch series", second.stdout)
+        self.assertEqual(
+            (self.fixture.checkout / "managed.txt").read_text(encoding="utf-8"),
+            "v2\n",
+        )
+        self.assertEqual(
+            (self.fixture.checkout / "local.txt").read_text(encoding="utf-8"),
+            "untouched\n",
+        )
+        self.assertEqual(self.fixture.git("diff", "--name-only", self.fixture.ref).stdout, "managed.txt\n")
+
+    def test_unrecorded_stale_series_fails_loudly_and_is_preserved(self) -> None:
+        self.fixture.git("apply", str(self.fixture.patch))
+        self.fixture.write_patch("v2")
+        result = self.fixture.run()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("not recognized as the managed patch series", result.stderr)
+        self.assertEqual(
+            (self.fixture.checkout / "managed.txt").read_text(encoding="utf-8"),
+            "v1\n",
+        )
+
+    def test_unknown_tracked_edit_is_refused_and_preserved(self) -> None:
+        local = self.fixture.checkout / "local.txt"
+        local.write_text("operator work\n", encoding="utf-8")
+        result = self.fixture.run()
+        self.assert_failed_without_mutation(result)
+        self.assertIn("not recognized as the managed patch series", result.stderr)
+        self.assertEqual(local.read_text(encoding="utf-8"), "operator work\n")
+
+    def test_staged_edit_is_refused_and_preserved(self) -> None:
+        local = self.fixture.checkout / "local.txt"
+        local.write_text("staged operator work\n", encoding="utf-8")
+        self.fixture.git("add", "local.txt")
+        result = self.fixture.run()
+        self.assert_failed_without_mutation(result)
+        self.assertIn("staged checkout edits", result.stderr)
+        self.assertEqual(local.read_text(encoding="utf-8"), "staged operator work\n")
+
+    def test_unknown_untracked_file_is_refused_and_preserved(self) -> None:
+        note = self.fixture.checkout / "operator-note.txt"
+        note.write_text("keep me\n", encoding="utf-8")
+        result = self.fixture.run()
+        self.assert_failed_without_mutation(result)
+        self.assertIn("unknown untracked checkout path: operator-note.txt", result.stderr)
+        self.assertEqual(note.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_declared_generated_untracked_file_may_coexist(self) -> None:
+        generated = self.fixture.checkout / "generated.out"
+        generated.write_text("managed output\n", encoding="utf-8")
+        self.fixture.write_manifest(allow_untracked="generated.out")
+        result = self.fixture.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(generated.read_text(encoding="utf-8"), "managed output\n")
+        self.assertEqual(
+            (self.fixture.checkout / "managed.txt").read_text(encoding="utf-8"),
+            "v1\n",
+        )
+
+    def test_inapplicable_patch_fails_loudly_before_mutation(self) -> None:
+        self.fixture.patch.write_text(
+            "diff --git a/managed.txt b/managed.txt\n"
+            "--- a/managed.txt\n"
+            "+++ b/managed.txt\n"
+            "@@ -1 +1 @@\n"
+            "-not-the-base\n"
+            "+v2\n",
+            encoding="utf-8",
+        )
+        result = self.fixture.run()
+        self.assert_failed_without_mutation(result)
+        self.assertIn("patch applies neither", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
 #+END_SRC
 
 * Health
@@ -491,6 +952,9 @@ sequentially by =bun:apply= after the global Bun package pass.
   else =bun install=); =none= disables dependency install
 - =BUILD=: empty or =none= skips builds
 - =HEALTH=: optional command, only executed when =RUN_CHECKS=1 bun-health=
+- =EXTRA=: optional semicolon-delimited build guards. =patches= accepts an ordered,
+  comma-delimited patch series; =allow-untracked= names managed generated paths
+  that may coexist with that series. Unknown checkout edits still fail closed.
 - Quote commands that contain spaces
 
 ** DeepSeek Harness Telegram compatibility patch
@@ -590,6 +1054,316 @@ index 5e9ab2b..99fa037 100644
 +  }
 +});
 +
+#+END_SRC
+
+** DeepSeek Harness MailCortex Telegram reply seam
+
+The browser/API =session/prompt= RPC persists its client-minted request ID on
+the resulting =user/message=.  The Telegram live-feed already routes every
+event for a bound session through the harness transport, but it finalizes prose
+only for a Telegram-owned inbound.  Mark only the watcher-owned
+=mailcortex-= request-ID namespace as such an inbound, so the ordinary feed
+publishes the final answer without a watcher-side Bot API call.
+
+Cold restoration has one additional ordering requirement: adopting a resumed
+session can synchronously replay its queued =user/message=.  Install the durable
+chat binding before =adopt()= so that replay cannot fall through the Bridge's
+unbound-event return.  Otherwise the later =assistant/message= still reaches
+the pvox side channel after the session becomes live, but the renderer sees no
+pending Telegram inbound and discards the final prose at =turn/end=.
+
+The fixture mounts the real harness feed in production registration order.  It
+locks one unquoted Telegram delivery with live feed enabled and disabled, keeps
+that delivery when a separate MailCortex reply tool runs, and replays the wake
+inside restart adoption before the restored session is published live.
+
+Keep semantic context around the bridge state and test helpers.  The Bun
+manifest still passes =--unidiff-zero= for older compatibility patches, so
+line-number-only hunks are unsafe when another staged seam shifts the file.
+
+#+BEGIN_SRC diff :tangle all/.local/share/dotcortex/patches/dsh-telegram-mailcortex-wake.patch :comments no
+diff --git a/src/core/chat-bindings.ts b/src/core/chat-bindings.ts
+index 77e3b1b..fd125cd 100644
+--- a/src/core/chat-bindings.ts
++++ b/src/core/chat-bindings.ts
+@@ -107,6 +107,7 @@ export async function restoreChatBindings<Handle>(configRoot: string, ops: Resto
+     const chatId = Number(chatIdRaw);
+     if (!Number.isInteger(chatId) || !ops.isAllowed(chatId)) continue;
+     let liveId = ops.liveAgentId(entry.agentId);
++    let bound = false;
+     if (liveId === undefined) {
+       const resumed = await ops.resume(entry.agentId);
+       if (!resumed.ok || resumed.handle === undefined || resumed.agentId === undefined) {
+@@ -115,6 +116,11 @@ export async function restoreChatBindings<Handle>(configRoot: string, ops: Resto
+       if (resumed.agentId !== entry.agentId) {
+         throw new Error(`restored session identity mismatch for chat ${chatId}: expected ${entry.agentId}, got ${resumed.agentId}`);
+       }
++      // Install the durable route before adopt: adopting a resumed handle can
++      // synchronously replay queued session events. If user/message lands in
++      // that window, Bridge must already know which Telegram chat owns it.
++      ops.bind(chatId, entry.agentId);
++      bound = true;
+       ops.adopt(resumed.handle);
+       liveId = ops.liveAgentId(entry.agentId);
+       if (liveId !== entry.agentId) {
+@@ -125,7 +131,7 @@ export async function restoreChatBindings<Handle>(configRoot: string, ops: Resto
+     if (liveId !== entry.agentId) {
+       throw new Error(`live session identity mismatch for chat ${chatId}: expected ${entry.agentId}, got ${liveId}`);
+     }
+-    ops.bind(chatId, entry.agentId);
++    if (!bound) ops.bind(chatId, entry.agentId);
+     ops.log(`binding restored chatId=${chatId} agentId=${entry.agentId}`);
+   }
+ }
+diff --git a/src/harness/bridge.ts b/src/harness/bridge.ts
+index 0ad9b4a..9cae1cd 100644
+--- a/src/harness/bridge.ts
++++ b/src/harness/bridge.ts
+@@ -34,2 +34,3 @@ function withReasoningDirective(config: TelegramConfig, text: string): string {
+  * opaque crash (issue #37). */
+ const OPAQUE_STATUS_LITERAL = /^\d{3} status code \(no body\)$/;
++const MAILCORTEX_REQUEST_ID = /^mailcortex-[0-9a-f]{32}$/;
+@@ -468,2 +469,10 @@ export class Bridge {
+         const state = this.chatStates.get(chatId);
+         const inbound = this.inboundFor(chatId);
++
++        if (event.type === "user/message") {
++          const data = event.data as { source?: { kind?: string; rpcId?: unknown } } | undefined;
++          if (data?.source?.kind === "user" && typeof data.source.rpcId === "string" && MAILCORTEX_REQUEST_ID.test(data.source.rpcId) && state !== undefined) {
++            state.inbound = { chatId, text: "MailCortex delivery", replied: false, noReply: false };
++            state.reminded = false;
++          }
++        }
+diff --git a/test/bridge-final-answer.test.mjs b/test/bridge-final-answer.test.mjs
+index 8ec685e..7c77006 100644
+--- a/test/bridge-final-answer.test.mjs
++++ b/test/bridge-final-answer.test.mjs
+@@ -1,2 +1,5 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
+@@ -52,2 +55,6 @@ async function setup(onAssistantText) {
+ const am = (text) => ({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } });
++const rpcUser = (rpcId, text = 'MailCortex delivery') => ({
++  type: 'user/message',
++  data: { source: { kind: 'user', rpcId }, message: { content: [{ type: 'text', text }] } },
++});
+ const turnEnd = (reason = { kind: 'completed' }) => ({ type: 'turn/end', data: { reason } });
+@@ -55,2 +62,179 @@ async function setup(onAssistantText) {
++async function setupMailCortexFeed(liveFeed) {
++  const listeners = new Map();
++  const agent = { id: 'agent-1', send: () => {}, followup: () => {} };
++  const ctx = {
++    agents: {
++      get: (id) => (id === agent.id ? agent : undefined),
++      list: () => [agent],
++    },
++    get: () => undefined,
++    on: (name, cb) => {
++      const entries = listeners.get(name) ?? [];
++      entries.push(cb);
++      listeners.set(name, entries);
++      return () => {
++        const at = entries.indexOf(cb);
++        if (at >= 0) entries.splice(at, 1);
++      };
++    },
++    effect: (register) => register(),
++    emit: (name, ...args) => {
++      for (const cb of [...(listeners.get(name) ?? [])]) cb(...args);
++    },
++  };
++  const sent = [];
++  let nextMessageId = 100;
++  const transport = {
++    sendText: async (chatId, text, extra) => {
++      const messageId = nextMessageId++;
++      sent.push({ chatId, text, extra, messageId });
++      return messageId;
++    },
++  };
++  const config = {
++    inbound: { rules: [], defaultMode: 'auto-handle' },
++    outbound: { parseMode: 'HTML', liveFeed },
++  };
++  let bridge;
++  let consumer;
++  const host = {
++    send: (chatId, text, options) => transport.sendText(chatId, text, options),
++    requireCtx: () => ctx,
++    currentAgent: () => agent,
++    liveFeedEnabled: () => config.outbound.liveFeed !== false,
++    chatIdForAgent: (agentId) => bridge?.chatIdForAgent(agentId),
++    agentIdForChat: (chatId) => bridge?.agentIdForChat(chatId),
++    setAssistantConsumer: (next) => {
++      consumer = next;
++      bridge?.setAssistantConsumer(next);
++    },
++    pendingInbound: (chatId) => bridge?.hasPendingInbound(chatId) ?? false,
++    inboundMessageId: (chatId) => bridge?.inboundMessageIdValue(chatId),
++    markInboundReplied: (chatId) => bridge?.markInboundReplied(chatId),
++    attachFeedback: () => {},
++    goalForChat: () => undefined,
++    statusStats: () => ({}),
++    getConfigPath: () => true,
++  };
++  ctx.telegram = host;
++  const { Bridge } = await import('../dist/harness/bridge.js');
++  const { mountHarnessFeed, unmountHarnessFeed } = await import('../dist/extensions/harness-feed.js');
++  // Production order: the feed registers first and retains its consumer until
++  // the transport constructs and attaches the Bridge.
++  mountHarnessFeed(host, ctx);
++  bridge = new Bridge({
++    ctx,
++    transport,
++    getConfig: () => config,
++    onStateChange: () => {},
++    log: () => {},
++  });
++  bridge.attach();
++  bridge.setAssistantConsumer(consumer);
++  return {
++    bridge,
++    ctx,
++    sent,
++    close: () => {
++      bridge.detach();
++      unmountHarnessFeed();
++    },
++  };
++}
++
++async function finishMailCortexTurn(fixture) {
++  fixture.ctx.emit('session/event', { id: 'agent-1' }, am('visible final reply'));
++  fixture.ctx.emit('session/event', { id: 'agent-1' }, turnEnd());
++  await sleep(10);
++}
++
++function assertOneUnquotedReply(fixture) {
++  assert.deepEqual(fixture.sent.map(({ chatId, text, extra }) => ({ chatId, text, extra })), [
++    { chatId: 7, text: 'visible final reply', extra: { parse_mode: 'HTML' } },
++  ]);
++  assert.equal(fixture.bridge.hasPendingInbound(7), false);
++}
++
++test('MailCortex RPC turns use the bound Telegram final-reply path', async () => {
++  const { bridge, transport, ctx } = await setup();
++  bridge.bindAgent(7, 'agent-1');
++  bridge.setAssistantConsumer((chatId, text) => {
++    if (!bridge.hasPendingInbound(chatId)) return;
++    void transport.sendText(chatId, text, {}).then(() => bridge.markInboundReplied(chatId));
++  });
++  ctx.emit('session/event', { id: 'agent-1' }, rpcUser(`mailcortex-${'a'.repeat(32)}`));
++  assert.equal(bridge.hasPendingInbound(7), true, 'wake RPC becomes a Telegram-owned turn');
++  ctx.emit('session/event', { id: 'agent-1' }, am('visible final reply'));
++  await sleep(10);
++  assert.deepEqual(transport.sent.map(({ chatId, text }) => ({ chatId, text })), [
++    { chatId: 7, text: 'visible final reply' },
++  ]);
++  assert.equal(bridge.hasPendingInbound(7), false);
++});
++
++test('MailCortex RPC turn is delivered once by the real feed with liveFeed enabled', async () => {
++  const fixture = await setupMailCortexFeed(true);
++  try {
++    fixture.bridge.bindAgent(7, 'agent-1');
++    fixture.ctx.emit('session/event', { id: 'agent-1' }, rpcUser(`mailcortex-${'b'.repeat(32)}`));
++    fixture.ctx.emit('session/event', { id: 'agent-1' }, {
++      type: 'tool/call',
++      data: { callId: 'mail-1', name: 'mailcortex_reply', arguments: '{}' },
++    });
++    fixture.ctx.emit('session/event', { id: 'agent-1' }, {
++      type: 'tool/result',
++      data: {
++        message: {
++          source: { kind: 'tool', callId: 'mail-1' },
++          content: [{ type: 'tool-result', isError: false }],
++        },
++      },
++    });
++    await finishMailCortexTurn(fixture);
++    assertOneUnquotedReply(fixture);
++  } finally {
++    fixture.close();
++  }
++});
++
++test('MailCortex RPC turn is delivered once by core with liveFeed disabled', async () => {
++  const fixture = await setupMailCortexFeed(false);
++  try {
++    fixture.bridge.bindAgent(7, 'agent-1');
++    fixture.ctx.emit('session/event', { id: 'agent-1' }, rpcUser(`mailcortex-${'c'.repeat(32)}`));
++    await finishMailCortexTurn(fixture);
++    assertOneUnquotedReply(fixture);
++  } finally {
++    fixture.close();
++  }
++});
++
++test('restored binding exists before adopt replays a queued MailCortex wake', async () => {
++  const fixture = await setupMailCortexFeed(true);
++  const root = mkdtempSync(join(tmpdir(), 'tg-mailcortex-restore-'));
++  try {
++    const { restoreChatBindings, saveChatBinding } = await import('../dist/core/chat-bindings.js');
++    saveChatBinding(root, 7, 'agent-1');
++    let live = false;
++    await restoreChatBindings(root, {
++      isAllowed: () => true,
++      liveAgentId: (sessionId) => live && sessionId === 'agent-1' ? sessionId : undefined,
++      resume: async (sessionId) => ({ ok: true, text: 'ok', agentId: sessionId, handle: { sessionId } }),
++      bind: (chatId, sessionId) => fixture.bridge.bindAgent(chatId, sessionId),
++      adopt: () => {
++        live = true;
++        fixture.ctx.emit('session/event', { id: 'agent-1' }, rpcUser(`mailcortex-${'d'.repeat(32)}`));
++      },
++      log: () => {},
++    });
++    assert.equal(fixture.bridge.hasPendingInbound(7), true, 'adopt-time wake is routed to the restored chat');
++    await finishMailCortexTurn(fixture);
++    assertOneUnquotedReply(fixture);
++  } finally {
++    fixture.close();
++    rmSync(root, { recursive: true, force: true });
++  }
++});
++
+ test('legacy mode (no consumer): assistant text is forwarded immediately as a native reply', async () => {
+   const { bridge, transport, ctx } = await setup();
+   assert.equal(bridge.deliver(7, 'hi', 501).ok, true);
+diff --git a/test/chat-bindings.test.mjs b/test/chat-bindings.test.mjs
+index a845300..2adfdbc 100644
+--- a/test/chat-bindings.test.mjs
++++ b/test/chat-bindings.test.mjs
+@@ -94,3 +94,3 @@ test('readChatBindings drops expired entries', async () => {
+-test('restoreChatBindings resumes and adopts a cold session before binding it', async () => {
++test('restoreChatBindings binds a cold session before adopt can replay events', async () => {
+   const { restoreChatBindings, saveChatBinding } = await import('../dist/core/chat-bindings.js');
+   const root = mkdtempSync(join(tmpdir(), 'tg-bindings-restore-'));
+@@ -103,17 +103,19 @@ test('restoreChatBindings resumes and adopts a cold session before binding it',
+       liveAgentId: (sessionId) => live.has(sessionId) ? sessionId : undefined,
+       resume: async (sessionId) => {
+         order.push(`resume:${sessionId}`);
+-        live.add(sessionId);
+         return { ok: true, text: 'ok', agentId: sessionId, handle: { sessionId } };
+       },
+-      adopt: (handle) => order.push(`adopt:${handle.sessionId}`),
++      adopt: (handle) => {
++        order.push(`adopt:${handle.sessionId}`);
++        live.add(handle.sessionId);
++      },
+       bind: (chatId, sessionId) => order.push(`bind:${chatId}:${sessionId}`),
+       log: () => {},
+     });
+     assert.deepEqual(order, [
+       'resume:persisted-session',
+-      'adopt:persisted-session',
+       'bind:100:persisted-session',
++      'adopt:persisted-session',
+     ]);
+   } finally {
+     rmSync(root, { recursive: true, force: true });
 #+END_SRC
 
 ** DeepSeek Harness restart continuity patch
@@ -830,7 +1604,7 @@ index 10eafdb..a845300 100644
 # NAME MODE ROOT REPO REF SUBDIR INSTALL BUILD HEALTH EXTRA
 # maestro submodule vendor/agent-maestro https://github.com/subhangR/agent-maestro.git REF . "" "bun run build:all" "" ""
 codex-desktop-linux git ~/.local/share/dotcortex/src/codex-desktop-linux https://github.com/ilysenko/codex-desktop-linux.git bb40cf5e1cec8df665d85c04390d37c54603a56b . "./install.sh" "python3 -c 'from pathlib import Path; import re; p=Path(\"codex-app/start.sh\"); text=p.read_text(); repl=\"SCRIPT_DIR=\\\"$(cd \\\"$(dirname \\\"$(readlink -f \\\"${BASH_SOURCE[0]:-$0}\\\")\\\")\\\" && pwd -P)\\\"\"; text=re.sub(r\"^SCRIPT_DIR=.*$\", repl, text, count=1, flags=re.M); p.write_text(text)' && python3 -c 'from pathlib import Path; p=Path(\"codex-app/start.sh\"); q=chr(34); bs=chr(92); nl=chr(10); t=p.read_text(); npm=\"npm-global/bin/codex\"; ins=\"        \"+q+\"$HOME/.\"+npm+q+\" \"+bs+nl; needle=q+\".nvm/versions/node\"+q+\"/*/bin/codex\"; lines=t.splitlines(keepends=True); out=[]; [out.extend([l,ins]) if needle in l else out.append(l) for l in lines]; p.write_text(\"\".join(out)) if npm not in t else None' && mkdir -p \"$HOME/.local/share/applications\" \"$HOME/.local/share/icons/hicolor/256x256/apps\" && ln -sf \"$PWD/assets/codex.png\" \"$HOME/.local/share/icons/hicolor/256x256/apps/codex-desktop.png\" && printf '%s\n' '[Desktop Entry]' 'Name=Codex Desktop (Unofficial)' 'Comment=Community OpenAI Codex desktop app' \"Exec=env PATH=$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin $HOME/.local/bin/codex-desktop\" 'Icon=codex-desktop' 'Terminal=false' 'Type=Application' 'Categories=Development;Chat;' 'StartupWMClass=codex-desktop' 'X-GNOME-WMClass=codex-desktop' > \"$HOME/.local/share/applications/codex-desktop.desktop\" && command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database \"$HOME/.local/share/applications\" >/dev/null 2>&1 || true" ""
-dsh-telegram git ~/HelmCortex/NEXUS/git/dsh-telegram https://github.com/xqicxx/dsh-telegram.git f9f1e310c3ee319b7186ca67f0c0884d96f70f1d . "npm ci" "for patch in \"$HOME/DotCortex/all/.local/share/dotcortex/patches/dsh-telegram-dsh-0.1.5.patch\" \"$HOME/DotCortex/all/.local/share/dotcortex/patches/dsh-telegram-continuity.patch\" \"$HOME/DotCortex/all/.local/share/dotcortex/patches/dsh-telegram-readiness.patch\"; do if git apply --reverse --check --unidiff-zero \"$patch\"; then :; else git apply --check --unidiff-zero \"$patch\" && git apply --unidiff-zero \"$patch\"; fi; done && npm run build && install -m 0644 ~/DotCortex/all/.bots/templates/dsh-telegram-bundle.patch.yml ./cordis.patch.yml" "npm run check"
+dsh-telegram git ~/HelmCortex/NEXUS/git/dsh-telegram https://github.com/xqicxx/dsh-telegram.git f9f1e310c3ee319b7186ca67f0c0884d96f70f1d . "npm ci" "npm run build && install -m 0644 ~/DotCortex/all/.bots/templates/dsh-telegram-bundle.patch.yml ./cordis.patch.yml" "npm run check" "patches=all/.local/share/dotcortex/patches/dsh-telegram-dsh-0.1.5.patch,all/.local/share/dotcortex/patches/dsh-telegram-continuity.patch,all/.local/share/dotcortex/patches/dsh-telegram-mailcortex-wake.patch,all/.local/share/dotcortex/patches/dsh-telegram-readiness.patch;allow-untracked=cordis.patch.yml"
 #+END_SRC
 
 * Shared helper library for Bun builds
@@ -878,9 +1652,11 @@ with open(manifest, encoding="utf-8") as fh:
         if not line or line.startswith("#"):
             continue
         fields = shlex.split(line, posix=True)
-        if len(fields) != 9:
-            sys.stderr.write(f"{manifest}:{lineno}: expected 9 fields, got {len(fields)}\n")
+        if len(fields) not in (9, 10):
+            sys.stderr.write(f"{manifest}:{lineno}: expected 9 or 10 fields, got {len(fields)}\n")
             raise SystemExit(1)
+        if len(fields) == 9:
+            fields.append("")
         sys.stdout.write("\t".join(fields) + "\n")
 PY
 }
@@ -1086,6 +1862,284 @@ bun_build_write_fingerprint() {
 
   mkdir -p "$(dirname "$stamp_path")"
   printf '%s\n' "$fingerprint" >"$stamp_path"
+}
+
+bun_build_expand_extra_path() {
+  local path="$1"
+
+  case "$path" in
+    /*)
+      printf '%s\n' "$path"
+      ;;
+    '~/'*)
+      printf '%s/%s\n' "$HOME" "${path#\~/}"
+      ;;
+    '$HOME/'*)
+      printf '%s/%s\n' "$HOME" "${path#\$HOME/}"
+      ;;
+    *)
+      printf '%s/%s\n' "$DOTCORTEX_ROOT" "$path"
+      ;;
+  esac
+}
+
+bun_build_worktree_tree() {
+  local root_abs="$1" base_commit="$2" index_path="$3" diff_path="$4"
+
+  rm -f "$index_path" "$index_path.lock"
+  GIT_INDEX_FILE="$index_path" git -C "$root_abs" read-tree "$base_commit"
+  git -C "$root_abs" diff --binary --full-index "$base_commit" -- >"$diff_path"
+  if [ -s "$diff_path" ]; then
+    GIT_INDEX_FILE="$index_path" git -C "$root_abs" apply --cached --binary --whitespace=nowarn "$diff_path"
+  fi
+  GIT_INDEX_FILE="$index_path" git -C "$root_abs" write-tree
+}
+
+bun_build_patch_state_write() {
+  local name="$1" base_commit="$2" expected_tree="$3" applied_patch="$4"
+  local state_dir temporary
+
+  state_dir="$(bun_build_state_dir "$name")/patch-series"
+  mkdir -p "$state_dir"
+  temporary="$(mktemp -d "$state_dir/.write.XXXXXX")"
+  printf '%s\n' "$base_commit" >"$temporary/base.commit"
+  printf '%s\n' "$expected_tree" >"$temporary/applied.tree"
+  cp "$applied_patch" "$temporary/applied.patch"
+  printf '1\n' >"$temporary/schema"
+  mv "$temporary/base.commit" "$state_dir/base.commit"
+  mv "$temporary/applied.tree" "$state_dir/applied.tree"
+  mv "$temporary/applied.patch" "$state_dir/applied.patch"
+  mv "$temporary/schema" "$state_dir/schema"
+  rmdir "$temporary"
+}
+
+bun_build_patch_failure_details() {
+  local name="$1" root_abs="$2" base_commit="$3"
+
+  echo "!! [$name] checkout differs from the pinned ref in edits not recognized as the managed patch series; refusing to modify it" >&2
+  git -C "$root_abs" status --short --untracked-files=all >&2 || true
+  echo "!! [$name] pinned ref: $base_commit; no reset or checkout was performed" >&2
+}
+
+bun_build_apply_patch_series() {
+  local name="$1" root_abs="$2" ref="$3" allow_untracked_csv="$4"
+  shift 4
+  local patches=("$@")
+  local base_commit base_tree head patch patch_abs expected_tree current_tree
+  local state_dir state_patch prior_base="" prior_tree="" prior_valid=0
+  local temporary expected_index current_index prior_index expected_patch current_diff
+  local entry code path candidate allowed unknown_untracked=0 transition=base
+  local reverted_tree actual_tree restore_tree
+  local allowed_untracked=()
+
+  if [ "${#patches[@]}" -eq 0 ]; then
+    echo "!! [$name] patch guard requires at least one patch" >&2
+    return 1
+  fi
+  if ! bun_build_is_git_repo "$root_abs"; then
+    echo "!! [$name] patch guard requires a git checkout: $root_abs" >&2
+    return 1
+  fi
+  if [ -z "$ref" ]; then
+    echo "!! [$name] patch guard requires a pinned REF" >&2
+    return 1
+  fi
+
+  base_commit="$(git -C "$root_abs" rev-parse "$ref^{commit}")"
+  base_tree="$(git -C "$root_abs" rev-parse "$base_commit^{tree}")"
+  head="$(git -C "$root_abs" rev-parse HEAD)"
+  if [ "$head" != "$base_commit" ]; then
+    echo "!! [$name] patch guard expected HEAD $base_commit, got $head" >&2
+    return 1
+  fi
+  if ! git -C "$root_abs" diff --cached --quiet --; then
+    echo "!! [$name] staged checkout edits are never managed patch state; refusing to modify them" >&2
+    git -C "$root_abs" status --short --untracked-files=all >&2 || true
+    return 1
+  fi
+
+  if [ -n "$allow_untracked_csv" ]; then
+    IFS=',' read -r -a allowed_untracked <<<"$allow_untracked_csv"
+  fi
+  while IFS= read -r -d '' entry; do
+    code="${entry:0:2}"
+    [ "$code" = "??" ] || continue
+    path="${entry:3}"
+    allowed=0
+    for candidate in "${allowed_untracked[@]}"; do
+      if [ -n "$candidate" ] && [ "$path" = "$candidate" ]; then
+        allowed=1
+        break
+      fi
+    done
+    if [ "$allowed" = 0 ]; then
+      echo "!! [$name] unknown untracked checkout path: $path" >&2
+      unknown_untracked=1
+    fi
+  done < <(git -C "$root_abs" status --porcelain=v1 -z --untracked-files=all)
+  if [ "$unknown_untracked" = 1 ]; then
+    echo "!! [$name] refusing to modify a checkout with unknown local files" >&2
+    return 1
+  fi
+
+  temporary="$(mktemp -d)"
+  expected_index="$temporary/expected.index"
+  current_index="$temporary/current.index"
+  prior_index="$temporary/prior.index"
+  expected_patch="$temporary/expected.patch"
+  current_diff="$temporary/current.patch"
+
+  rm -f "$expected_index"
+  GIT_INDEX_FILE="$expected_index" git -C "$root_abs" read-tree "$base_commit"
+  for patch in "${patches[@]}"; do
+    patch_abs="$(bun_build_expand_extra_path "$patch")"
+    if [ ! -f "$patch_abs" ]; then
+      echo "!! [$name] managed patch is missing: $patch_abs" >&2
+      rm -rf "$temporary"
+      return 1
+    fi
+    if ! GIT_INDEX_FILE="$expected_index" git -C "$root_abs" apply --cached --check --unidiff-zero "$patch_abs"; then
+      echo "!! [$name] patch applies neither to the ordered pristine series nor as current state: $patch_abs" >&2
+      rm -rf "$temporary"
+      return 1
+    fi
+    GIT_INDEX_FILE="$expected_index" git -C "$root_abs" apply --cached --unidiff-zero "$patch_abs"
+  done
+  expected_tree="$(GIT_INDEX_FILE="$expected_index" git -C "$root_abs" write-tree)"
+  GIT_INDEX_FILE="$expected_index" git -C "$root_abs" diff --cached --binary --full-index "$base_commit" -- >"$expected_patch"
+  if [ ! -s "$expected_patch" ]; then
+    echo "!! [$name] managed patch series produced no change from $base_commit" >&2
+    rm -rf "$temporary"
+    return 1
+  fi
+
+  current_tree="$(bun_build_worktree_tree "$root_abs" "$base_commit" "$current_index" "$current_diff")"
+  state_dir="$(bun_build_state_dir "$name")/patch-series"
+  state_patch="$state_dir/applied.patch"
+  if [ -f "$state_dir/schema" ] && [ "$(<"$state_dir/schema")" = 1 ] \
+      && [ -f "$state_dir/base.commit" ] && [ -f "$state_dir/applied.tree" ] \
+      && [ -f "$state_patch" ]; then
+    prior_base="$(<"$state_dir/base.commit")"
+    prior_tree="$(<"$state_dir/applied.tree")"
+    if [ "$prior_base" = "$base_commit" ] && [ "$current_tree" = "$prior_tree" ]; then
+      cp "$current_index" "$prior_index"
+      if GIT_INDEX_FILE="$prior_index" git -C "$root_abs" apply --cached --reverse --check --binary "$state_patch" \
+          && GIT_INDEX_FILE="$prior_index" git -C "$root_abs" apply --cached --reverse --binary "$state_patch"; then
+        reverted_tree="$(GIT_INDEX_FILE="$prior_index" git -C "$root_abs" write-tree)"
+        if [ "$reverted_tree" = "$base_tree" ]; then
+          prior_valid=1
+        fi
+      fi
+    fi
+  fi
+
+  if [ "$current_tree" = "$expected_tree" ]; then
+    echo ">> [$name] patch series current"
+    bun_build_patch_state_write "$name" "$base_commit" "$expected_tree" "$expected_patch"
+    rm -rf "$temporary"
+    return 0
+  fi
+  if [ "$current_tree" = "$base_tree" ]; then
+    transition=base
+  elif [ "$prior_valid" = 1 ]; then
+    transition=prior
+  else
+    bun_build_patch_failure_details "$name" "$root_abs" "$base_commit"
+    rm -rf "$temporary"
+    return 1
+  fi
+
+  if [ "$transition" = prior ]; then
+    echo ">> [$name] replace recognized prior patch series"
+    if ! git -C "$root_abs" apply --reverse --check --binary "$state_patch" \
+        || ! git -C "$root_abs" apply --reverse --binary "$state_patch"; then
+      echo "!! [$name] recognized prior patch series could not be removed; checkout left unchanged or requires inspection" >&2
+      rm -rf "$temporary"
+      return 1
+    fi
+    actual_tree="$(bun_build_worktree_tree "$root_abs" "$base_commit" "$current_index" "$current_diff")"
+    if [ "$actual_tree" != "$base_tree" ]; then
+      echo "!! [$name] prior patch removal did not restore the pinned ref; refusing the new series" >&2
+      rm -rf "$temporary"
+      return 1
+    fi
+  else
+    echo ">> [$name] apply patch series (${#patches[@]} patches)"
+  fi
+
+  if ! git -C "$root_abs" apply --check --binary "$expected_patch" \
+      || ! git -C "$root_abs" apply --binary "$expected_patch"; then
+    echo "!! [$name] preflight passed but applying the managed patch series failed" >&2
+    if [ "$transition" = prior ]; then
+      restore_tree="$(bun_build_worktree_tree "$root_abs" "$base_commit" "$current_index" "$current_diff")"
+      if [ "$restore_tree" = "$base_tree" ] \
+          && git -C "$root_abs" apply --check --binary "$state_patch" \
+          && git -C "$root_abs" apply --binary "$state_patch"; then
+        echo "!! [$name] restored the recognized prior patch series after failure" >&2
+      else
+        echo "!! [$name] could not restore the prior patch series; inspect the checkout before retrying" >&2
+      fi
+    fi
+    rm -rf "$temporary"
+    return 1
+  fi
+
+  actual_tree="$(bun_build_worktree_tree "$root_abs" "$base_commit" "$current_index" "$current_diff")"
+  if [ "$actual_tree" != "$expected_tree" ]; then
+    echo "!! [$name] applied patch series does not match its preflighted tree" >&2
+    rm -rf "$temporary"
+    return 1
+  fi
+  bun_build_patch_state_write "$name" "$base_commit" "$expected_tree" "$expected_patch"
+  rm -rf "$temporary"
+}
+
+bun_build_apply_extra_guards() {
+  local name="$1" root_abs="$2" ref="$3" extra="$4"
+  local item key value patches_value="" allow_untracked=""
+  local seen_patches=0 seen_allow=0
+  local items=() patches=()
+
+  [ -n "$extra" ] || return 0
+  IFS=';' read -r -a items <<<"$extra"
+  for item in "${items[@]}"; do
+    [ -n "$item" ] || continue
+    if [[ "$item" != *=* ]]; then
+      echo "!! [$name] malformed EXTRA guard: $item" >&2
+      return 1
+    fi
+    key="${item%%=*}"
+    value="${item#*=}"
+    case "$key" in
+      patches)
+        if [ "$seen_patches" = 1 ] || [ -z "$value" ]; then
+          echo "!! [$name] duplicate or empty patches EXTRA guard" >&2
+          return 1
+        fi
+        seen_patches=1
+        patches_value="$value"
+        ;;
+      allow-untracked)
+        if [ "$seen_allow" = 1 ]; then
+          echo "!! [$name] duplicate allow-untracked EXTRA guard" >&2
+          return 1
+        fi
+        seen_allow=1
+        allow_untracked="$value"
+        ;;
+      *)
+        echo "!! [$name] unsupported EXTRA guard: $key" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if [ "$seen_patches" = 0 ]; then
+    echo "!! [$name] EXTRA declares no supported build guard" >&2
+    return 1
+  fi
+  IFS=',' read -r -a patches <<<"$patches_value"
+  bun_build_apply_patch_series "$name" "$root_abs" "$ref" "$allow_untracked" "${patches[@]}"
 }
 
 bun_build_submodule_declared() {

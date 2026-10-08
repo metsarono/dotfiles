@@ -18,7 +18,7 @@
 # Exit: 0 all hosts conform, 1 drift or collision, 2 a host was unreachable.
 
 
-# [[file:../../../agents.org::*Script: agent-fleet-check (read-only unless --provision --apply)][Script: agent-fleet-check (read-only unless --provision --apply):1]]
+# [[file:../../../agents-users.org::*Script: agent-fleet-check (read-only unless --provision --apply)][Script: agent-fleet-check (read-only unless --provision --apply):1]]
 # ~/DotCortex/all/.local/bin/agent-fleet-check
 # Probe every fleet host for canonical agent users. Read-only by default.
 set -euo pipefail
@@ -60,11 +60,32 @@ for f in "$UIDS" "$FLEET"; do
 done
 
 # "tool:uid" pairs for every agent provisioned on the mesh.
-EXPECT="$(awk '$1 !~ /^#/ && $3 == "yes" {printf "%s:%s ", $1, $2}' "$UIDS")"
+ALL_EXPECT="$(awk '$1 !~ /^#/ && $3 == "yes" {printf "%s:%s ", $1, $2}' "$UIDS")"
 # "@group:gid:tool+tool" per clearance group (optional file).
 if [ -r "$GROUPS_FILE" ]; then
-  EXPECT="$EXPECT$(awk '$1 !~ /^#/ && NF >= 3 {gsub(",", "+", $3); printf "@%s:%s:%s ", $1, $2, $3}' "$GROUPS_FILE")"
+  ALL_EXPECT="$ALL_EXPECT$(awk '$1 !~ /^#/ && NF >= 3 {gsub(",", "+", $3); printf "@%s:%s:%s ", $1, $2, $3}' "$GROUPS_FILE")"
 fi
+
+# The expectations for one host: fleet.ssv's agents column (=all= or a comma
+# list) narrows the agents, and a clearance group applies only where one of
+# its cleared tools is carried.
+host_expect() {
+  local carried="$1" pair tool cleared t out=""
+  case "$carried" in all|-|"") printf '%s' "$ALL_EXPECT"; return ;; esac
+  for pair in $ALL_EXPECT; do
+    case "$pair" in
+      @*)
+        cleared="${pair##*:}"
+        for t in ${cleared//+/ }; do
+          case ",$carried," in *",$t,"*) out="$out$pair "; break ;; esac
+        done ;;
+      *)
+        tool="${pair%%:*}"
+        case ",$carried," in *",$tool,"*) out="$out$pair " ;; esac ;;
+    esac
+  done
+  printf '%s' "$out"
+}
 
 # Runs on the target host. Args: operator cortex_gid tool:uid...
 # Prints one verdict line per check: OK|DRIFT|MISSING|COLLISION <subject> <detail>.
@@ -126,12 +147,13 @@ LOCAL="$(hostname)"
 
 rc=0
 # The fleet list rides on fd 3: ssh inherits stdin and would swallow it.
-while read -r alias hn _rest <&3; do
+while read -r alias hn _reach carried _rest <&3; do
   case "$alias" in ""|\#*) continue ;; esac
   if [ -n "$HOSTS_ONLY" ]; then
     case ",$HOSTS_ONLY," in *",$alias,"*) ;; *) continue ;; esac
   fi
   echo "== $alias ($hn)"
+  EXPECT="$(host_expect "${carried:-all}")"
   if [ "$hn" = "$LOCAL" ]; then
     out="$(bash -c "$PROBE" probe "$OPERATOR" "$CORTEX_GID" $EXPECT)" || true
   else

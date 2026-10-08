@@ -2,14 +2,15 @@
 # Script: agent-cli-install (dry-run by default)
 
 
-# [[file:../../../agents.org::*Script: agent-cli-install (dry-run by default)][Script: agent-cli-install (dry-run by default):1]]
+# [[file:../../../agents-users.org::*Script: agent-cli-install (dry-run by default)][Script: agent-cli-install (dry-run by default):1]]
 # ~/DotCortex/all/.local/bin/agent-cli-install
-# Installs each agent's PINNED CLI from all/.config/agent-cli/<tool>.ssv into the
+# Installs each agent's CLI (latest; no pins, ruling 2026-10-05) from all/.config/agent-cli/<tool>.ssv into the
 # agent user's own npm prefix (needs the agent Guix profile / node first).
 # DRY-RUN unless --apply. npm only for now; extend MANAGER cases as needed.
 set -euo pipefail
 
-MANIFEST_DIR="$HOME/DotCortex/all/.config/agent-cli"
+MANIFEST_DIR="${AGENT_CLI_MANIFESTS:-$HOME/DotCortex/all/.config/agent-cli}"
+HOST="${AGENT_CLI_HOST:-$(hostname -s 2>/dev/null || hostname)}"
 APPLY=0
 ONLY=""
 
@@ -34,6 +35,11 @@ for manifest in "$MANIFEST_DIR"/*.ssv; do
   if ! id "$user" >/dev/null 2>&1; then
     echo "no user: $user (skip)"; continue
   fi
+  # A host whose agent needs another package set declares its own lane,
+  # hosts/<host>@<user>.ssv (the provision-gate idiom); it replaces the
+  # fleet lane for that agent on that host only. No VERSION = latest.
+  lane="$MANIFEST_DIR/hosts/$HOST@$user.ssv"
+  [ -f "$lane" ] && { echo "$user: host lane $lane"; manifest="$lane"; }
   while read -r manager pkg version _rest; do
     case "$manager" in ""|\#*) continue ;; esac
     [ -z "$pkg" ] && continue

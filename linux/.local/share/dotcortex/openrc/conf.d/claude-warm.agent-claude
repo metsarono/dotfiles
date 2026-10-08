@@ -1,0 +1,4 @@
+# /etc/conf.d/claude-warm.agent-claude: reference copy (switchover step 1, not applied; cwd per step 0).
+warm_agent="honey-opus"
+warm_cwd="/home/agent-claude/metsatron-peer"
+warm_args="--model claude-opus-4-8"

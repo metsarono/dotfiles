@@ -1,0 +1,282 @@
+diff --git a/src/core/chat-bindings.ts b/src/core/chat-bindings.ts
+index 77e3b1b..fd125cd 100644
+--- a/src/core/chat-bindings.ts
++++ b/src/core/chat-bindings.ts
+@@ -107,6 +107,7 @@ export async function restoreChatBindings<Handle>(configRoot: string, ops: Resto
+     const chatId = Number(chatIdRaw);
+     if (!Number.isInteger(chatId) || !ops.isAllowed(chatId)) continue;
+     let liveId = ops.liveAgentId(entry.agentId);
++    let bound = false;
+     if (liveId === undefined) {
+       const resumed = await ops.resume(entry.agentId);
+       if (!resumed.ok || resumed.handle === undefined || resumed.agentId === undefined) {
+@@ -115,6 +116,11 @@ export async function restoreChatBindings<Handle>(configRoot: string, ops: Resto
+       if (resumed.agentId !== entry.agentId) {
+         throw new Error(`restored session identity mismatch for chat ${chatId}: expected ${entry.agentId}, got ${resumed.agentId}`);
+       }
++      // Install the durable route before adopt: adopting a resumed handle can
++      // synchronously replay queued session events. If user/message lands in
++      // that window, Bridge must already know which Telegram chat owns it.
++      ops.bind(chatId, entry.agentId);
++      bound = true;
+       ops.adopt(resumed.handle);
+       liveId = ops.liveAgentId(entry.agentId);
+       if (liveId !== entry.agentId) {
+@@ -125,7 +131,7 @@ export async function restoreChatBindings<Handle>(configRoot: string, ops: Resto
+     if (liveId !== entry.agentId) {
+       throw new Error(`live session identity mismatch for chat ${chatId}: expected ${entry.agentId}, got ${liveId}`);
+     }
+-    ops.bind(chatId, entry.agentId);
++    if (!bound) ops.bind(chatId, entry.agentId);
+     ops.log(`binding restored chatId=${chatId} agentId=${entry.agentId}`);
+   }
+ }
+diff --git a/src/harness/bridge.ts b/src/harness/bridge.ts
+index 0ad9b4a..9cae1cd 100644
+--- a/src/harness/bridge.ts
++++ b/src/harness/bridge.ts
+@@ -34,2 +34,3 @@ function withReasoningDirective(config: TelegramConfig, text: string): string {
+  * opaque crash (issue #37). */
+ const OPAQUE_STATUS_LITERAL = /^\d{3} status code \(no body\)$/;
++const MAILCORTEX_REQUEST_ID = /^mailcortex-[0-9a-f]{32}$/;
+@@ -468,2 +469,10 @@ export class Bridge {
+         const state = this.chatStates.get(chatId);
+         const inbound = this.inboundFor(chatId);
++
++        if (event.type === "user/message") {
++          const data = event.data as { source?: { kind?: string; rpcId?: unknown } } | undefined;
++          if (data?.source?.kind === "user" && typeof data.source.rpcId === "string" && MAILCORTEX_REQUEST_ID.test(data.source.rpcId) && state !== undefined) {
++            state.inbound = { chatId, text: "MailCortex delivery", replied: false, noReply: false };
++            state.reminded = false;
++          }
++        }
+diff --git a/test/bridge-final-answer.test.mjs b/test/bridge-final-answer.test.mjs
+index 8ec685e..7c77006 100644
+--- a/test/bridge-final-answer.test.mjs
++++ b/test/bridge-final-answer.test.mjs
+@@ -1,2 +1,5 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
+@@ -52,2 +55,6 @@ async function setup(onAssistantText) {
+ const am = (text) => ({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } });
++const rpcUser = (rpcId, text = 'MailCortex delivery') => ({
++  type: 'user/message',
++  data: { source: { kind: 'user', rpcId }, message: { content: [{ type: 'text', text }] } },
++});
+ const turnEnd = (reason = { kind: 'completed' }) => ({ type: 'turn/end', data: { reason } });
+@@ -55,2 +62,179 @@ async function setup(onAssistantText) {
++async function setupMailCortexFeed(liveFeed) {
++  const listeners = new Map();
++  const agent = { id: 'agent-1', send: () => {}, followup: () => {} };
++  const ctx = {
++    agents: {
++      get: (id) => (id === agent.id ? agent : undefined),
++      list: () => [agent],
++    },
++    get: () => undefined,
++    on: (name, cb) => {
++      const entries = listeners.get(name) ?? [];
++      entries.push(cb);
++      listeners.set(name, entries);
++      return () => {
++        const at = entries.indexOf(cb);
++        if (at >= 0) entries.splice(at, 1);
++      };
++    },
++    effect: (register) => register(),
++    emit: (name, ...args) => {
++      for (const cb of [...(listeners.get(name) ?? [])]) cb(...args);
++    },
++  };
++  const sent = [];
++  let nextMessageId = 100;
++  const transport = {
++    sendText: async (chatId, text, extra) => {
++      const messageId = nextMessageId++;
++      sent.push({ chatId, text, extra, messageId });
++      return messageId;
++    },
++  };
++  const config = {
++    inbound: { rules: [], defaultMode: 'auto-handle' },
++    outbound: { parseMode: 'HTML', liveFeed },
++  };
++  let bridge;
++  let consumer;
++  const host = {
++    send: (chatId, text, options) => transport.sendText(chatId, text, options),
++    requireCtx: () => ctx,
++    currentAgent: () => agent,
++    liveFeedEnabled: () => config.outbound.liveFeed !== false,
++    chatIdForAgent: (agentId) => bridge?.chatIdForAgent(agentId),
++    agentIdForChat: (chatId) => bridge?.agentIdForChat(chatId),
++    setAssistantConsumer: (next) => {
++      consumer = next;
++      bridge?.setAssistantConsumer(next);
++    },
++    pendingInbound: (chatId) => bridge?.hasPendingInbound(chatId) ?? false,
++    inboundMessageId: (chatId) => bridge?.inboundMessageIdValue(chatId),
++    markInboundReplied: (chatId) => bridge?.markInboundReplied(chatId),
++    attachFeedback: () => {},
++    goalForChat: () => undefined,
++    statusStats: () => ({}),
++    getConfigPath: () => true,
++  };
++  ctx.telegram = host;
++  const { Bridge } = await import('../dist/harness/bridge.js');
++  const { mountHarnessFeed, unmountHarnessFeed } = await import('../dist/extensions/harness-feed.js');
++  // Production order: the feed registers first and retains its consumer until
++  // the transport constructs and attaches the Bridge.
++  mountHarnessFeed(host, ctx);
++  bridge = new Bridge({
++    ctx,
++    transport,
++    getConfig: () => config,
++    onStateChange: () => {},
++    log: () => {},
++  });
++  bridge.attach();
++  bridge.setAssistantConsumer(consumer);
++  return {
++    bridge,
++    ctx,
++    sent,
++    close: () => {
++      bridge.detach();
++      unmountHarnessFeed();
++    },
++  };
++}
++
++async function finishMailCortexTurn(fixture) {
++  fixture.ctx.emit('session/event', { id: 'agent-1' }, am('visible final reply'));
++  fixture.ctx.emit('session/event', { id: 'agent-1' }, turnEnd());
++  await sleep(10);
++}
++
++function assertOneUnquotedReply(fixture) {
++  assert.deepEqual(fixture.sent.map(({ chatId, text, extra }) => ({ chatId, text, extra })), [
++    { chatId: 7, text: 'visible final reply', extra: { parse_mode: 'HTML' } },
++  ]);
++  assert.equal(fixture.bridge.hasPendingInbound(7), false);
++}
++
++test('MailCortex RPC turns use the bound Telegram final-reply path', async () => {
++  const { bridge, transport, ctx } = await setup();
++  bridge.bindAgent(7, 'agent-1');
++  bridge.setAssistantConsumer((chatId, text) => {
++    if (!bridge.hasPendingInbound(chatId)) return;
++    void transport.sendText(chatId, text, {}).then(() => bridge.markInboundReplied(chatId));
++  });
++  ctx.emit('session/event', { id: 'agent-1' }, rpcUser(`mailcortex-${'a'.repeat(32)}`));
++  assert.equal(bridge.hasPendingInbound(7), true, 'wake RPC becomes a Telegram-owned turn');
++  ctx.emit('session/event', { id: 'agent-1' }, am('visible final reply'));
++  await sleep(10);
++  assert.deepEqual(transport.sent.map(({ chatId, text }) => ({ chatId, text })), [
++    { chatId: 7, text: 'visible final reply' },
++  ]);
++  assert.equal(bridge.hasPendingInbound(7), false);
++});
++
++test('MailCortex RPC turn is delivered once by the real feed with liveFeed enabled', async () => {
++  const fixture = await setupMailCortexFeed(true);
++  try {
++    fixture.bridge.bindAgent(7, 'agent-1');
++    fixture.ctx.emit('session/event', { id: 'agent-1' }, rpcUser(`mailcortex-${'b'.repeat(32)}`));
++    fixture.ctx.emit('session/event', { id: 'agent-1' }, {
++      type: 'tool/call',
++      data: { callId: 'mail-1', name: 'mailcortex_reply', arguments: '{}' },
++    });
++    fixture.ctx.emit('session/event', { id: 'agent-1' }, {
++      type: 'tool/result',
++      data: {
++        message: {
++          source: { kind: 'tool', callId: 'mail-1' },
++          content: [{ type: 'tool-result', isError: false }],
++        },
++      },
++    });
++    await finishMailCortexTurn(fixture);
++    assertOneUnquotedReply(fixture);
++  } finally {
++    fixture.close();
++  }
++});
++
++test('MailCortex RPC turn is delivered once by core with liveFeed disabled', async () => {
++  const fixture = await setupMailCortexFeed(false);
++  try {
++    fixture.bridge.bindAgent(7, 'agent-1');
++    fixture.ctx.emit('session/event', { id: 'agent-1' }, rpcUser(`mailcortex-${'c'.repeat(32)}`));
++    await finishMailCortexTurn(fixture);
++    assertOneUnquotedReply(fixture);
++  } finally {
++    fixture.close();
++  }
++});
++
++test('restored binding exists before adopt replays a queued MailCortex wake', async () => {
++  const fixture = await setupMailCortexFeed(true);
++  const root = mkdtempSync(join(tmpdir(), 'tg-mailcortex-restore-'));
++  try {
++    const { restoreChatBindings, saveChatBinding } = await import('../dist/core/chat-bindings.js');
++    saveChatBinding(root, 7, 'agent-1');
++    let live = false;
++    await restoreChatBindings(root, {
++      isAllowed: () => true,
++      liveAgentId: (sessionId) => live && sessionId === 'agent-1' ? sessionId : undefined,
++      resume: async (sessionId) => ({ ok: true, text: 'ok', agentId: sessionId, handle: { sessionId } }),
++      bind: (chatId, sessionId) => fixture.bridge.bindAgent(chatId, sessionId),
++      adopt: () => {
++        live = true;
++        fixture.ctx.emit('session/event', { id: 'agent-1' }, rpcUser(`mailcortex-${'d'.repeat(32)}`));
++      },
++      log: () => {},
++    });
++    assert.equal(fixture.bridge.hasPendingInbound(7), true, 'adopt-time wake is routed to the restored chat');
++    await finishMailCortexTurn(fixture);
++    assertOneUnquotedReply(fixture);
++  } finally {
++    fixture.close();
++    rmSync(root, { recursive: true, force: true });
++  }
++});
++
+ test('legacy mode (no consumer): assistant text is forwarded immediately as a native reply', async () => {
+   const { bridge, transport, ctx } = await setup();
+   assert.equal(bridge.deliver(7, 'hi', 501).ok, true);
+diff --git a/test/chat-bindings.test.mjs b/test/chat-bindings.test.mjs
+index a845300..2adfdbc 100644
+--- a/test/chat-bindings.test.mjs
++++ b/test/chat-bindings.test.mjs
+@@ -94,3 +94,3 @@ test('readChatBindings drops expired entries', async () => {
+-test('restoreChatBindings resumes and adopts a cold session before binding it', async () => {
++test('restoreChatBindings binds a cold session before adopt can replay events', async () => {
+   const { restoreChatBindings, saveChatBinding } = await import('../dist/core/chat-bindings.js');
+   const root = mkdtempSync(join(tmpdir(), 'tg-bindings-restore-'));
+@@ -103,17 +103,19 @@ test('restoreChatBindings resumes and adopts a cold session before binding it',
+       liveAgentId: (sessionId) => live.has(sessionId) ? sessionId : undefined,
+       resume: async (sessionId) => {
+         order.push(`resume:${sessionId}`);
+-        live.add(sessionId);
+         return { ok: true, text: 'ok', agentId: sessionId, handle: { sessionId } };
+       },
+-      adopt: (handle) => order.push(`adopt:${handle.sessionId}`),
++      adopt: (handle) => {
++        order.push(`adopt:${handle.sessionId}`);
++        live.add(handle.sessionId);
++      },
+       bind: (chatId, sessionId) => order.push(`bind:${chatId}:${sessionId}`),
+       log: () => {},
+     });
+     assert.deepEqual(order, [
+       'resume:persisted-session',
+-      'adopt:persisted-session',
+       'bind:100:persisted-session',
++      'adopt:persisted-session',
+     ]);
+   } finally {
+     rmSync(root, { recursive: true, force: true });

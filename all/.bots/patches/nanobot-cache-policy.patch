@@ -1,0 +1,286 @@
+--- a/nanobot/agent/autocompact.py
++++ b/nanobot/agent/autocompact.py
+@@ -4,7 +4,14 @@
+ 
+ from collections.abc import Collection
+-from datetime import datetime
++from datetime import datetime, timezone
++import json
++import math
++import re
++import os
++from pathlib import Path
++import subprocess
+ from typing import TYPE_CHECKING, Any, Callable, Coroutine
++from urllib.parse import urlsplit
+ 
+ from loguru import logger
+ 
+@@ -36,9 +43,203 @@
+         self._summaries: dict[str, SessionSummary] = {}
+         self._bind_events = bind_events
+ 
++    @staticmethod
++    def _policy_identity(runtime: LLMRuntime) -> tuple[str, str, str] | None:
++        """Bind evidence to a proven wire route, never a provider display label."""
++        from nanobot.providers.anthropic_provider import AnthropicProvider
++        from nanobot.providers.openai_codex_provider import (
++            DEFAULT_CODEX_URL, OpenAICodexProvider, _strip_model_prefix,
++        )
++        from nanobot.providers.openai_compat_provider import OpenAICompatProvider
++
++        provider = runtime.provider
++        model = runtime.model
++        name = provider.provider_name
++        if not isinstance(model, str) or not model.strip():
++            return None
++        if not isinstance(name, str) or not name.strip():
++            return None
++        # Overrides and failover wrappers can select a different physical model.
++        # Unknown provider implementations remain disabled until explicitly bound.
++        if type(provider) is OpenAICodexProvider:
++            if (DEFAULT_CODEX_URL != "https://chatgpt.com/backend-api/codex/responses"
++                    or provider.api_base is not None
++                    or "model" in provider._extra_body):
++                return None
++            return "openai", "openai-codex-oauth", _strip_model_prefix(model).lower().replace("_", "-")
++        if type(provider) is OpenAICompatProvider:
++            if "model" in provider._extra_body or provider._extra_query:
++                return None
++            endpoint = (str(provider._client.base_url) if provider._client is not None
++                        else provider._effective_base)
++            model = provider._request_model_name(model)
++        elif type(provider) is AnthropicProvider:
++            endpoint = str(provider._client.base_url)
++            model = provider._strip_prefix(model)
++        else:
++            return None
++        if not isinstance(endpoint, str) or not endpoint:
++            return None
++        if (endpoint != endpoint.strip() or "\\" in endpoint or "?" in endpoint or "#" in endpoint
++                or re.search(r"%(?![0-9A-Fa-f]{2})", endpoint)
++                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in endpoint)):
++            return None
++        try:
++            parsed = urlsplit(endpoint)
++            parsed.port
++        except ValueError:
++            return None
++        scheme = parsed.scheme.lower()
++        if (scheme not in {"http", "https"} or not parsed.hostname
++                or parsed.username is not None or parsed.password is not None):
++            return None
++        path = parsed.path
++        if path.endswith("//"):
++            return None
++        if path == "/":
++            path = ""
++        elif path.endswith("/"):
++            path = path[:-1]
++        endpoint_key = f"{scheme}://{parsed.netloc.lower()}{path}"
++        name = name.strip().lower().replace("_", "-")
++        name = {"openai-codex": "openai", "openai-codex-oauth": "openai"}.get(name, name)
++        model = model.strip().lower().replace("_", "-")
++        if name == "anthropic":
++            model = re.sub(r"[ .]+", "-", model)
++            model = re.sub(r"-+", "-", model).strip("-")
++            if not model.startswith("claude-"):
++                model = "claude-" + model
++        if not model:
++            return None
++        return name, endpoint_key, model
++
++    @staticmethod
++    def _policy_env_integer(name: str, default: str) -> int:
++        value = os.environ.get(name, default)
++        if not value or not value.isascii() or not value.isdecimal():
++            raise ValueError("invalid cache-policy environment integer")
++        result = int(value)
++        if not math.isfinite(result):
++            raise ValueError("nonfinite cache-policy environment integer")
++        return result
++
++    @staticmethod
++    def _policy_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
++        result: dict[str, Any] = {}
++        for key, value in pairs:
++            if key in result:
++                raise ValueError("duplicate cache-policy key")
++            result[key] = value
++        return result
++
++    @staticmethod
++    def _policy_ttl_seconds(runtime: LLMRuntime) -> float | None:
++        try:
++            identity = AutoCompact._policy_identity(runtime)
++            if identity is None:
++                return None
++            provider, endpoint, model = identity
++            fallback_compact = AutoCompact._policy_env_integer(
++                "NANOBOT_CACHE_POLICY_FALLBACK_COMPACT_SECONDS", "1620",
++            )
++            fallback_cache = AutoCompact._policy_env_integer(
++                "NANOBOT_CACHE_POLICY_FALLBACK_CACHE_SECONDS", "1800",
++            )
++            if not 0 < fallback_compact < fallback_cache:
++                return None
++            if os.environ.get("NANOBOT_CACHE_POLICY_MODE", "enforce") not in {"enforce", "shadow"}:
++                return None
++            helper_value = os.environ.get(
++                "FLEET_CACHE_POLICY_HELPER",
++                str(Path.home() / "HelmCortex/FORGE/bin/cache-policy"),
++            )
++            policy_value = os.environ.get(
++                "FLEET_CACHE_POLICY_PATH",
++                str(Path.home() / "HelmCortex/ROOTS/DotRoot/agent-session/centre/data/cache-policy.json"),
++            )
++            if not helper_value.strip() or not policy_value.strip():
++                return None
++            helper = Path(helper_value).expanduser()
++            policy = Path(policy_value).expanduser()
++            completed = subprocess.run(
++                [str(helper), "resolve", "--policy", str(policy),
++                 "--harness", "nanobot", "--provider", provider,
++                 "--endpoint", endpoint, "--model", model,
++                 "--fallback-compact", str(fallback_compact),
++                 "--fallback-cache", str(fallback_cache), "--allow-observed"],
++                capture_output=True, text=True, timeout=5, check=True,
++            )
++            decision = json.loads(completed.stdout, object_pairs_hook=AutoCompact._policy_json_object)
++            if not isinstance(decision, dict):
++                return None
++            mode, confidence = decision.get("mode"), decision.get("confidence")
++            if (mode, confidence) not in (("measured", "supported"), ("observed", "observed")):
++                return None
++            if (decision.get("provider"), decision.get("endpoint_id"), decision.get("model")) != identity:
++                return None
++            compact, expiry = decision.get("compact_before_seconds"), decision.get("cache_expires_seconds")
++            if any(type(value) not in (int, float) or not math.isfinite(value)
++                   for value in (compact, expiry)):
++                return None
++            if not 0 < compact < expiry:
++                return None
++            stamp = decision.get("observed_at")
++            if not isinstance(stamp, str):
++                return None
++            observed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
++            if observed.tzinfo is None:
++                return None
++            age = (datetime.now(timezone.utc) - observed).total_seconds()
++            # The resolver also checks policy/entry fresh_until. Independently
++            # reject stale or future evidence using its 24-hour freshness contract.
++            if not 0 <= age < 24 * 60 * 60:
++                return None
++            # The resolver normalizes numbers with int(). Validate the selected
++            # source evidence too, so coercion cannot arm malformed policy data.
++            evidence = json.loads(policy.read_text(encoding="utf-8"),
++                                  object_pairs_hook=AutoCompact._policy_json_object)
++            if not isinstance(evidence, dict) or evidence.get("format") != "cache-policy.v1":
++                return None
++            def fresh_until(value: Any) -> bool:
++                if not isinstance(value, str):
++                    return False
++                stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
++                return stamp.tzinfo is not None and stamp > datetime.now(timezone.utc)
++            if not fresh_until(evidence.get("fresh_until")):
++                return None
++            entries = evidence.get("entries")
++            source_harness = decision.get("source_harness")
++            if (not isinstance(entries, list) or not isinstance(source_harness, str)
++                    or not source_harness):
++                return None
++            matches = [entry for entry in entries if isinstance(entry, dict)
++                       and (entry.get("provider"), entry.get("endpoint_id"), entry.get("model")) == identity
++                       and entry.get("harness") == source_harness
++                       and entry.get("confidence") == confidence
++                       and entry.get("mode") == mode
++                       and entry.get("observed_at") == decision.get("observed_at")]
++            if not matches:
++                return None
++            for entry in matches:
++                timers = (entry.get("compact_before_seconds"), entry.get("cache_expires_seconds"))
++                if (any(type(value) not in (int, float) or not math.isfinite(value) for value in timers)
++                        or timers != (compact, expiry) or not 0 < timers[0] < timers[1]
++                        or not fresh_until(entry.get("fresh_until"))):
++                    return None
++        except (AttributeError, ImportError, OSError, OverflowError, TypeError,
++                ValueError, KeyError, subprocess.SubprocessError):
++            return None
++        logger.debug(
++            "Auto-compact policy provider={} model={} mode={} threshold={}s",
++            provider, model, mode, compact,
++        )
++        return float(compact)
++
+     def _is_expired(self, ts: datetime | str | None,
+-                    now: datetime | None = None) -> bool:
+-        if self._ttl <= 0 or not ts:
++                    now: datetime | None = None,
++                    ttl_seconds: float | None = None) -> bool:
++        threshold = self._ttl * 60 if ttl_seconds is None else ttl_seconds
++        if threshold <= 0 or not ts:
+             return False
+         try:
+             if isinstance(ts, str):
+@@ -52,7 +253,7 @@
+             # list_sessions() forwards raw persisted metadata; an unusable value
+             # must not escape the idle scan and stop the agent loop.
+             return False
+-        return idle_seconds >= self._ttl * 60
++        return idle_seconds >= threshold
+ 
+     def _has_unarchived_messages(self, key: str) -> bool:
+         session = self.sessions.get_or_create(key)
+@@ -80,12 +281,47 @@
+             if key in active_session_keys:
+                 continue
+             updated_at = info.get("updated_at")
+-            if self._is_expired(updated_at, now) and self._has_unarchived_messages(key):
+-                session = self.sessions.get_or_create(key)
++            session = self.sessions.get_or_create(key)
++            try:
++                runtime = resolve_runtime(session)
++            except (KeyError, ValueError):
++                # Invalid session selections remain recoverable through /model.
++                continue
++            ttl_seconds = self._policy_ttl_seconds(runtime)
++            if ttl_seconds is None:
++                continue
++            if (self._is_expired(updated_at, now, ttl_seconds)
++                    and self._has_unarchived_messages(key)):
+                 try:
+-                    runtime = resolve_runtime(session)
+-                except (KeyError, ValueError):
+-                    # Invalid session selections remain recoverable through /model.
++                    estimated_tokens, estimate_source = (
++                        self.consolidator.estimate_session_prompt_tokens(
++                            session, runtime=runtime,
++                        )
++                    )
++                    min_tokens = max(70000, self._policy_env_integer(
++                        "NANOBOT_CACHE_POLICY_MIN_TOKENS", "70000",
++                    ))
++                    if (type(estimated_tokens) not in (int, float)
++                            or not math.isfinite(estimated_tokens) or estimated_tokens <= 0
++                            or not isinstance(estimate_source, str)
++                            or estimate_source not in {"tiktoken", "heuristic", "provider_counter"}):
++                        continue
++                    mode = os.environ.get("NANOBOT_CACHE_POLICY_MODE", "enforce")
++                    if mode not in {"enforce", "shadow"}:
++                        continue
++                except (OSError, OverflowError, TypeError, ValueError):
++                    continue
++                if estimated_tokens < min_tokens:
++                    logger.debug(
++                        "Auto-compact policy below token gate {} tokens={} minimum={} source={}",
++                        key, estimated_tokens, min_tokens, estimate_source,
++                    )
++                    continue
++                if os.environ.get("NANOBOT_CACHE_POLICY_MODE", "enforce") == "shadow":
++                    logger.info(
++                        "Auto-compact policy shadow candidate {} threshold={}s tokens={}",
++                        key, int(ttl_seconds), estimated_tokens,
++                    )
+                     continue
+                 self._archiving.add(key)
+                 schedule_background(self._archive(key, runtime=runtime))

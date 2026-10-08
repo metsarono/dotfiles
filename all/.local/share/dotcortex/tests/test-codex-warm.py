@@ -96,6 +96,9 @@ class Session:
         ttl=60,
         extra_args=(),
         terminal=False,
+        cache_result=None,
+        min_tokens=0,
+        config_model=None,
         compaction_timeout=300,
     ):
         self.root = pathlib.Path(tempfile.mkdtemp(prefix="cxw", dir="/tmp"))
@@ -109,11 +112,35 @@ class Session:
                 "CODEX_IDLE_REAL_EXECUTABLE": str(self.fake),
                 "CODEX_IDLE_COMPACT_SECONDS": str(delay),
                 "CODEX_IDLE_COMPACT_TTL_SECONDS": str(ttl),
+                "CODEX_IDLE_COMPACT_MIN_TOKENS": str(min_tokens),
                 "CODEX_IDLE_COMPACTION_TIMEOUT_SECONDS": str(compaction_timeout),
                 "CODEX_IDLE_COMPACTION_DEBUG": "1",
+                "FLEET_CACHE_POLICY_PATH": str(self.root / "missing-policy.json"),
                 "XDG_STATE_HOME": str(self.root / "state"),
             }
         )
+        self.cache_result_path = self.root / "cache-result.json"
+        self.cache_calls = self.root / "cache-calls.jsonl"
+        environment["FLEET_CACHE_POLICY_PATH"] = str(self.root / "missing-policy.json")
+        if cache_result is not None:
+            self.cache_result_path.write_text(json.dumps(cache_result), encoding="utf-8")
+            cache_helper = self.root / "cache-policy"
+            cache_helper.write_text(
+                "#!/usr/bin/env python3\nimport json,pathlib,sys\n"
+                f"root=pathlib.Path({str(self.root)!r})\n"
+                "with (root/'cache-calls.jsonl').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
+                "print((root/'cache-result.json').read_text())\n", encoding="utf-8",
+            )
+            cache_helper.chmod(0o700)
+            policy = self.root / "cache-policy.json"
+            policy.write_text("{}", encoding="utf-8")
+            environment["FLEET_CACHE_POLICY_HELPER"] = str(cache_helper)
+            environment["FLEET_CACHE_POLICY_PATH"] = str(policy)
+        self.config_path = self.root / "config" / "config.toml"
+        if config_model is not None:
+            self.config_path.parent.mkdir()
+            self.config_path.write_text(f'model="{config_model}"\n', encoding="utf-8")
+            environment["CODEX_HOME"] = str(self.config_path.parent)
         self.parent_master = None
         self.outer_tty_fd = None
         self.outer_tty_baseline = None
@@ -269,10 +296,153 @@ class CodexWarmTests(unittest.TestCase):
         self.sessions.append(session)
         return session
 
+
+    def test_automatic_action_does_not_guess_active_identity_from_declarations(self):
+        session = self.make_session(delay=1, ttl=2, min_tokens=70000,
+                                    cache_result=self.cache_decision(1, 2),
+                                    config_model="disk-model",
+                                    extra_args=("--model", "fixture-model"))
+        session.event("session-start", model="claimed-runtime-model", endpoint_id="claimed-endpoint")
+        session.event("stop", stop_hook_active=False, model="claimed-runtime-model", context_tokens=100000)
+        session.config_path.write_text('model="later-disk-model"\n', encoding="utf-8")
+        wait_until(lambda: session.read_state() and session.read_state()["last_gate_rejection_reason"] == "token-count-unknown", timeout=3)
+        state = session.read_state()
+        self.assertEqual((state["model"], state["endpoint_id"]), ("unknown", "unknown"))
+        self.assertEqual(state["cache_policy"]["mode"], "fallback")
+        self.assertFalse(session.cache_calls.exists(), "declarations must not select measured runtime timing")
+        self.assertFalse(session.output_contains("COMPACT_RECEIVED"))
+
+    def test_automatic_cache_action_unknown_tokens_fails_closed(self):
+        session = self.make_session(delay=1, ttl=2, min_tokens=70000)
+        session.stop_and_bind()
+        wait_until(lambda: session.read_state() and session.read_state()["last_gate_rejection_reason"] == "token-count-unknown", timeout=3)
+        self.assertFalse(session.output_contains("COMPACT_RECEIVED"))
+
+    def test_declared_model_selection_is_separate_from_runtime_identity(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            config_root = root / ".codex"
+            config_root.mkdir()
+            config = config_root / "config.toml"
+            config.write_text('model="old-model"\n')
+            with mock.patch.object(self.module.pathlib.Path, "home", return_value=root):
+                self.assertEqual(self.module.configured_model([]), "old-model")
+                config.write_text('model="new-model"\n')
+                self.assertEqual(self.module.configured_model([]), "new-model")
+                self.assertEqual(self.module.configured_model(["--model", "launch-model"]), "launch-model")
+                self.assertEqual(self.module.configured_model(["-c", 'model="override-model"']), "override-model")
+
+    def test_custom_provider_never_resolves_as_oauth_endpoint(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            (root / ".codex").mkdir()
+            (root / ".codex/config.toml").write_text('model="fixture-model"\nmodel_provider="custom"\n')
+            with mock.patch.object(self.module.pathlib.Path, "home", return_value=root):
+                model, endpoint = self.module.configured_cache_identity([])
+            self.assertEqual((model, endpoint), ("fixture-model", "unknown"))
+            with mock.patch.object(self.module.subprocess, "run", side_effect=AssertionError("guessed endpoint")):
+                idle, ttl, decision = self.module.measured_window(model, endpoint)
+            self.assertEqual((idle, ttl), (self.module.IDLE_SECONDS, self.module.TTL_SECONDS))
+            self.assertEqual(decision["mode"], "fallback")
+
+    def test_observed_policy_requires_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            helper, policy = root / "helper", root / "policy"
+            helper.touch(); policy.touch()
+            decision = self.cache_decision(7080, 7200)
+            decision.update(mode="observed", confidence="observed")
+            completed = subprocess.CompletedProcess([], 0, json.dumps(decision), "")
+            with mock.patch.dict(os.environ, {"FLEET_CACHE_POLICY_HELPER": str(helper), "FLEET_CACHE_POLICY_PATH": str(policy)}), mock.patch.object(self.module.subprocess, "run", return_value=completed), mock.patch.object(self.module, "ALLOW_OBSERVED_POLICY", True):
+                idle, ttl, resolved = self.module.measured_window("fixture-model")
+            self.assertEqual((idle, ttl, resolved["mode"]), (7080, 7200, "observed"))
+
+    def cache_decision(self, compact=1, expiry=2):
+        return {"mode": "measured", "confidence": "supported",
+                "provider": "openai", "endpoint_id": "openai-codex-oauth",
+                "model": "fixture-model", "compact_before_seconds": compact,
+                "cache_expires_seconds": expiry, "reason": "exact-harness"}
+
+    def test_cache_adversarial_stdout_uses_fixed_fallback_timer(self):
+        valid = self.cache_decision()
+        invalid = [[], None, True, 5, "wrong", {},
+                   {**valid, "mode": "fallback", "confidence": "fallback", "reason": "policy-stale"},
+                   {**valid, "mode": "observed", "confidence": "observed"},
+                   {**valid, "confidence": "insufficient"},
+                   {**valid, "model": "other-model"},
+                   {**valid, "endpoint_id": "other-endpoint"}]
+        invalid += [{**valid, "compact_before_seconds": value}
+                    for value in (None, "1", True, -1, 0, float("nan"), float("inf"), 3)]
+        invalid += [{**valid, "cache_expires_seconds": value}
+                    for value in (None, "2", False, -1, 0, float("nan"), float("inf"), 1)]
+        for decision in invalid:
+            with self.subTest(decision=decision):
+                session = self.make_session(delay=20, ttl=30, cache_result=decision,
+                                            extra_args=("--model", "fixture-model"))
+                # Exercise malformed resolver stdout independently of the
+                # native runtime, whose identity is deliberately unsupported.
+                with mock.patch.dict(os.environ, {"FLEET_CACHE_POLICY_HELPER": str(session.root / "cache-policy"), "FLEET_CACHE_POLICY_PATH": str(session.root / "cache-policy.json")}), mock.patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(decision), "")):
+                    idle, ttl, resolved = self.module.measured_window("fixture-model")
+                self.assertEqual((idle, ttl), (self.module.IDLE_SECONDS, self.module.TTL_SECONDS))
+                self.assertEqual(resolved["mode"], "fallback")
+                session.stop_and_bind()
+                state = session.read_state()
+                self.assertEqual(state["cache_policy"]["mode"], "fallback")
+                self.assertAlmostEqual(state["timer_deadline"] - state["last_normal_stop"], 20, delta=0.1)
+                self.assertFalse(session.output_contains("COMPACT_RECEIVED"))
+                session.close()
+
+    def test_automatic_action_refreshes_unknown_identity_and_rearms_fallback(self):
+        supervisor = object.__new__(self.module.Supervisor)
+        supervisor.argv = ["--model", "launch-model"]
+        supervisor.model, supervisor.endpoint = "stale-model", "openai-codex-oauth"
+        supervisor.last_normal_stop = time.time() - 1
+        supervisor.timer_generation = 7
+        supervisor.timer_deadline = supervisor.last_normal_stop + 1
+        supervisor.timer_kind = "compact"
+        supervisor._write_state = mock.Mock()
+        supervisor._gate_reason = mock.Mock(side_effect=AssertionError("must rearm before injection gate"))
+        with mock.patch.object(self.module, "IDLE_SECONDS", 5), mock.patch.object(self.module, "TTL_SECONDS", 6), mock.patch.object(self.module, "write_all") as inject, mock.patch.object(self.module.subprocess, "run", side_effect=AssertionError("unknown identity must not resolve")):
+            self.assertFalse(supervisor.attempt(expected_generation=7))
+        self.assertEqual((supervisor.model, supervisor.endpoint), ("unknown", "unknown"))
+        self.assertEqual(supervisor.cache_policy["mode"], "fallback")
+        self.assertEqual(supervisor.timer_deadline, supervisor.last_normal_stop + 5)
+        self.assertEqual(supervisor.last_state_transition, "policy-refreshed-rearmed")
+        self.assertEqual(supervisor.timer_generation, 8)
+        inject.assert_not_called()
+
+    def test_measured_window_defaults_to_supported_endpoint_policy(self):
+        """Codex requires supported evidence unless explicitly opted in."""
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = pathlib.Path(raw_root)
+            helper = root / "cache-policy"
+            policy = root / "cache-policy.json"
+            helper.write_text("fixture", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+            decision = {
+                "compact_before_seconds": 7080,
+                "cache_expires_seconds": 7200,
+                "mode": "measured",
+                "confidence": "supported",
+                "provider": "openai",
+                "endpoint_id": "openai-codex-oauth",
+                "model": "gpt-5.6-sol",
+            }
+            completed = subprocess.CompletedProcess([], 0, json.dumps(decision), "")
+            with mock.patch.dict(os.environ, {
+                "FLEET_CACHE_POLICY_HELPER": str(helper),
+                "FLEET_CACHE_POLICY_PATH": str(policy),
+            }), mock.patch.object(self.module.subprocess, "run", return_value=completed) as run:
+                compact_after, cache_expires, resolved = self.module.measured_window("gpt-5.6-sol")
+        command = run.call_args.args[0]
+        self.assertNotIn("--allow-observed", command)
+        self.assertEqual((compact_after, cache_expires), (7080, 7200))
+        self.assertEqual(resolved["mode"], "measured")
+
     # -- Gate logic --
 
-    def test_gate_skips_token_check_when_tokens_unknown(self):
-        """The None-token MVP path must not block compaction."""
+    def test_gate_rejects_when_tokens_unknown(self):
+        """Automatic compaction needs a measured current-context size."""
         supervisor = object.__new__(self.module.Supervisor)
         supervisor.enabled = True
         supervisor.status = "idle"
@@ -288,7 +458,7 @@ class CodexWarmTests(unittest.TestCase):
         supervisor.child_tty = None
         with mock.patch.object(supervisor, "_pty_still_owned", return_value=True):
             reason = supervisor._gate_reason("compact")
-        self.assertIsNone(reason)
+        self.assertEqual(reason, "token-count-unknown")
 
     def test_gate_rejects_when_tokens_below_threshold(self):
         """Known low token count must block compaction."""
@@ -328,8 +498,8 @@ class CodexWarmTests(unittest.TestCase):
             reason = supervisor._gate_reason("compact")
         self.assertIsNone(reason)
 
-    def test_gate_rejects_cold_cache(self):
-        """Compaction after TTL expiry is pointless."""
+    def test_gate_allows_large_context_after_cache_expiry(self):
+        """A cold compaction still prevents repeated full-context ingestion."""
         supervisor = object.__new__(self.module.Supervisor)
         supervisor.enabled = True
         supervisor.status = "idle"
@@ -338,14 +508,14 @@ class CodexWarmTests(unittest.TestCase):
         supervisor.last_normal_stop = time.time() - 99999
         supervisor.last_lifecycle_activity = None
         supervisor.last_local_input = None
-        supervisor.current_tokens = None
+        supervisor.current_tokens = 100000
         supervisor.dirty = True
         supervisor.pid = os.getpid()
         supervisor.master_fd = 0
         supervisor.child_tty = None
         with mock.patch.object(supervisor, "_pty_still_owned", return_value=True):
             reason = supervisor._gate_reason("compact")
-        self.assertEqual(reason, "cache-already-cold")
+        self.assertIsNone(reason)
 
     def test_gate_rejects_clean_session(self):
         """No dirty turns means nothing to compact."""

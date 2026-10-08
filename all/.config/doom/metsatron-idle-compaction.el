@@ -120,6 +120,17 @@ endpoint, account identity, or credential."
   "Minimum Codex-native current context usage before idle compaction."
   :type 'integer :group 'metsatron-idle-compaction)
 
+(defcustom metsatron-cache-policy-helper
+  (expand-file-name "HelmCortex/FORGE/bin/cache-policy" "~")
+  "Fleet cache-policy resolver executable."
+  :type 'file :group 'metsatron-idle-compaction)
+
+(defcustom metsatron-cache-policy-path
+  (expand-file-name
+   "HelmCortex/ROOTS/DotRoot/agent-session/centre/data/cache-policy.json" "~")
+  "Published endpoint/model cache-policy artifact."
+  :type 'file :group 'metsatron-idle-compaction)
+
 ;; Compatibility note: Codex 0.146.0 does not expose the ChatGPT backend's
 ;; selected prompt-cache retention policy.  The governor therefore speaks only
 ;; of a presumed warm-cache budget and records its source/confidence explicitly.
@@ -164,6 +175,128 @@ FORMAT-STRING and ARGS must not contain prompt or authentication data."
 (defun metsatron/idle-compaction--cancel-timer (timer)
   "Cancel TIMER when it is a live Emacs timer."
   (when (timerp timer) (cancel-timer timer)))
+
+(defun metsatron/idle-compaction--positive-finite-p (value)
+  "Return non-nil for a finite positive numeric VALUE."
+  (and (numberp value) (> value 0) (< value 1.0e+INF)))
+
+(defun metsatron/idle-compaction--known-name-p (value)
+  "Return non-nil when VALUE is an explicit nonempty identity name."
+  (and (stringp value) (not (string-empty-p (string-trim value)))
+       (not (equal (downcase (string-trim value)) "unknown"))))
+
+(defun metsatron/idle-compaction-set-session-endpoint (provider endpoint-id)
+  "Bind PROVIDER and ENDPOINT-ID to the current owning IDE session.
+This adapter API must be called by an owner that knows the actual endpoint.
+It never infers endpoints from provider names or raw response telemetry.
+Unknown identity leaves measured policy unavailable.  The binding expires
+when the owning session or connection changes; model identity is read fresh."
+  (let* ((state (metsatron/idle-compaction--current-state))
+         (claude (plist-get state :channel))
+         (identity (list :provider provider :endpoint-id endpoint-id
+                         :owner-id (plist-get state (if claude :session-id :thread-id))
+                         :connection (plist-get state (if claude :process :connection)))))
+    (unless state (user-error "No Claude or Codex IDE session owns this buffer"))
+    (if claude
+        (metsatron/claude-idle-compact--put claude :cache-policy-endpoint identity)
+      (metsatron/codex-idle-compact--put
+       (plist-get state :session) :cache-policy-endpoint identity))))
+
+(defun metsatron/idle-compaction--endpoint (state owner-id connection)
+  "Return STATE's explicit endpoint binding for OWNER-ID and CONNECTION."
+  (let ((identity (plist-get state :cache-policy-endpoint)))
+    (when (and owner-id connection
+               (equal owner-id (plist-get identity :owner-id))
+               (eq connection (plist-get identity :connection)))
+      identity)))
+
+(defun metsatron/claude-idle-compact--window (state snapshot)
+  "Resolve fresh policy for STATE using its owning status SNAPSHOT."
+  (let* ((fallback (metsatron/claude-idle-compact--profile-values
+                    (metsatron/claude-idle-compact--state-profile state)))
+         (identity (metsatron/idle-compaction--endpoint
+                    state (plist-get state :session-id) (plist-get state :process)))
+         (model (and (equal (plist-get state :channel) (alist-get 'channel snapshot))
+                     (equal (plist-get state :session-id) (alist-get 'session_id snapshot))
+                     (alist-get 'model snapshot))))
+    (metsatron/idle-compaction--measured-window
+     "claude" (plist-get identity :provider) (plist-get identity :endpoint-id)
+     model (car fallback) (cadr fallback))))
+
+(defun metsatron/codex-idle-compact--window (session state)
+  "Resolve fresh policy for owning SESSION without recycling measured timers."
+  (let* ((policy (metsatron/codex-idle-compact--state-policy state))
+         (local (plist-get state :policy-local))
+         (warm (if local (plist-get state :presumed-warm-seconds)
+                 (metsatron/codex-idle-compact--global-warm-seconds policy)))
+         (delay (metsatron/codex-idle-compact--delay-for-warm
+                 warm (if local (plist-get state :idle-compaction-delay-seconds)
+                        (and (eq policy 'custom) codex-custom-idle-compact-seconds))))
+         (identity (metsatron/idle-compaction--endpoint
+                    state
+                    (and (fboundp 'codex-ide-session-thread-id)
+                         (codex-ide-session-thread-id session))
+                    (and (fboundp 'codex-ide-session-process)
+                         (codex-ide-session-process session))))
+         (model (codex-ide--session-metadata-get session :model-name)))
+    (if (or local (eq policy 'disabled))
+        (list delay warm nil)
+      (metsatron/idle-compaction--measured-window
+       "codex" (plist-get identity :provider) (plist-get identity :endpoint-id)
+       model delay warm))))
+
+(defun metsatron/idle-compaction--measured-window
+    (harness provider endpoint model fallback-delay fallback-cache)
+  "Resolve measured cache policy or return FALLBACK-DELAY/FALLBACK-CACHE.
+The external resolver owns freshness, support, and cross-harness endpoint
+matching.  No shell is involved and failures preserve the caller's fallback."
+  (let ((fallback (list fallback-delay fallback-cache nil)))
+    (if (or (not (metsatron/idle-compaction--known-name-p model))
+            (not (metsatron/idle-compaction--known-name-p provider))
+            (not (metsatron/idle-compaction--known-name-p endpoint))
+            (not (file-executable-p metsatron-cache-policy-helper))
+            (not (file-readable-p metsatron-cache-policy-path)))
+        fallback
+      (condition-case nil
+          (with-temp-buffer
+            (let ((status
+                   (call-process
+                    metsatron-cache-policy-helper nil t nil
+                    "resolve" "--policy" metsatron-cache-policy-path
+                    "--harness" harness "--provider" provider
+                    "--endpoint" endpoint "--model" model
+                    "--fallback-compact" (number-to-string fallback-delay)
+                    "--fallback-cache" (number-to-string fallback-cache))))
+              (if (not (equal status 0))
+                  fallback
+                (let ((decision
+                       (json-parse-buffer :object-type 'plist
+                                          :array-type 'array
+                                          :null-object nil
+                                          :false-object nil)))
+                  (let ((delay (plist-get decision :compact_before_seconds))
+                        (ttl (plist-get decision :cache_expires_seconds)))
+                    (if (and (equal (plist-get decision :mode) "measured")
+                             (equal (plist-get decision :confidence) "supported")
+                             (metsatron/idle-compaction--positive-finite-p delay)
+                             (metsatron/idle-compaction--positive-finite-p ttl)
+                             (< delay ttl))
+                        (list delay ttl decision)
+                      fallback))))))
+        (error fallback)))))
+
+(defun metsatron/idle-compaction--process-model (process)
+  "Return an explicit --model value from PROCESS, when present."
+  (when (processp process)
+    (let ((args (process-command process)) found)
+      (while args
+        (let ((arg (pop args)))
+          (cond
+           ((and (member arg '("--model" "-m")) args)
+            (setq found (car args) args nil))
+           ((string-prefix-p "--model=" arg)
+            (setq found (substring arg (length "--model=")) args nil)))))
+      found)))
 
 (defun metsatron/claude-idle-compact--effective-profile (&optional profile)
   "Resolve PROFILE to `long' or `short'.
@@ -254,7 +387,7 @@ Fail closed when the installed vterm does not expose its input accessor."
                 snapshot)))
         (error nil)))))
 
-(defun metsatron/claude-idle-compact--arm (state)
+(defun metsatron/claude-idle-compact--arm (state &optional remaining window)
   "Arm one Claude idle timer for STATE when lifecycle permits it."
   (when (and state metsatron-idle-compaction-enabled
              (plist-get state :enabled) (plist-get state :dirty)
@@ -267,13 +400,17 @@ Fail closed when the installed vterm does not expose its input accessor."
            (session-id (plist-get state :session-id))
            (completed-at (plist-get state :last-normal-turn-completed-at))
            (profile (metsatron/claude-idle-compact--state-profile state))
-           (delay (car (metsatron/claude-idle-compact--profile-values profile)))
+           (window (or window (metsatron/claude-idle-compact--window
+                               state (metsatron/claude-idle-compact--snapshot state))))
+           (delay (car window))
            (generation (1+ (or (plist-get state :timer-generation) 0)))
-           (timer (run-at-time delay nil
+           (timer (run-at-time (or remaining delay) nil
                                #'metsatron/claude-idle-compact--timer-fired
                                channel session-id completed-at generation)))
       (metsatron/idle-compaction--cancel-timer (plist-get state :timer))
       (setq state (plist-put state :effective-profile profile))
+      (setq state (plist-put state :measured-cache-ttl-seconds (cadr window)))
+      (setq state (plist-put state :cache-policy-decision (caddr window)))
       (setq state (plist-put state :timer-generation generation))
       (setq state (plist-put state :timer timer))
       (puthash channel state metsatron/claude-idle-compact--sessions)
@@ -289,22 +426,27 @@ Fail closed when the installed vterm does not expose its input accessor."
                (equal session-id (plist-get state :session-id))
                (equal completed-at (plist-get state :last-normal-turn-completed-at)))
       (metsatron/claude-idle-compact--put channel :timer nil)
-      (metsatron/claude-idle-compact--attempt state))))
+      (metsatron/claude-idle-compact--attempt state t))))
 
-(defun metsatron/claude-idle-compact--attempt (state)
+(defun metsatron/claude-idle-compact--attempt (state &optional automatic)
   "Run the complete Claude eligibility gate for STATE."
   (let* ((channel (plist-get state :channel))
          (buffer (plist-get state :buffer))
          (process (plist-get state :process))
          (completion (plist-get state :last-normal-turn-completed-at))
-         (profile (metsatron/claude-idle-compact--state-profile state))
-         (ttl (cadr (metsatron/claude-idle-compact--profile-values profile)))
          (elapsed (and completion (- (metsatron/idle-compaction--now) completion)))
          (snapshot (and (buffer-live-p buffer)
                         (process-live-p process)
                         (metsatron/claude-idle-compact--snapshot state)))
+         (window (metsatron/claude-idle-compact--window state snapshot))
+         (delay (car window))
+         (ttl (cadr window))
          (tokens (and snapshot
                       (alist-get 'current_input_context_tokens snapshot))))
+    (setq state (metsatron/claude-idle-compact--put
+                 channel :cache-policy-decision (caddr window)))
+    (setq state (metsatron/claude-idle-compact--put
+                 channel :measured-cache-ttl-seconds ttl))
     (when (numberp tokens)
       (setq state (metsatron/claude-idle-compact--put
                    channel :active-input-context-tokens tokens)))
@@ -328,16 +470,22 @@ Fail closed when the installed vterm does not expose its input accessor."
       (metsatron/idle-compaction--log 'cancelled channel "no-completion-time"))
      ((or (null elapsed) (>= elapsed ttl))
       (metsatron/idle-compaction--log 'cancelled channel "cache-already-cold"))
+     ((not (equal (plist-get state :status) "idle"))
+      (metsatron/idle-compaction--log 'cancelled channel "session-active"))
      ((not snapshot)
       (metsatron/idle-compaction--log 'cancelled channel "missing-or-stale-status"))
      ((and (numberp (plist-get state :last-local-keyboard-at))
            (> (plist-get state :last-local-keyboard-at) completion))
       (metsatron/idle-compaction--log 'cancelled channel "user-input"))
-     ((metsatron/claude-idle-compact--vterm-draft-present-p)
+     ((with-current-buffer buffer
+        (metsatron/claude-idle-compact--vterm-draft-present-p))
       (metsatron/idle-compaction--log 'cancelled channel "draft-present"))
-     ((< (or tokens 0) claude-idle-compact-min-tokens)
+     ((or (not (metsatron/idle-compaction--positive-finite-p tokens))
+          (< tokens claude-idle-compact-min-tokens))
       (metsatron/idle-compaction--log 'cancelled channel
                                       "below-token-threshold tokens=%s" tokens))
+     ((and automatic (< elapsed delay))
+      (metsatron/claude-idle-compact--arm state (- delay elapsed) window))
      (t
       (setq state (plist-put state :compacting t))
       (puthash channel state metsatron/claude-idle-compact--sessions)
@@ -541,20 +689,28 @@ CONFIGURED is the requested delay; the result is nil when WARM is unusable."
 
 (defun metsatron/codex-idle-compact--state-warm-seconds (state)
   "Return STATE's presumed warm-cache budget, or nil when disabled."
-  (let ((policy (metsatron/codex-idle-compact--state-policy state)))
-    (if (plist-get state :policy-local)
-        (plist-get state :presumed-warm-seconds)
-      (metsatron/codex-idle-compact--global-warm-seconds policy))))
+  (let ((policy (metsatron/codex-idle-compact--state-policy state))
+        (decision (plist-get state :cache-policy-decision)))
+    (cond
+     ((plist-get state :policy-local)
+      (plist-get state :presumed-warm-seconds))
+     ((equal (plist-get decision :mode) "measured")
+      (plist-get decision :cache_expires_seconds))
+     (t (metsatron/codex-idle-compact--global-warm-seconds policy)))))
 
 (defun metsatron/codex-idle-compact--state-delay-seconds (state)
   "Return STATE's actual idle-compaction delay in seconds."
-  (metsatron/codex-idle-compact--delay-for-warm
-   (metsatron/codex-idle-compact--state-warm-seconds state)
-   (if (plist-get state :policy-local)
-       (plist-get state :idle-compaction-delay-seconds)
-     (and (eq (metsatron/codex-idle-compact--state-policy state) 'custom)
-          (or (plist-get state :idle-compaction-delay-seconds)
-              codex-custom-idle-compact-seconds)))))
+  (let ((decision (plist-get state :cache-policy-decision)))
+    (if (and (not (plist-get state :policy-local))
+             (equal (plist-get decision :mode) "measured"))
+        (plist-get decision :compact_before_seconds)
+      (metsatron/codex-idle-compact--delay-for-warm
+       (metsatron/codex-idle-compact--state-warm-seconds state)
+       (if (plist-get state :policy-local)
+           (plist-get state :idle-compaction-delay-seconds)
+         (and (eq (metsatron/codex-idle-compact--state-policy state) 'custom)
+              (or (plist-get state :idle-compaction-delay-seconds)
+                  codex-custom-idle-compact-seconds)))))))
 
 (defun metsatron/codex-idle-compact--policy-source (policy)
   "Return the source label for global POLICY."
@@ -572,17 +728,23 @@ CONFIGURED is the requested delay; the result is nil when WARM is unusable."
 
 (defun metsatron/codex-idle-compact--state-source (state)
   "Return STATE's cache-policy source label."
-  (or (and (plist-get state :policy-local)
-           (plist-get state :cache-policy-source))
-      (metsatron/codex-idle-compact--policy-source
-       (metsatron/codex-idle-compact--state-policy state))))
+  (let ((decision (plist-get state :cache-policy-decision)))
+    (if (equal (plist-get decision :mode) "measured")
+        "measured endpoint/model cache-policy.v1"
+      (or (and (plist-get state :policy-local)
+               (plist-get state :cache-policy-source))
+          (metsatron/codex-idle-compact--policy-source
+           (metsatron/codex-idle-compact--state-policy state))))))
 
 (defun metsatron/codex-idle-compact--state-confidence (state)
   "Return STATE's cache-policy confidence label."
-  (or (and (plist-get state :policy-local)
-           (plist-get state :cache-policy-confidence))
-      (metsatron/codex-idle-compact--policy-confidence
-       (metsatron/codex-idle-compact--state-policy state))))
+  (let ((decision (plist-get state :cache-policy-decision)))
+    (if (equal (plist-get decision :mode) "measured")
+        (or (plist-get decision :confidence) "supported")
+      (or (and (plist-get state :policy-local)
+               (plist-get state :cache-policy-confidence))
+          (metsatron/codex-idle-compact--policy-confidence
+           (metsatron/codex-idle-compact--state-policy state))))))
 
 (defun metsatron/codex-idle-compact--all-sessions ()
   "Return the owning client's currently tracked Codex sessions."
@@ -762,12 +924,13 @@ re-arm the governor."
                                     "reason=%s" reason)
     state))
 
-(defun metsatron/codex-idle-compact--arm (session)
+(defun metsatron/codex-idle-compact--arm (session &optional remaining window)
   "Arm one Codex idle timer for SESSION when it is eligible to wait."
   (when-let ((state (metsatron/codex-idle-compact--state session)))
     (let* ((policy (metsatron/codex-idle-compact--state-policy state))
-           (warm (metsatron/codex-idle-compact--state-warm-seconds state))
-           (delay (metsatron/codex-idle-compact--state-delay-seconds state)))
+           (window (or window (metsatron/codex-idle-compact--window session state)))
+           (delay (car window))
+           (warm (cadr window)))
       (when (and metsatron-idle-compaction-enabled
                  (not (eq policy 'disabled))
                  (plist-get state :enabled)
@@ -782,12 +945,15 @@ re-arm the governor."
         (let* ((thread-id (plist-get state :thread-id))
                (completion (plist-get state :last-normal-turn-completed-at))
                (generation (1+ (or (plist-get state :timer-generation) 0)))
-               (timer (run-at-time delay nil
+               (timer (run-at-time (or remaining delay) nil
                                    #'metsatron/codex-idle-compact--timer-fired
                                    session thread-id completion generation)))
           (metsatron/idle-compaction--cancel-timer (plist-get state :timer))
           (setq state (plist-put state :timer-generation generation))
           (setq state (plist-put state :timer timer))
+          (setq state (plist-put state :cache-policy-decision (caddr window)))
+          (setq state (plist-put state :idle-compaction-delay-seconds delay))
+          (setq state (plist-put state :presumed-warm-seconds warm))
           (codex-ide--session-metadata-put
            session metsatron/codex-idle-compact--metadata-key state)
           (metsatron/idle-compaction--log
@@ -878,10 +1044,16 @@ generation.  A nil value is used by the manual command."
            (elapsed (and completion (- (metsatron/idle-compaction--now) completion)))
            (tokens (plist-get state :current-context-tokens))
            (policy (metsatron/codex-idle-compact--state-policy state))
-           (warm (metsatron/codex-idle-compact--state-warm-seconds state))
+           (window (metsatron/codex-idle-compact--window session state))
+           (delay (car window))
+           (warm (cadr window))
            (sequence (plist-get state :lifecycle-sequence))
            (completion-sequence
             (plist-get state :completion-lifecycle-sequence)))
+      (setq state (metsatron/codex-idle-compact--put-many
+                   session :cache-policy-decision (caddr window)
+                   :presumed-warm-seconds warm
+                   :idle-compaction-delay-seconds delay))
       (cond
        ((not metsatron-idle-compaction-enabled)
         (metsatron/idle-compaction--log 'cancelled thread-id "globally-disabled"))
@@ -900,7 +1072,10 @@ generation.  A nil value is used by the manual command."
         (metsatron/idle-compaction--log 'cancelled thread-id "already-compacting"))
        ((not (process-live-p connection))
         (metsatron/idle-compaction--log 'cancelled thread-id "connection-gone"))
-       ((not (buffer-live-p buffer))
+       ((not (eq connection (codex-ide-session-process session)))
+        (metsatron/idle-compaction--log 'cancelled thread-id "connection-replaced"))
+       ((not (and (buffer-live-p buffer)
+                  (eq buffer (codex-ide-session-buffer session))))
         (metsatron/idle-compaction--log 'cancelled thread-id "buffer-unloaded"))
        ((not (metsatron/codex-idle-compact--owned-p session thread-id))
         (metsatron/idle-compaction--log 'cancelled thread-id "thread-replaced"))
@@ -919,9 +1094,12 @@ generation.  A nil value is used by the manual command."
        ((plist-get state :compaction-turn-in-progress)
         (metsatron/idle-compaction--log
          'cancelled thread-id "compaction-active"))
-       ((< (or tokens 0) codex-idle-compact-min-tokens)
+       ((or (not (metsatron/idle-compaction--positive-finite-p tokens))
+            (< tokens codex-idle-compact-min-tokens))
         (metsatron/idle-compaction--log 'cancelled thread-id
                                         "below-token-threshold tokens=%s" tokens))
+       ((and expected-generation (< elapsed delay))
+        (metsatron/codex-idle-compact--arm session (- delay elapsed) window))
        (t
         ;; Invalidate the one-shot timer before changing the state.  This makes
         ;; a stale callback harmless if it was queued concurrently with this

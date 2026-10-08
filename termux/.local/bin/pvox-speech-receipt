@@ -2,18 +2,25 @@
 # Phone-local playback receipts for the read-only StarFox HUD
 
 # The caller supplies a generated opaque ID and a known speaker slug. This
-# helper appends only lifecycle metadata, never voice text or audio. The fleet
-# observes the phone-local journal by read-only SSH pull; no phone credential
-# or inbound HTTP endpoint is needed.
+# helper appends lifecycle metadata to the durable journal and mirrors it into a
+# bounded low-latency journal. Its =levels= mode accepts only integer 0–100 RMS
+# envelopes on stdin and writes those only to the bounded journal: no voice text
+# or raw audio ever leaves the playback pipe. The fleet follows that journal by
+# read-only SSH; no phone credential or inbound HTTP endpoint is needed.
 
 
 # [[file:../../../package-termux.org::*Phone-local playback receipts for the read-only StarFox HUD][Phone-local playback receipts for the read-only StarFox HUD:1]]
 set -euo pipefail
-[ "$#" -eq 3 ] || exit 2
-KIND="$1"; SPEAKER="$2"; PLAYBACK="$3"
-case "$KIND" in queued|player_started|player_exited) ;; *) exit 2 ;; esac
+[ "$#" -ge 1 ] || exit 2
+KIND="$1"
+case "$KIND" in
+  levels) [ "$#" -eq 3 ] || exit 2 ;;
+  queued|player_started|player_exited) [ "$#" -eq 3 ] || exit 2 ;;
+  *) exit 2 ;;
+esac
+SPEAKER="$2"; PLAYBACK="$3"
 case "$SPEAKER" in
-  helmastra|helmductor|auryn|fable|claudeificus|haiku|orcinus-orca|ecco-dolphinus|hermes-agent|gemma|pclip) ;;
+  helmastra|helmductor|auryn|fable|claudeificus|haiku|nanobot|orcinus-orca|ecco-dolphinus|hermes-agent|gemma|pclip) ;;
   *) exit 2 ;;
 esac
 case "$PLAYBACK" in ""|*[!A-Za-z0-9_-]*) exit 2 ;; esac
@@ -22,7 +29,39 @@ umask 077
 RECEIPT_DIR="${PVOX_RECEIPT_DIR:-$HOME/.cache}"
 mkdir -p "$RECEIPT_DIR"
 JOURNAL="$RECEIPT_DIR/pvox-speech-events.jsonl"
-[ ! -L "$JOURNAL" ] || exit 1
-printf '{"kind":"%s","agent":"%s","playback_id":"%s","recorded_at":%s}\n' \
-  "$KIND" "$SPEAKER" "$PLAYBACK" "$(date +%s)" >> "$JOURNAL"
+LIVE_JOURNAL="$RECEIPT_DIR/pvox-speech-live.jsonl"
+[ ! -L "$JOURNAL" ] && [ ! -L "$LIVE_JOURNAL" ] || exit 1
+LIVE_MAX_BYTES="${PVOX_SPEECH_LIVE_MAX_BYTES:-262144}"
+case "$LIVE_MAX_BYTES" in ""|*[!0-9]*) LIVE_MAX_BYTES=262144 ;; esac
+
+rotate_live() {
+  [ -f "$LIVE_JOURNAL" ] || return 0
+  SIZE="$(wc -c < "$LIVE_JOURNAL" 2>/dev/null || printf 0)"
+  [ "$SIZE" -le "$LIVE_MAX_BYTES" ] || : > "$LIVE_JOURNAL"
+}
+
+append_live() {
+  rotate_live
+  printf '%s\n' "$1" >> "$LIVE_JOURNAL"
+}
+
+if [ "$KIND" = levels ]; then
+  rotate_live
+  COUNT=0
+  while IFS= read -r LEVEL; do
+    case "$LEVEL" in ""|*[!0-9]*) continue ;; esac
+    [ "$LEVEL" -le 100 ] || continue
+    LINE="$(printf '{"kind":"level","agent":"%s","playback_id":"%s","level":%s,"recorded_at":%s}' \
+      "$SPEAKER" "$PLAYBACK" "$LEVEL" "$(date +%s.%3N)")"
+    printf '%s\n' "$LINE" >> "$LIVE_JOURNAL"
+    COUNT=$((COUNT + 1))
+    [ $((COUNT % 128)) -ne 0 ] || rotate_live
+  done
+  exit 0
+fi
+
+LINE="$(printf '{"kind":"%s","agent":"%s","playback_id":"%s","recorded_at":%s}' \
+  "$KIND" "$SPEAKER" "$PLAYBACK" "$(date +%s)")"
+printf '%s\n' "$LINE" >> "$JOURNAL"
+append_live "$LINE"
 # Phone-local playback receipts for the read-only StarFox HUD:1 ends here

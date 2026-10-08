@@ -1,0 +1,56 @@
+#!/sbin/openrc-run
+# OpenCode API server as an OpenRC service (agents-bots-opencode-openrc.org).
+# Install with opencode-openrc-install; settings in /etc/conf.d/<svc>:
+#   opencode_user       account that runs the server (required)
+#   opencode_port       loopback port (required)
+#   opencode_bin        the opencode binary (default ~/.local/bin/opencode)
+#   opencode_auth_file  OPENCODE_SERVER_USERNAME/PASSWORD file, parsed, never
+#                       sourced (default ~/.config/opencode/server-auth.env)
+#   opencode_path_add   extra PATH entries appended after ~/.local/bin
+#   opencode_description
+
+user_home="$(getent passwd "${opencode_user}" | cut -d: -f6)"
+: "${opencode_bin:=${user_home}/.local/bin/opencode}"
+: "${opencode_auth_file:=${user_home}/.config/opencode/server-auth.env}"
+
+name="${RC_SVCNAME}"
+description="${opencode_description:-OpenCode API server (${opencode_user})}"
+command="${opencode_bin}"
+command_args="serve --hostname 127.0.0.1 --port ${opencode_port}"
+command_user="${opencode_user}:${opencode_user}"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+directory="${user_home}"
+
+export HOME="${user_home}"
+export PATH="${PATH}:${user_home}/.local/bin${opencode_path_add:+:${opencode_path_add}}"
+
+depend() {
+    use net dns
+    after net
+}
+
+# Parse (never source) the auth file; refuse to run an unauthenticated server.
+load_server_auth() {
+    if [ ! -r "$opencode_auth_file" ]; then
+        eerror "missing $opencode_auth_file - refusing to start without OPENCODE_SERVER_PASSWORD"
+        return 1
+    fi
+    OPENCODE_SERVER_USERNAME=$(sed -n 's/^OPENCODE_SERVER_USERNAME=//p' "$opencode_auth_file" | tail -n 1)
+    OPENCODE_SERVER_PASSWORD=$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' "$opencode_auth_file" | tail -n 1)
+    if [ -z "$OPENCODE_SERVER_PASSWORD" ]; then
+        eerror "OPENCODE_SERVER_PASSWORD empty in $opencode_auth_file - refusing to start"
+        return 1
+    fi
+    export OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-opencode}"
+    export OPENCODE_SERVER_PASSWORD
+}
+
+start_pre() {
+    [ -n "${opencode_user}" ] && [ -n "${user_home}" ] && [ -n "${opencode_port}" ] \
+        || { eerror "opencode_user (an existing account) and opencode_port must be set in /etc/conf.d/${RC_SVCNAME}"; return 1; }
+    load_server_auth || return 1
+    checkpath -f -m 0640 -o "${opencode_user}:${opencode_user}" "${output_log}"
+}

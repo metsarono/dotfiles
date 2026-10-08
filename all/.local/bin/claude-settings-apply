@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # ~/DotCortex/all/.local/bin/claude-settings-apply
 # Merge the shared Claude settings baseline (tangled from agents-hooks.org) onto the
-# machine's live settings.json, preserving the machine-local `model` key that /model
-# writes. `enabledPlugins` deep-merges: shared entries win per key, machine-local
-# additions (e.g. the telegram channel plugin on the bot machine) survive.
+# machine's live regular settings.json. Keys absent from the baseline survive;
+# enabledPlugins deep-merges and only bare claude-hook-* commands are replaced.
 # The "merge" tier of the pipeline: tangle -> settings.shared.json, then this
 # script -> settings.json. Never tangle directly to settings.json again.
 set -euo pipefail
 
 SHARED="$HOME/DotCortex/all/.claude/settings.shared.json"
-LIVE="$HOME/DotCortex/all/.claude/settings.json"
+LIVE="$HOME/.claude/settings.json"
 
 if [ ! -f "$SHARED" ]; then
   echo "!! claude-settings-apply: shared baseline missing at $SHARED" >&2
@@ -17,20 +16,41 @@ if [ ! -f "$SHARED" ]; then
   exit 1
 fi
 command -v jq >/dev/null 2>&1 || { echo "!! claude-settings-apply: jq not on PATH" >&2; exit 1; }
+if [ -L "$LIVE" ]; then
+  echo "!! claude-settings-apply: $LIVE is a symlink; detach Stow ownership before applying" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "$LIVE")"
 
 # On a fresh machine the live file may not exist; feed jq /dev/null so $live[0] is
 # null and the shared baseline is used verbatim (no model -> Claude Code default).
 live_input="$LIVE"
 [ -f "$LIVE" ] || live_input=/dev/null
 
-tmp="$(mktemp)"
+umask 077
+tmp="$(mktemp "${LIVE}.tmp.XXXXXX")"
 if jq -n \
      --slurpfile shared "$SHARED" \
      --slurpfile live "$live_input" \
-     '($shared[0] // {}) as $s
-      | ($live[0]  // {}) as $l
-      | $s + ( ($l | {model, effortLevel}) | with_entries(select(.value != null)) )
-      | .enabledPlugins = (($l.enabledPlugins // {}) + ($s.enabledPlugins // {}))' > "$tmp" \
+     'def managed: (.type == "command" and (.command | type == "string" and test("^claude-hook-[A-Za-z0-9-]+$")));
+      def valid_groups: type == "array" and all(.[]; type == "object" and (.hooks | type == "array") and all(.hooks[]; type == "object"));
+      ($shared[0]) as $s | ($live[0] // {}) as $l
+      | if ($s | type) != "object" or ($l | type) != "object"
+           or (($s.hooks // {}) | type) != "object" or (($l.hooks // {}) | type) != "object"
+           or (($s.enabledPlugins // {}) | type) != "object" or (($l.enabledPlugins // {}) | type) != "object"
+           or ([$s.hooks[]? | valid_groups] | all(.[]; .)) == false
+           or ([$l.hooks[]? | valid_groups] | all(.[]; .)) == false
+           or ([$s.hooks[]? | .[] | .hooks[] | managed] | all(.[]; .)) == false
+        then error("invalid Claude settings or unowned shared hook") else . end
+      | ($l.hooks // {}) as $oldhooks
+      | ($s.hooks // {}) as $newhooks
+      | (($oldhooks + $newhooks) | keys) as $events
+      | reduce $events[] as $event ({};
+          .[$event] = (([$oldhooks[$event][]? | .hooks |= map(select(managed | not)) | select(.hooks | length > 0)]
+                       + ($newhooks[$event] // [])))) as $mergedhooks
+      | ($l + ($s | del(.hooks, .enabledPlugins)))
+      | .enabledPlugins = (($l.enabledPlugins // {}) + ($s.enabledPlugins // {}))
+      | .hooks = $mergedhooks' > "$tmp" \
    && jq empty "$tmp" 2>/dev/null; then
   mv -f "$tmp" "$LIVE"
   printf '>> claude settings merged: model=%s effort=%s theme=%s\n' \

@@ -1,33 +1,71 @@
 #!/usr/bin/env bash
 # DotCortex symlink health scanner
+# Lists broken symlinks under =$HOME=. With =--fix-stow= it removes the ones that point into the DotCortex checkout: Stow orphans, left behind when a file leaves the repo or moves to another layer (Stow's unstow walks the package, not the target, so it never sees them).
+
+# Stow writes *relative* links (=.local/bin/x -> ../../DotCortex/linux/.local/bin/x=), which the first version of this scanner missed: it compared the raw link text against =$HOME/DotCortex=, so only absolute links matched (found 2026-09-28, the Honey launcher move left four relative orphans). A link's target is now resolved against the link's own directory before the comparison, both lexically and physically (a checkout reached through a symlink counts), and only a target *inside* the checkout (=<checkout>/...=, never a sibling such as =DotCortex-old=) is removed. The checkout itself is never scanned: the repo tracks deliberately dangling links of its own. Scan mode tags each orphan =(stow orphan)= so the report is the dry-run of =--fix-stow=.
+
+# =DOTCORTEX_ROOT= overrides the checkout (default =$HOME/DotCortex=), for tests and non-default checkouts.
+
 
 # [[file:../../../dotcortex.org::*DotCortex symlink health scanner][DotCortex symlink health scanner:1]]
 #!/usr/bin/env bash
 set -euo pipefail
 
 ROOT="${HOME}"
-DOT="${HOME}/DotCortex"
+DOT="${DOTCORTEX_ROOT:-${HOME}/DotCortex}"
 mode="scan"
 
-if [[ "${1-}" == "--fix-stow" ]]; then
-  mode="fix-stow"
-fi
+case "${1-}" in
+  --fix-stow) mode="fix-stow" ;;
+  -h|--help)
+    echo "Usage: dotcortex-stow-health [--fix-stow]"
+    echo "  List broken symlinks under \$HOME; --fix-stow removes those pointing into $DOT."
+    exit 0 ;;
+  "") ;;
+  *) echo "dotcortex-stow-health: unknown argument: $1" >&2; exit 2 ;;
+esac
+
+DOT_LEX="$(realpath -m -s -- "$DOT")"
+DOT_REAL="$(realpath -m -- "$DOT")"
+
+# into_checkout LINK TARGET: true when TARGET, resolved from LINK's directory, lies inside the checkout.
+into_checkout() {
+  local link="$1" target="$2" abs lex phys
+  case "$target" in
+    /*) abs="$target" ;;
+    *) abs="$(dirname -- "$link")/$target" ;;
+  esac
+  lex="$(realpath -m -s -- "$abs")"
+  phys="$(realpath -m -- "$abs")"
+  case "$lex/" in "$DOT_LEX"/?*|"$DOT_REAL"/?*) return 0 ;; esac
+  case "$phys/" in "$DOT_LEX"/?*|"$DOT_REAL"/?*) return 0 ;; esac
+  return 1
+}
 
 printf 'DotCortex symlink health - mode: %s\n\n' "$mode"
 
-# Find broken symlinks under $HOME, but ignore Wine and similar
+broken=0 orphans=0
+# Find broken symlinks under $HOME, but never inside the checkout, and ignore Wine and similar
 while IFS= read -r -d '' link; do
   target="$(readlink "$link" 2>/dev/null || printf '?')"
-  printf 'BROKEN: %s -> %s\n' "$link" "$target"
-
-  if [[ "$mode" == "fix-stow" && "$target" == "$DOT"* ]]; then
-    echo "  removing stow symlink: $link"
-    rm -v -- "$link"
+  broken=$((broken + 1))
+  if into_checkout "$link" "$target"; then
+    orphans=$((orphans + 1))
+    printf 'BROKEN: %s -> %s (stow orphan)\n' "$link" "$target"
+    if [[ "$mode" == "fix-stow" ]]; then
+      echo "  removing stow symlink: $link"
+      rm -v -- "$link"
+    fi
+  else
+    printf 'BROKEN: %s -> %s\n' "$link" "$target"
   fi
 done < <(
-  find "$ROOT" -xtype l \
+  find "$ROOT" \( -path "$DOT_LEX" -o -path "$DOT_REAL" \) -prune -o -xtype l \
     ! -path "$HOME/.wine/*" \
     ! -path "$HOME/.PlayOnLinux/*" \
-    -print0
+    -print0 2>/dev/null
 )
+
+printf '\n%d broken, %d stow orphan(s)%s\n' "$broken" "$orphans" \
+  "$([[ "$mode" == "fix-stow" ]] && echo " removed" || echo "; --fix-stow removes them")"
 # DotCortex symlink health scanner:1 ends here

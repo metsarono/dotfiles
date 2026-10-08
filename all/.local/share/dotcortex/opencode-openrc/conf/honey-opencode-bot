@@ -1,0 +1,9 @@
+# Possum's Telegram bot on Honey, as agent-opencode.
+opencode_description="OpenCode Telegram bot (honey_opencode_bot) for Metsatron on Honey"
+opencode_user="agent-opencode"
+opencode_serve_svc="honey-opencode-serve"
+opencode_port="4096"
+opencode_telegram_bin="/home/agent-opencode/.local/bin/opencode-telegram"
+opencode_path_add="/home/agent-opencode/.guix-extra-profiles/agent/agent/bin"
+opencode_patch_apply="/usr/local/share/helm-opencode-telegram/FORGE/bin/opencode-telegram-patch-apply"
+opencode_patch_root="/usr/local/share/helm-opencode-telegram"

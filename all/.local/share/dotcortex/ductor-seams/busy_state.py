@@ -65,7 +65,10 @@ async def handle_busy_request(server, request):
     if handler is None:
         return reply({"busy": True, "known": False, "error": "authority_missing"}, 503)
     try:
-        return reply(await handler())
+        state = await handler()
+        if getattr(server, "_idle_message_handler", None) is not None:
+            state["idle_prompt"] = "ductor.idle_prompt.v2"
+        return reply(state)
     except Exception:
         logger.exception("Main-session busy authority failed")
         return reply({"busy": True, "known": False, "error": "busy_state_unavailable"}, 503)

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# opencode-openrc-install — install an OpenCode server or Telegram bot as an
+# OpenRC service from DotCortex (agents-bots-opencode-openrc.org).
+set -euo pipefail
+
+usage() {
+    cat <<'USAGE'
+Usage: opencode-openrc-install [--dry-run] <svc> serve|telegram <conf-file>
+       opencode-openrc-install -h|--help
+
+Run as root. Installs, from this DotCortex checkout:
+  - the body for the kind (opencode-serve or opencode-telegram) as /etc/init.d/<svc>
+  - <conf-file> as /etc/conf.d/<svc>
+Existing files are backed up next to themselves as <file>.bak-<timestamp>
+before they are replaced. Nothing is started or restarted.
+
+  --dry-run   print what would change; change nothing
+USAGE
+}
+
+DRY=0
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    --dry-run) DRY=1; shift ;;
+esac
+[ $# -eq 3 ] || { usage >&2; exit 2; }
+svc="$1"; kind="$2"; conf="$3"
+case "$svc" in *[!a-z0-9-]*|"") echo "bad service name: $svc" >&2; exit 2 ;; esac
+case "$kind" in serve) body=opencode-serve ;; telegram) body=opencode-telegram ;; *) usage >&2; exit 2 ;; esac
+[ -r "$conf" ] || { echo "conf file not readable: $conf" >&2; exit 2; }
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+body="$here/$body"
+[ -r "$body" ] || { echo "missing source: $body" >&2; exit 1; }
+ts="$(date +%Y%m%d-%H%M%S)"
+ETC="${OPENCODE_OPENRC_ETC:-/etc}"   # tests point this at a scratch tree
+
+run() { if [ "$DRY" -eq 1 ]; then echo "would: $*"; else "$@"; fi; }
+place() {  # src dst mode
+    if [ -e "$2" ] && cmp -s "$1" "$2"; then echo "unchanged $2"; return; fi
+    [ -e "$2" ] && run cp -p "$2" "$2.bak-$ts"
+    run install -m "$3" -o root -g root "$1" "$2"
+    [ "$DRY" -eq 1 ] || echo "installed $2"
+}
+
+[ "$DRY" -eq 1 ] || [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+place "$body" "$ETC/init.d/$svc" 0755
+place "$conf" "$ETC/conf.d/$svc" 0644

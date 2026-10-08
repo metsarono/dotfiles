@@ -721,7 +721,9 @@ in the buffer, so the normalized lifecycle event is the reliable fallback."
                    :last-normal-turn-completed-at (- (float-time) 2)
                    :current-context-tokens 80000)
              metadata)
-    (cl-letf (((symbol-function 'codex-ide--session-metadata-get) get)
+    (cl-letf (((symbol-function 'codex-ide-session-process) (lambda (_) 'process))
+              ((symbol-function 'codex-ide-session-buffer) (lambda (_) 'buffer))
+              ((symbol-function 'codex-ide--session-metadata-get) get)
               ((symbol-function 'codex-ide--session-metadata-put) put)
               ((symbol-function 'process-live-p) (lambda (_p) t))
               ((symbol-function 'buffer-live-p) (lambda (_b) t))
@@ -834,3 +836,217 @@ in the buffer, so the normalized lifecycle event is the reliable fallback."
                (metsatron/codex-idle-compact--request-sync-filter
                 (list 'session "thread/start" '((foo . bar))))
                (list 'session "thread/start" '((foo . bar))))))))
+
+(defun metsatron/idle-test--policy-action (harness payload &optional model elapsed endpoint automatic action-payload hazard)
+  "Exercise HARNESS arming and public action with resolver PAYLOAD.
+MODEL, ELAPSED and ENDPOINT describe the current owning session."
+  (let* ((session 'policy-session)
+         (buffer (generate-new-buffer " *policy-action*"))
+         (metadata (make-hash-table :test #'eq))
+         (model (or model "current-model"))
+         (endpoint (or endpoint "fixture-endpoint"))
+         (completion 100)
+         (now (+ completion (or elapsed 500)))
+         (native-comp-enable-subr-trampolines nil)
+         (requests 0) calls delays
+         (state (if (eq harness 'claude)
+                    (list :channel "policy-channel" :session-id "policy-id"
+                          :buffer buffer :process 'process :status "idle"
+                          :enabled t :dirty t :timer-generation 0
+                          :cache-profile 'long
+                          :last-normal-turn-completed-at completion)
+                  (list :session session :thread-id "policy-id"
+                        :connection 'process :owning-buffer buffer
+                        :status "idle" :enabled t :dirty t :timer-generation 0
+                        :cache-policy 'presumed-30m
+                        :current-context-tokens 70000
+                        :last-normal-turn-completed-at completion)))
+         (metsatron/claude-idle-compact--sessions (make-hash-table :test #'equal)))
+    (puthash :model-name model metadata)
+    (puthash metsatron/codex-idle-compact--metadata-key state metadata)
+    (puthash "policy-channel" state metsatron/claude-idle-compact--sessions)
+    (unwind-protect
+        (cl-letf (((symbol-function 'codex-ide--session-metadata-get)
+                   (lambda (_s key) (gethash key metadata)))
+                  ((symbol-function 'codex-ide--session-metadata-put)
+                   (lambda (_s key value) (puthash key value metadata)))
+                  ((symbol-function 'codex-ide-session-thread-id) (lambda (_) "policy-id"))
+                  ((symbol-function 'codex-ide-session-process) (lambda (_) 'process))
+                  ((symbol-function 'codex-ide-session-buffer) (lambda (_) buffer))
+                  ((symbol-function 'codex-ide--session-for-thread-id)
+                   (lambda (&rest _) session))
+                  ((symbol-function 'codex-ide--current-input-empty-p)
+                   (lambda (_) (not (memq hazard '(draft draft-buffer)))))
+                  ((symbol-function 'metsatron/idle-compaction--current-state)
+                   (lambda () (if (eq harness 'claude)
+                                  (gethash "policy-channel" metsatron/claude-idle-compact--sessions)
+                                (gethash metsatron/codex-idle-compact--metadata-key metadata))))
+                  ((symbol-function 'metsatron/claude-idle-compact--snapshot)
+                   (lambda (_) `((channel . "policy-channel") (session_id . "policy-id")
+                                 (model . ,model)
+                                 (current_input_context_tokens .
+                                  ,(pcase hazard ('unknown-tokens nil)
+                                     ('below-threshold 69999) (_ 70000))))))
+                  ((symbol-function 'metsatron/claude-idle-compact--vterm-draft-present-p)
+                   (lambda ()
+                     (when (eq hazard 'draft-buffer)
+                       (should (eq (current-buffer) buffer)))
+                     (memq hazard '(draft draft-buffer))))
+                  ((symbol-function 'process-live-p) (lambda (_) t))
+                  ((symbol-function 'get-buffer-process) (lambda (_) 'process))
+                  ((symbol-function 'derived-mode-p) (lambda (&rest _) t))
+                  ((symbol-function 'metsatron/idle-compaction--now) (lambda () now))
+                  ((symbol-function 'file-executable-p) (lambda (_) t))
+                  ((symbol-function 'file-readable-p) (lambda (_) t))
+                  ((symbol-function 'call-process)
+                   (lambda (&rest args)
+                     (push args calls) (insert payload) (goto-char (point-min)) 0))
+                  ((symbol-function 'run-at-time)
+                   (lambda (delay &rest _) (push delay delays) 'timer))
+                  ((symbol-function 'timerp) (lambda (_) nil))
+                  ((symbol-function 'claude-code-ide--terminal-send-string)
+                   (lambda (_) (cl-incf requests)))
+                  ((symbol-function 'claude-code-ide--terminal-send-return) (lambda () nil))
+                  ((symbol-function 'codex-ide--request-async)
+                   (lambda (&rest _) (cl-incf requests))))
+          ;; Explicit owning-client endpoint binding is optional on old source.
+          (when (fboundp 'metsatron/idle-compaction-set-session-endpoint)
+            (metsatron/idle-compaction-set-session-endpoint
+             (if (eq harness 'claude) "anthropic" "openai") endpoint))
+          (if (eq harness 'claude)
+              (metsatron/claude-idle-compact--arm state)
+            (metsatron/codex-idle-compact--arm session))
+          (let ((armed-delay (car delays)))
+            (setq delays nil calls nil)
+            ;; A launch flag or raw response from an earlier model is not current.
+            (setq state (if (eq harness 'claude)
+                            (gethash "policy-channel" metsatron/claude-idle-compact--sessions)
+                          (gethash metsatron/codex-idle-compact--metadata-key metadata)))
+            (setq state (plist-put state :raw-model "foreign-model"))
+            (pcase hazard
+              ('model-change (setq model "new-current-model")
+                             (puthash :model-name model metadata))
+              ('missing-model (setq model nil) (puthash :model-name nil metadata))
+              ('unknown-tokens
+               (setq state (plist-put state :current-context-tokens nil)))
+              ('below-threshold
+               (setq state (plist-put state :current-context-tokens 69999)))
+              ('active (setq state (plist-put state :status "active")))
+              ('owner-change
+               (setq state (plist-put state :cache-policy-endpoint
+                                      '(:provider "foreign" :endpoint-id "foreign"
+                                        :owner-id "foreign" :connection process))))
+              ('connection-change
+               (setq state (plist-put state
+                                      (if (eq harness 'claude) :process :connection)
+                                      'replaced-process))))
+            (setq state (plist-put state :timer nil))
+            (if (eq harness 'claude)
+                (puthash "policy-channel" state metsatron/claude-idle-compact--sessions)
+              (puthash metsatron/codex-idle-compact--metadata-key state metadata))
+            (when action-payload (setq payload action-payload))
+            (if automatic
+                (if (eq harness 'claude)
+                    (metsatron/claude-idle-compact--timer-fired
+                     "policy-channel" "policy-id" completion
+                     (plist-get state :timer-generation))
+                  (metsatron/codex-idle-compact--timer-fired
+                   session "policy-id" completion (plist-get state :timer-generation)))
+              (metsatron/idle-compaction-trigger-current))
+            (list :requests requests :calls (nreverse calls) :armed-delay armed-delay
+                  :delays delays)))
+      (metsatron/idle-test--kill-buffer buffer))))
+
+(ert-deftest metsatron/cache-policy-action-refreshes-current-model-and-endpoint ()
+  "Public actions resolve session identity rather than cached/raw model identity."
+  (dolist (harness '(claude codex))
+    (let* ((result (metsatron/idle-test--policy-action
+                    harness "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":300,\"cache_expires_seconds\":900}"
+                    nil nil nil nil nil 'model-change))
+           (args (car (plist-get result :calls))))
+      (should (= (plist-get result :requests) 1))
+      (should args)
+      (should (equal (cadr (member "--model" args)) "new-current-model"))
+      (should (equal (cadr (member "--endpoint" args)) "fixture-endpoint"))
+      (should-not (member "--allow-observed" args)))))
+
+(ert-deftest metsatron/cache-policy-malformed-and-observed-retain-fallback ()
+  "Malformed decisions cannot supply timer values to either public consumer."
+  (dolist (harness '(claude codex))
+    (dolist (payload '("{}" "[]" "null" "42" "[300,900]"
+                       "{\"mode\":\"observed\",\"confidence\":\"observed\",\"compact_before_seconds\":1,\"cache_expires_seconds\":900}"
+                       "{\"mode\":\"measured\",\"confidence\":\"observed\",\"compact_before_seconds\":1,\"cache_expires_seconds\":900}"
+                       "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":0,\"cache_expires_seconds\":900}"
+                       "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":-1,\"cache_expires_seconds\":900}"
+                       "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":\"300\",\"cache_expires_seconds\":900}"
+                       "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":true,\"cache_expires_seconds\":900}"
+                       "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":300,\"cache_expires_seconds\":300}"
+                       "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":900,\"cache_expires_seconds\":300}"
+                       "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":300,\"cache_expires_seconds\":1e999}"
+                       "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":300}"
+                       "{bad-json}"))
+      (let ((result (metsatron/idle-test--policy-action harness payload)))
+        (should (= (plist-get result :armed-delay)
+                   (if (eq harness 'claude) 3300 1620)))))))
+
+(ert-deftest metsatron/cache-policy-public-action-skips-freshly-cold-cache ()
+  "A formerly warm cached decision cannot authorize an action after fresh expiry."
+  (dolist (harness '(claude codex))
+    (let ((result (metsatron/idle-test--policy-action
+                   harness "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":300,\"cache_expires_seconds\":900}"
+                   nil nil nil nil
+                   "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":100,\"cache_expires_seconds\":200}")))
+      (should (= (plist-get result :requests) 0)))))
+
+(ert-deftest metsatron/cache-policy-timer-rearms-at-later-fresh-deadline ()
+  "A fresh later deadline schedules only the remaining delay and submits nothing."
+  (dolist (harness '(claude codex))
+    (let ((result (metsatron/idle-test--policy-action
+                   harness "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":300,\"cache_expires_seconds\":900}"
+                   nil 500 nil t
+                   "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":1000,\"cache_expires_seconds\":1200}")))
+      (should (= (plist-get result :requests) 0))
+      (should (equal (plist-get result :delays) '(500)))
+      (should (= (length (plist-get result :calls)) 1)))))
+
+(ert-deftest metsatron/cache-policy-stale-evidence-rearms-declared-fallback ()
+  "Fallback after measured evidence disappears never inherits the old timers."
+  (dolist (harness '(claude codex))
+    (let ((result (metsatron/idle-test--policy-action
+                   harness "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":300,\"cache_expires_seconds\":900}"
+                   nil 500 nil t "{}")))
+      (should (= (plist-get result :requests) 0))
+      (should (equal (plist-get result :delays)
+                     (list (- (if (eq harness 'claude) 3300 1620) 500)))))))
+
+(ert-deftest metsatron/cache-policy-unknown-identity-keeps-fallback ()
+  "Unknown models/endpoints never resolve generic-provider evidence."
+  (dolist (harness '(claude codex))
+    (dolist (identity '(("" "fixture-endpoint") ("current-model" "")))
+      (let ((result (metsatron/idle-test--policy-action
+                     harness "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":100,\"cache_expires_seconds\":200}"
+                     (car identity) 500 (cadr identity))))
+        (should-not (plist-get result :calls))
+        (should (= (plist-get result :armed-delay)
+                   (if (eq harness 'claude) 3300 1620)))))))
+
+(ert-deftest metsatron/cache-policy-public-action-preserves-safety-gates ()
+  "Supported timing never overrides unknown tokens, input or owner safety."
+  (dolist (harness '(claude codex))
+    (dolist (hazard '(unknown-tokens below-threshold draft draft-buffer active connection-change))
+      (let ((result (metsatron/idle-test--policy-action
+                     harness "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":300,\"cache_expires_seconds\":900}"
+                     nil nil nil nil nil hazard)))
+        (should (= (plist-get result :requests) 0))))))
+
+(ert-deftest metsatron/cache-policy-lost-identity-rearms-without-foreign-evidence ()
+  "Endpoint-owner drift or a missing current model selects the declared fallback."
+  (dolist (harness '(claude codex))
+    (dolist (hazard '(owner-change missing-model))
+      (let ((result (metsatron/idle-test--policy-action
+                     harness "{\"mode\":\"measured\",\"confidence\":\"supported\",\"compact_before_seconds\":300,\"cache_expires_seconds\":900}"
+                     nil 500 nil t nil hazard)))
+        (should-not (plist-get result :calls))
+        (should (= (plist-get result :requests) 0))
+        (should (equal (plist-get result :delays)
+                       (list (- (if (eq harness 'claude) 3300 1620) 500))))))))

@@ -420,7 +420,7 @@ Add more manifests as needed, for example =audio.scm= or =media.scm=. Keep them 
 
 * Agent profiles — per-agent Guix lane (rule 22 Category B)
 
-Per-agent Guix profiles for =agent-<tool>= users (see =agents.org= §Agent User
+Per-agent Guix profiles for =agent-<tool>= users (see =agents-users.org= §Agent User
 Bootstrap). The shared store is the multi-user mechanism: agents get their own
 profiles built from manifests here, using the *human's channel-pinned guix from
 the store* (never the =/usr/local/bin/guix= fossil — its testimony is unreliable,

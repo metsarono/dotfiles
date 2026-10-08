@@ -154,6 +154,7 @@ Root sources are namespaced by family, and every module stays under a 100 KB bud
 - [[file:agents-hermes.org][agents-hermes]] -- Native Hermes plugins for hooks and safety enforcement
 - [[file:agents-skills-helmcortex.org][agents-skills-helmcortex]] -- HelmCortex-facing skills — session logs, pvox, nexus, prompt-golf, logseq, metacortex, virtual-habitat, sandcastle
 - [[file:agents.org][agents]] -- Shared agent doctrine emitted to AGENTS.md, CLAUDE.md, and the global ~/.claude/CLAUDE.md
+- [[file:agents-users.org][agents-users]] -- Per-agent Unix users (rule 22, Category B/C): law, uid map, seal, bootstrap scripts, CLI lanes, fleet check and provisioning
 - [[file:package-guix-habitat.org][package-guix-habitat]] -- Sanctuary and room Guix profile manifests plus local package definitions for habitat guests
 - [[file:helmcortex-shims.org][helmcortex-shims]] -- Local bash shims for HelmCortex FORGE tools, so PATH lookup never touches NFS
 - [[file:helmcortex-skills-mirror.org][helmcortex-skills-mirror]] -- Sparse, partial git mirror of the HelmCortex skill sources, pulled from the hub on a timer
@@ -175,6 +176,7 @@ Root sources are namespaced by family, and every module stays under a 100 KB bud
 - [[file:sanctuary-retropie.org][sanctuary-retropie]] -- RetroPie config
 - [[file:agents-bots.org][agents-bots]] -- Telegram bot integrations for all AI agents — inventory, status, and multi-machine management
 - [[file:agents-bots-honey.org][agents-bots-honey]] -- honey/ overlay for Honey (beelink) as the metsatron account: honey-opus/sonnet/haiku launchers, Telegram preflight, OpenRC service template, boundary law
+- [[file:agents-bots-opencode-openrc.org][agents-bots-opencode-openrc]] -- OpenRC bodies, installer and Honey instances for an agent user's OpenCode server and its Telegram bot (Possum)
 - [[file:submodules.org][submodules]] -- Canonical ownership and update policy for git submodules
 - [[file:mux.org][mux]] -- Terminal multiplexers — tmux, Zellij, and the herdr session tool
 - [[file:agents-claude.org][agents-claude]] -- Legacy Claude plugin management, superseded by agents-hooks.org

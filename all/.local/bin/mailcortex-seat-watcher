@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import fcntl
 import ipaddress
 import json
@@ -43,12 +44,14 @@ class WatcherError(Exception):
     pass
 
 
-class HermesSessionNotFoundError(WatcherError):
-    """The named Hermes session disappeared between idle proof and chat."""
+class PromptNotAdmittedError(WatcherError):
+    """An exact negative ACK proving that a conditional prompt did not run."""
 
-    def __init__(self, session: str):
-        self.session = session
-        super().__init__(f"Hermes session not found: {session}")
+    transport = "Prompt"
+
+    def __init__(self, reason: str):
+        self.reason = reason if reason == "busy" else "transport_unavailable"
+        super().__init__(f"{self.transport} prompt not admitted: {self.reason}")
 
 
 def load_registry(path: Path, host: str) -> dict:
@@ -73,8 +76,8 @@ def load_registry(path: Path, host: str) -> dict:
             "host", "mailbox", "harness", "transport", "rate_limit_seconds",
         } | {
             "herdr": {"herdr_session", "herdr_target"},
-            "hermes": {"hermes_url", "hermes_api_key_file", "hermes_session", "hermes_session_key"},
-            "nanobot": {"nanobot_url", "nanobot_api_token_file", "nanobot_session"},
+            "hermes": {"hermes_url", "hermes_api_key_file", "hermes_target"},
+            "nanobot": {"nanobot_url", "nanobot_api_token_file", "nanobot_target"},
             "ductor": {"ductor_config"},
             "deepseek": {"deepseek_url", "deepseek_cookie_file", "deepseek_session"},
         }[transport]
@@ -96,15 +99,30 @@ def load_registry(path: Path, host: str) -> dict:
             if record["harness"] != "hermes":
                 raise WatcherError("seat registry ownership or transport mismatch")
             if not all(isinstance(record[key], str) and record[key] and len(record[key]) <= limit
-                       for key, limit in (("hermes_url", 512), ("hermes_api_key_file", 512),
-                                          ("hermes_session", 256), ("hermes_session_key", 256))):
+                       for key, limit in (("hermes_url", 512), ("hermes_api_key_file", 512))):
+                raise WatcherError("invalid Hermes target")
+            target = record["hermes_target"]
+            if (not isinstance(target, dict)
+                    or set(target) != {"mode", "session_key"}
+                    or target.get("mode") != "gateway_platform_session"
+                    or not isinstance(target.get("session_key"), str)
+                    or not 1 <= len(target["session_key"]) <= 512
+                    or ":telegram:" not in target["session_key"]):
                 raise WatcherError("invalid Hermes target")
         elif transport == "nanobot":
             if record["harness"] != "nanobot":
                 raise WatcherError("seat registry ownership or transport mismatch")
             if not all(isinstance(record[key], str) and record[key] and len(record[key]) <= limit
-                       for key, limit in (("nanobot_url", 512), ("nanobot_api_token_file", 512),
-                                          ("nanobot_session", 256))):
+                       for key, limit in (("nanobot_url", 512), ("nanobot_api_token_file", 512))):
+                raise WatcherError("invalid Nano target")
+            target = record["nanobot_target"]
+            if (not isinstance(target, dict)
+                    or set(target) != {"mode", "channel", "chat_id", "session_key"}
+                    or target.get("mode") != "telegram_gateway"
+                    or target.get("channel") != "telegram"
+                    or not isinstance(target.get("chat_id"), str)
+                    or not 1 <= len(target["chat_id"]) <= 256
+                    or target.get("session_key") != f"telegram:{target['chat_id']}"):
                 raise WatcherError("invalid Nano target")
         elif transport == "ductor":
             if record["harness"] != "ductor" or not isinstance(record["ductor_config"], str) or not record["ductor_config"] or len(record["ductor_config"]) > 512:
@@ -112,7 +130,9 @@ def load_registry(path: Path, host: str) -> dict:
         elif record["harness"] != "deepseek":
             raise WatcherError("seat registry ownership or transport mismatch")
         else:
-            if not all(isinstance(record[key], str) and record[key] and len(record[key]) <= 512 for key in ("deepseek_url", "deepseek_cookie_file", "deepseek_session")):
+            if (not all(isinstance(record[key], str) and record[key] and len(record[key]) <= 512
+                        for key in ("deepseek_url", "deepseek_cookie_file", "deepseek_session"))
+                    or not record["deepseek_session"].startswith("telegram-")):
                 raise WatcherError("invalid DeepSeek target")
         if not isinstance(record["rate_limit_seconds"], (int, float)) or record["rate_limit_seconds"] < 0 or record["rate_limit_seconds"] > 86400:
             raise WatcherError("invalid rate limit")
@@ -153,6 +173,10 @@ def wake_prompt(record: dict, path: Path, mailback_error: str | None = None) -> 
         return preamble + "\nOpen the mailbox now with: /inbox"
     if record["transport"] in {"hermes", "nanobot"}:
         return preamble + "\nOpen the mailbox now and follow the mail's instructions."
+    if record["transport"] == "ductor":
+        return (preamble + f"Subject: {message.get('Subject', '')}\n\n{body.strip()}\n\n"
+                "MailCortex has delivered the message content here. Use your harness tools "
+                "to handle it and reply. This wake lane does not publish an automatic mail reply.")
     footer = (
         "No mail-back is possible for this message. The return path failed "
         f"validation: {mailback_error}\n"
@@ -194,7 +218,12 @@ def reply_context(record: dict, path: Path) -> dict:
             raise WatcherError("unsafe mail-back destination")
     return {"sender": addresses["To"], "to": addresses["From"],
             "subject": str(message.get("Subject", "")),
-            "request_id": uuid.uuid4().hex, "session": record["deepseek_session"]}
+            "request_id": deepseek_request_id(), "session": record["deepseek_session"]}
+
+
+def deepseek_request_id() -> str:
+    """Mint the dsh-visible namespace claimed by the Telegram bridge seam."""
+    return "mailcortex-" + uuid.uuid4().hex
 
 
 SNAPSHOT_JS = r"""
@@ -375,28 +404,32 @@ def loopback_url(value: str, label: str) -> str:
     return value.rstrip("/")
 
 
-class HermesAdapter:
-    """Authenticated Hermes gateway adapter with fail-closed idle checks."""
+class ConditionalHTTPAdapter:
+    """Shared private-token JSON transport for conditional gateway admissions."""
 
-    def __init__(self, opener=urllib.request.urlopen):
-        self.opener = opener
+    token_field = ""
+    label = "Gateway"
+
+    def __init__(self, opener=None):
+        self.opener = opener or urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), NoRedirect()).open
 
     def _request(self, record: dict, method: str, path: str,
-                 payload: dict | None = None, timeout: int = 15) -> tuple[int, dict]:
-        base = loopback_url(record["hermes_url"], "Hermes URL")
-        key_path = private_file(Path(record["hermes_api_key_file"]).expanduser(), "Hermes API key")
-        api_key = key_path.read_text(encoding="utf-8").strip()
-        if not api_key:
-            raise WatcherError("Hermes API key is empty")
-        headers = {"Authorization": f"Bearer {api_key}"}
+                 payload: dict | None = None) -> tuple[int, dict]:
+        base = loopback_url(record[self.url_field], f"{self.label} URL")
+        token_path = private_file(Path(record[self.token_field]).expanduser(),
+                                  f"{self.label} API token")
+        token = token_path.read_text(encoding="utf-8").strip()
+        if not token:
+            raise WatcherError(f"{self.label} API token is empty")
+        headers = {"Authorization": f"Bearer {token}"}
         data = None
         if payload is not None:
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
-            headers["X-Hermes-Session-Key"] = record["hermes_session_key"]
         request = urllib.request.Request(f"{base}{path}", data=data, headers=headers, method=method)
         try:
-            with self.opener(request, timeout=timeout) as response:
+            with self.opener(request, timeout=15) as response:
                 status = int(response.status)
                 value = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
@@ -404,102 +437,226 @@ class HermesAdapter:
                 value = json.loads(error.read().decode("utf-8"))
             except (OSError, json.JSONDecodeError, TypeError, ValueError):
                 value = {}
-            if not isinstance(value, dict):
-                value = {}
-            return int(error.code), value
+            return int(error.code), value if isinstance(value, dict) else {}
         except (OSError, urllib.error.URLError, json.JSONDecodeError, TypeError, ValueError) as error:
-            raise WatcherError("Hermes API request failed") from error
+            raise WatcherError(f"{self.label} admission request failed") from error
         if not isinstance(value, dict):
-            raise WatcherError("Hermes API response is invalid")
+            raise WatcherError(f"{self.label} admission response is invalid")
         return status, value
 
-    @staticmethod
-    def _error_code(value: dict) -> str | None:
-        if isinstance(value.get("code"), str):
-            return value["code"]
-        error = value.get("error")
-        return error.get("code") if isinstance(error, dict) and isinstance(error.get("code"), str) else None
 
-    def ensure_session(self, record: dict, session: str) -> None:
-        """Create the named session if absent; the API's 409 proves it already exists."""
-        status, value = self._request(
-            record, "POST", "/api/sessions", {"id": session, "title": session})
-        if status == 201 and value.get("object") == "hermes.session":
-            return
-        if status == 409 and self._error_code(value) == "session_exists":
-            return
-        raise WatcherError("Hermes session ensure was not accepted")
+class HermesNotAdmittedError(PromptNotAdmittedError):
+    transport = "Hermes"
+
+
+class HermesAdapter(ConditionalHTTPAdapter):
+    """Conditional admission into a durable Hermes Telegram-platform session."""
+
+    PROTOCOL = "hermes.gateway_idle_prompt.v1"
+    label = "Hermes"
+    url_field = "hermes_url"
+    token_field = "hermes_api_key_file"
 
     def resolve_idle_pane(self, record: dict) -> str | None:
-        status, value = self._request(record, "GET", "/health/detailed")
-        if status != 200:
-            raise WatcherError("Hermes detailed health request failed")
-        try:
-            gateway_busy = value["gateway_busy"]
-            active_agents = value["active_agents"]
-            active_runs = value["api_server"]["active_runs"]
-            gateway_state = value["gateway_state"]
-        except (KeyError, TypeError) as error:
-            raise WatcherError("Hermes detailed health has no authoritative busy state") from error
-        if (type(gateway_busy) is not bool or type(active_agents) is not int
-                or type(active_runs) is not int or not isinstance(gateway_state, str)):
-            raise WatcherError("Hermes detailed health has no authoritative busy state")
-        if active_agents < 0 or active_runs < 0:
-            raise WatcherError("Hermes detailed health has invalid busy counters")
-        if gateway_state in {"draining", "stopping", "stopped"}:
-            raise WatcherError("Hermes gateway is not accepting idle delivery")
-        if gateway_busy or active_agents != 0 or active_runs != 0:
-            return None
-        return record["hermes_session"]
+        target = record["hermes_target"]["session_key"]
+        status, value = self._request(record, "POST", "/api/gateway/idle-prompt/status",
+                                      {"protocol": self.PROTOCOL, "session_key": target})
+        if (status != 200 or value.get("protocol") != self.PROTOCOL
+                or value.get("known") is not True or type(value.get("busy")) is not bool
+                or value.get("session_key") != target):
+            raise WatcherError("Hermes conditional idle authority is unavailable")
+        return None if value["busy"] else target
 
     def deliver(self, record: dict, target: str, prompt: str) -> None:
-        # scan_seats calls deliver only after resolve_idle_pane has proved the gateway idle.
-        self.ensure_session(record, target)
-        session = urllib.parse.quote(target, safe="")
+        if record["hermes_target"]["session_key"] != target:
+            raise HermesNotAdmittedError("unavailable")
+        request_id = uuid.uuid4().hex
         status, value = self._request(
-            record, "POST", f"/api/sessions/{session}/chat", {"message": prompt}, timeout=60)
-        if status == 404:
-            raise HermesSessionNotFoundError(target)
-        accepted = (
-            status == 200 and value.get("object") == "hermes.session.chat.completion"
-        ) or (
-            status == 202 and value.get("object") == "hermes.session.chat.queued"
-            and isinstance(value.get("delivery_id"), str) and bool(value["delivery_id"])
-        )
-        if not accepted:
-            raise WatcherError("Hermes delivery was not accepted")
+            record, "POST", "/api/gateway/idle-prompt",
+            {"protocol": self.PROTOCOL, "request_id": request_id,
+             "session_key": target, "text": prompt})
+        exact = (value.get("protocol") == self.PROTOCOL
+                 and value.get("request_id") == request_id
+                 and value.get("session_key") == target)
+        if exact and value.get("status") in {"busy", "unavailable", "invalid"}:
+            raise HermesNotAdmittedError(value["status"])
+        if not (exact and status == 202 and value.get("status") == "accepted"):
+            raise WatcherError("Hermes admission outcome is unknown")
 
 
-class NanobotAdapter:
-    """Nano has no safe atomic idle-plus-prompt interface yet."""
+class NanobotNotAdmittedError(PromptNotAdmittedError):
+    transport = "Nano"
 
-    def _refuse(self) -> None:
-        raise WatcherError(
-            "Nano transport has no safe idle-proven prompt admission: /health is readiness-only "
-            "and its authenticated WebSocket message path has no conditional idle claim"
-        )
+
+class NanobotAdapter(ConditionalHTTPAdapter):
+    """Atomic admission into Nano's Telegram-facing gateway session."""
+
+    PROTOCOL = "nanobot.idle_prompt.v1"
+    label = "Nano"
+    url_field = "nanobot_url"
+    token_field = "nanobot_api_token_file"
 
     def resolve_idle_pane(self, record: dict) -> str | None:
-        self._refuse()
+        target = record["nanobot_target"]["session_key"]
+        query = urllib.parse.urlencode({"session_key": target})
+        status, value = self._request(
+            record, "GET", f"/mailcortex/idle-prompt/status?{query}")
+        if (status != 200 or value.get("protocol") != self.PROTOCOL
+                or value.get("known") is not True or type(value.get("busy")) is not bool
+                or value.get("session_key") != target):
+            raise WatcherError("Nano conditional idle authority is unavailable")
+        return None if value["busy"] else target
 
     def deliver(self, record: dict, target: str, prompt: str) -> None:
-        self._refuse()
+        shape = record["nanobot_target"]
+        if shape["session_key"] != target:
+            raise NanobotNotAdmittedError("unavailable")
+        request_id = uuid.uuid4().hex
+        status, value = self._request(
+            record, "POST", "/mailcortex/idle-prompt",
+            {"protocol": self.PROTOCOL, "request_id": request_id,
+             "target": shape, "text": prompt})
+        exact = (value.get("protocol") == self.PROTOCOL
+                 and value.get("request_id") == request_id
+                 and value.get("session_key") == target)
+        if exact and value.get("status") in {"busy", "unavailable", "invalid"}:
+            raise NanobotNotAdmittedError(value["status"])
+        if not (exact and status == 202 and value.get("status") == "accepted"):
+            raise WatcherError("Nano admission outcome is unknown")
+
+
+class DuctorNotAdmittedError(PromptNotAdmittedError):
+    transport = "Ductor"
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
 
 
 class DuctorAdapter:
-    """Ductor's /busy observation is not an atomic prompt admission."""
+    """Private config, authoritative observation, then encrypted conditional admission."""
+
+    PROTOCOL = "ductor.idle_prompt.v2"
+
+    def __init__(self, opener=None, client=None):
+        self.opener = opener or urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), NoRedirect()).open
+        self.client = client or self._deliver_idle
+
+    @staticmethod
+    def settings(record: dict) -> dict:
+        try:
+            path = private_file(Path(record["ductor_config"]).expanduser(), "Ductor configuration")
+            config = json.loads(path.read_text(encoding="utf-8"))
+            api = config["api"]
+            if api.get("enabled") is not True or not isinstance(api.get("token"), str) or not api["token"].strip():
+                raise WatcherError("Ductor API is not privately enabled with a token")
+            host, port = api["host"], api["port"]
+            if not isinstance(host, str) or type(port) is not int or not 0 <= port <= 65535:
+                raise WatcherError("Ductor API address is invalid")
+            try:
+                valid_host = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                valid_host = host.lower() == "localhost"
+            if not valid_host:
+                raise WatcherError("Ductor API is not a loopback address")
+            address = f"[{host}]" if ":" in host else host
+            base = loopback_url(f"http://{address}:{port}", "Ductor API")
+            chat_id = api.get("chat_id")
+            if chat_id in (None, 0) and type(chat_id) is not bool:
+                users = config.get("allowed_user_ids", [])
+                chat_id = users[0] if isinstance(users, list) and users else None
+            if type(chat_id) is not int or chat_id <= 0:
+                raise WatcherError("Ductor default session identity is not provisioned")
+            return {"url": base, "token": api["token"], "session_key": f"tg:{chat_id}"}
+        except WatcherError:
+            raise
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            raise WatcherError("Ductor private configuration is unavailable or invalid") from error
 
     def resolve_idle_pane(self, record: dict) -> str | None:
-        raise WatcherError(
-            "Ductor transport has no safe conditional busy-status injection point; /busy is observational "
-            "and the encrypted WebSocket prompt path cannot claim idle atomically; refusing delivery"
-        )
+        settings = self.settings(record)
+        # Reuse Ductor's declared client dependencies; no ad-hoc installation.
+        try:
+            import aiohttp
+            from ductor_bot.api.crypto import E2ESession
+        except ImportError as error:
+            raise WatcherError("Ductor declared API client dependencies are unavailable") from error
+        request = urllib.request.Request(settings["url"] + "/busy",
+            headers={"Authorization": "Bearer " + settings["token"]}, method="GET")
+        try:
+            with self.opener(request, timeout=15) as response:
+                if response.status != 200:
+                    raise WatcherError("Ductor busy authority refused")
+                value = json.loads(response.read().decode("utf-8"))
+        except WatcherError:
+            raise
+        except (OSError, ValueError, urllib.error.URLError) as error:
+            raise WatcherError("Ductor busy authority unavailable") from error
+        if (not isinstance(value, dict) or value.get("known") is not True
+                or type(value.get("busy")) is not bool
+                or value.get("session_key") != settings["session_key"]
+                or value.get("idle_prompt") != self.PROTOCOL):
+            raise WatcherError("Ductor conditional admission capability or exact idle authority is unavailable")
+        return None if value["busy"] else settings["session_key"]
+
+    async def _deliver_idle(self, settings: dict, target: str, prompt: str) -> None:
+        sent = False
+        try:
+            import aiohttp
+            from ductor_bot.api.crypto import E2ESession
+            request_id = uuid.uuid4().hex
+            e2e = E2ESession()
+            # aiohttp's WebSocket handshake follows HTTP redirects by default and
+            # does not expose allow_redirects. Reject before a redirected connection
+            # could receive the private token in its plaintext authentication frame.
+            trace = aiohttp.TraceConfig()
+            async def refuse_redirect(session, context, params):
+                raise DuctorNotAdmittedError("unavailable")
+            trace.on_request_redirect.append(refuse_redirect)
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15),
+                                             trust_env=False, trace_configs=[trace]) as session:
+                async with session.ws_connect(settings["url"].replace("http://", "ws://", 1) + "/ws") as ws:
+                    await ws.send_json({"type": "auth", "token": settings["token"], "e2e_pk": e2e.local_pk_b64})
+                    auth = await ws.receive_json(timeout=15)
+                    if (not isinstance(auth, dict) or auth.get("type") != "auth_ok"
+                            or type(auth.get("chat_id")) is not int
+                            or f"tg:{auth['chat_id']}" != target or auth.get("channel_id") is not None):
+                        raise DuctorNotAdmittedError("unavailable")
+                    e2e.set_remote_key(auth["e2e_pk"])
+                    frame = e2e.encrypt({"type": "idle_message", "request_id": request_id,
+                        "session_key": target, "text": prompt, "mirror_to_telegram": True})
+                    # A failed send may have reached the server. From here onward
+                    # only an exact encrypted negative ACK proves safe retry.
+                    sent = True
+                    await ws.send_str(frame)
+                    raw = await ws.receive(timeout=15)
+                    if raw.type != aiohttp.WSMsgType.TEXT:
+                        raise WatcherError("Ductor admission outcome is unknown")
+                    ack = e2e.decrypt(raw.data)
+                    if (not isinstance(ack, dict) or ack.get("type") != "idle_admission"
+                            or ack.get("request_id") != request_id or ack.get("session_key") != target):
+                        raise WatcherError("Ductor admission outcome is unknown")
+                    if ack.get("status") in {"busy", "unavailable", "invalid"}:
+                        raise DuctorNotAdmittedError(ack["status"])
+                    if ack.get("status") != "accepted":
+                        raise WatcherError("Ductor admission outcome is unknown")
+        except (DuctorNotAdmittedError, WatcherError):
+            raise
+        except Exception as error:
+            if sent:
+                raise WatcherError("Ductor admission outcome is unknown") from error
+            raise DuctorNotAdmittedError("unavailable") from error
 
     def deliver(self, record: dict, target: str, prompt: str) -> None:
-        raise WatcherError(
-            "Ductor transport has no safe conditional busy-status injection point; /busy is observational "
-            "and the encrypted WebSocket prompt path cannot claim idle atomically; refusing delivery"
-        )
+        try:
+            settings = self.settings(record)
+        except WatcherError as error:
+            raise DuctorNotAdmittedError("unavailable") from error
+        if settings["session_key"] != target:
+            raise DuctorNotAdmittedError("unavailable")
+        asyncio.run(self.client(settings, target, prompt))
 
 
 class DeepSeekAdapter:
@@ -603,7 +760,7 @@ class DeepSeekAdapter:
             "session/prompt",
             {
                 "request": {
-                    "requestId": request_id or uuid.uuid4().hex,
+                    "requestId": request_id or deepseek_request_id(),
                     "sessionId": target,
                     "mode": "queue",
                     "content": [{"type": "text", "text": prompt}],
@@ -756,7 +913,7 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
             try:
                 pane_id = transport_adapter.resolve_idle_pane(record)
             except Exception as error:
-                if record["transport"] != "deepseek":
+                if record["transport"] not in {"deepseek", "ductor", "hermes", "nanobot"}:
                     raise
                 MAILCORTEX.write_wake_receipt(seat, mid, "queued", reason="transport_unavailable",
                                               wake_error=diagnostic(error), wake_updated_at=now)
@@ -770,7 +927,7 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
             mailback_error = None
             request_id = None
             if record["transport"] == "deepseek":
-                request_id = uuid.uuid4().hex
+                request_id = deepseek_request_id()
                 try:
                     context = reply_context(record, path)
                     request_id = context["request_id"]
@@ -788,20 +945,18 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
                                               request_id=request_id)
                 else:
                     transport_adapter.deliver(record, pane_id, wake_prompt(record, path))
-            except HermesSessionNotFoundError as error:
+            except PromptNotAdmittedError as error:
                 MAILCORTEX.write_wake_receipt(
-                    seat, mid, "queued", filename=path.name,
-                    pane_id=pane_id, reason="session_not_found",
-                    wake_error=diagnostic(error), wake_updated_at=now,
-                )
+                    seat, mid, "queued", filename=path.name, pane_id=pane_id,
+                    reason=error.reason, wake_error=diagnostic(error), wake_updated_at=now)
                 report_error(seat, path.name, error)
-                raise
+                continue
             except Exception as error:
                 MAILCORTEX.write_wake_receipt(
                     seat, mid, "delivery_unknown", filename=path.name,
                     pane_id=pane_id, reason="delivery_error", wake_updated_at=now,
                 )
-                if record["transport"] == "deepseek":
+                if record["transport"] in {"deepseek", "ductor", "hermes", "nanobot"}:
                     report_error(seat, path.name, error)
                     continue
                 if isinstance(error, WatcherError):
@@ -821,7 +976,7 @@ def scan_once(registry: dict, adapter: object, now: float | None = None) -> int:
         try:
             count += scan_seats({"seats": {seat: record}}, adapter, now=now)
         except Exception as error:
-            if record.get("transport") != "deepseek":
+            if record.get("transport") not in {"deepseek", "ductor", "hermes", "nanobot"}:
                 raise
             report_error(seat, "scan", error)
     return count

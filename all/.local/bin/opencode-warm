@@ -7,6 +7,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -393,6 +394,41 @@ def result(action: str, **fields: object) -> int:
     return 0
 
 
+def validated_cache_decision(decision: object, provider: str, endpoint: str,
+                             model: str, allow_observed: bool = False) -> dict:
+    """Accept only the resolver's exact identity and ordered integer window."""
+    if not isinstance(decision, dict):
+        raise ValueError("cache-policy-not-object")
+    mode, confidence = decision.get("mode"), decision.get("confidence")
+    if mode == "fallback" and confidence == "fallback":
+        # The caller owns fallback timing; stdout cannot redefine its profile.
+        return decision
+    if not (mode == "measured" and confidence == "supported" or
+            allow_observed and mode == "observed" and confidence == "observed"):
+        raise ValueError("cache-policy-confidence-invalid")
+    def canonical(value: str) -> str:
+        return value.strip().lower().replace("_", "-")
+    expected_provider = canonical(provider)
+    expected_provider = {"openai-codex": "openai",
+                         "openai-codex-oauth": "openai"}.get(expected_provider, expected_provider)
+    expected_endpoint = canonical(endpoint)
+    if expected_provider == "openai" and expected_endpoint in {"openai", "openai-codex", "openai-codex-oauth"}:
+        expected_endpoint = "openai-codex-oauth"
+    expected_model = canonical(model)
+    if expected_provider == "anthropic":
+        expected_model = re.sub(r"-+", "-", re.sub(r"[ .]+", "-", expected_model)).strip("-")
+        if not expected_model.startswith("claude-"):
+            expected_model = "claude-" + expected_model
+    for key, expected in (("provider", expected_provider), ("endpoint_id", expected_endpoint), ("model", expected_model)):
+        if decision.get(key) != expected:
+            raise ValueError("cache-policy-identity-mismatch")
+    compact, expiry = decision.get("compact_before_seconds"), decision.get("cache_expires_seconds")
+    if (type(compact) is not int or type(expiry) is not int or
+            not 0 < compact < expiry or expiry > 2**31 - 1):
+        raise ValueError("cache-policy-window-invalid")
+    return decision
+
+
 def policy_decision(root: pathlib.Path, session_id: str, assistant: dict,
                     observed_at: float, prospective_cache: bool = False) -> dict:
     """Return a validated authority decision or the preserving legacy fallback."""
@@ -423,8 +459,12 @@ def policy_decision(root: pathlib.Path, session_id: str, assistant: dict,
         ttl = float(cache_ttl)
     except ValueError:
         return {"action": "HANDOFF_AND_COMPACT", "mode": "cache-ttl-invalid"}
-    if ttl <= 0:
+    if not math.isfinite(ttl) or ttl <= 0 or ttl > 2**31 - 1:
         return {"action": "HANDOFF_AND_COMPACT", "mode": "cache-ttl-invalid"}
+    # providerID names a configured provider, not its authenticated active
+    # backend route. The owning message/inspection surface exposes no endpoint.
+    # Preserve the caller TTL; never resolve measured timing from that label.
+    cache_decision = {"mode": "fallback", "reason": "endpoint-unknown"}
     handoff = read_json(root / "handoff.json")
     reference = handoff.get("reference") if isinstance(handoff, dict) else None
     if not isinstance(reference, str) or not REFERENCE_RE.fullmatch(reference):
@@ -463,7 +503,7 @@ def policy_decision(root: pathlib.Path, session_id: str, assistant: dict,
     action = response.get("action") if isinstance(response, dict) else None
     if completed.returncode != 0 or response.get("schema") != POLICY_SCHEMA or action not in POLICY_ACTIONS:
         return {"action": "HANDOFF_AND_COMPACT", "mode": "policy-response-invalid"}
-    return response
+    return {**response, "cache_policy": cache_decision}
 
 
 def schedule_wakeup(root: pathlib.Path, session_id: str, owner: dict, policy: dict) -> dict:
@@ -758,6 +798,11 @@ def run(args: argparse.Namespace) -> int:
                 "message_id", "completed_at", "provider_id", "model_id", "context_tokens"
             )):
                 raise CandidateError("session-changed-before-summarize")
+            # Refresh after the exact session/model recheck, at the mutation gate.
+            policy = policy_decision(root, session_id, rechecked, observed_at)
+            if policy["action"] != "HANDOFF_AND_COMPACT":
+                atomic_json(state_path, {**state, "in_flight": False})
+                return result("skipped", reason="continuity-policy-changed-before-summarize", policy=policy)
             try:
                 response_status, _ = api.request(
                     "POST", f"/session/{quote(session_id, safe='')}/summarize",

@@ -26,7 +26,7 @@
 # =~/.ssh=, and the known auth files.
 
 
-# [[file:../../../agents.org::*Script: agent-home-seal (dry-run by default)][Script: agent-home-seal (dry-run by default):1]]
+# [[file:../../../agents-users.org::*Script: agent-home-seal (dry-run by default)][Script: agent-home-seal (dry-run by default):1]]
 # ~/DotCortex/all/.local/bin/agent-home-seal
 # Seal the operator's home against agent users. DRY-RUN unless --apply.
 set -euo pipefail

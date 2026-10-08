@@ -1,0 +1,387 @@
+#+TITLE: OpenCode Telegram bot as OpenRC services
+#+DESCRIPTION: OpenRC bodies, installer and Honey instances for an agent user's OpenCode server and its Telegram bot (Possum)
+#+AUTHOR: Mètsàtron
+#+PROPERTY: header-args :mkdirp yes :comments no
+
+* Why this module exists
+
+Honey's Possum (=agent-opencode=, [[file:agents-bots-honey.org][agents-bots-honey.org]] "Flying Fox and Possum lanes") is two OpenRC services: =honey-opencode-serve= (=opencode serve= on loopback, basic auth) and =honey-opencode-bot= (=@grinev/opencode-telegram-bot=, which talks to that server). Until 2026-10-05 both were hand-written =/etc/init.d= scripts outside DotCortex. This module carries them the way [[file:agents-ductor-seams.org][agents-ductor-seams.org]] carries the Ductor bots: there is one body per kind, the settings live in =/etc/conf.d/<svc>=, and a root installer backs up whatever it replaces and never starts anything.
+
+The Honey conf files reproduce the hand-written scripts exactly: the same commands, user, pid files, logs, working directory, =HOME=, =OPENCODE_TELEGRAM_HOME=, dependency and 30-second socket wait. The only addition is the agent's Guix node =bin=, appended after =~/.local/bin=. So installing them changes nothing that runs until a conf names other binaries (cutover step 3), except that the bot conf turns on the patch guard ("Honey instances" below). The auth file is parsed and never sourced, and a server with no password refuses to start, as before.
+
+The loopback port lives only in the Honey conf files, as =honey-codex='s =ductor_port= does. The bodies carry no port.
+
+* Server body
+#+BEGIN_SRC sh :tangle all/.local/share/dotcortex/opencode-openrc/opencode-serve
+#!/sbin/openrc-run
+# OpenCode API server as an OpenRC service (agents-bots-opencode-openrc.org).
+# Install with opencode-openrc-install; settings in /etc/conf.d/<svc>:
+#   opencode_user       account that runs the server (required)
+#   opencode_port       loopback port (required)
+#   opencode_bin        the opencode binary (default ~/.local/bin/opencode)
+#   opencode_auth_file  OPENCODE_SERVER_USERNAME/PASSWORD file, parsed, never
+#                       sourced (default ~/.config/opencode/server-auth.env)
+#   opencode_path_add   extra PATH entries appended after ~/.local/bin
+#   opencode_description
+
+user_home="$(getent passwd "${opencode_user}" | cut -d: -f6)"
+: "${opencode_bin:=${user_home}/.local/bin/opencode}"
+: "${opencode_auth_file:=${user_home}/.config/opencode/server-auth.env}"
+
+name="${RC_SVCNAME}"
+description="${opencode_description:-OpenCode API server (${opencode_user})}"
+command="${opencode_bin}"
+command_args="serve --hostname 127.0.0.1 --port ${opencode_port}"
+command_user="${opencode_user}:${opencode_user}"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+directory="${user_home}"
+
+export HOME="${user_home}"
+export PATH="${PATH}:${user_home}/.local/bin${opencode_path_add:+:${opencode_path_add}}"
+
+depend() {
+    use net dns
+    after net
+}
+
+# Parse (never source) the auth file; refuse to run an unauthenticated server.
+load_server_auth() {
+    if [ ! -r "$opencode_auth_file" ]; then
+        eerror "missing $opencode_auth_file - refusing to start without OPENCODE_SERVER_PASSWORD"
+        return 1
+    fi
+    OPENCODE_SERVER_USERNAME=$(sed -n 's/^OPENCODE_SERVER_USERNAME=//p' "$opencode_auth_file" | tail -n 1)
+    OPENCODE_SERVER_PASSWORD=$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' "$opencode_auth_file" | tail -n 1)
+    if [ -z "$OPENCODE_SERVER_PASSWORD" ]; then
+        eerror "OPENCODE_SERVER_PASSWORD empty in $opencode_auth_file - refusing to start"
+        return 1
+    fi
+    export OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-opencode}"
+    export OPENCODE_SERVER_PASSWORD
+}
+
+start_pre() {
+    [ -n "${opencode_user}" ] && [ -n "${user_home}" ] && [ -n "${opencode_port}" ] \
+        || { eerror "opencode_user (an existing account) and opencode_port must be set in /etc/conf.d/${RC_SVCNAME}"; return 1; }
+    load_server_auth || return 1
+    checkpath -f -m 0640 -o "${opencode_user}:${opencode_user}" "${output_log}"
+}
+#+END_SRC
+
+* Telegram bot body
+#+BEGIN_SRC sh :tangle all/.local/share/dotcortex/opencode-openrc/opencode-telegram
+#!/sbin/openrc-run
+# OpenCode Telegram bot (@grinev/opencode-telegram-bot) as an OpenRC service
+# (agents-bots-opencode-openrc.org). Install with opencode-openrc-install;
+# settings in /etc/conf.d/<svc>:
+#   opencode_user        account that runs the bot (required)
+#   opencode_serve_svc   the server's service name (required)
+#   opencode_port        the server's loopback port (required)
+#   opencode_telegram_bin  (default ~/.local/bin/opencode-telegram)
+#   opencode_telegram_home OPENCODE_TELEGRAM_HOME: .env, settings.json, logs/
+#                          (default ~/.config/opencode-telegram-bot)
+#   opencode_auth_file   shared with the server (default ~/.config/opencode/server-auth.env)
+#   opencode_path_add    extra PATH entries appended after ~/.local/bin
+#   opencode_patch_apply HelmCortex's opencode-telegram-patch-apply; when set,
+#                        the seams are applied as the user before every start
+#                        and a refusal refuses the start (unset: no patching)
+#   opencode_patch_root  HELMCORTEX_ROOT the guard reads its patches from
+#   opencode_description
+
+user_home="$(getent passwd "${opencode_user}" | cut -d: -f6)"
+: "${opencode_telegram_bin:=${user_home}/.local/bin/opencode-telegram}"
+: "${opencode_telegram_home:=${user_home}/.config/opencode-telegram-bot}"
+: "${opencode_auth_file:=${user_home}/.config/opencode/server-auth.env}"
+
+name="${RC_SVCNAME}"
+description="${opencode_description:-OpenCode Telegram bot (${opencode_user})}"
+command="${opencode_telegram_bin}"
+command_args="start --mode installed"
+command_user="${opencode_user}:${opencode_user}"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+directory="${user_home}"
+
+export HOME="${user_home}"
+# Node comes from the agent's own profile (no system node on Honey).
+export PATH="${PATH}:${user_home}/.local/bin${opencode_path_add:+:${opencode_path_add}}"
+# Pin the bot's app home regardless of cwd/XDG.
+export OPENCODE_TELEGRAM_HOME="${opencode_telegram_home}"
+
+depend() {
+    use net dns
+    need "${opencode_serve_svc}"
+    after net "${opencode_serve_svc}"
+}
+
+# Parse (never source) the auth file; process env overrides the bot's .env.
+load_server_auth() {
+    if [ ! -r "$opencode_auth_file" ]; then
+        eerror "missing $opencode_auth_file - bot cannot authenticate to opencode serve"
+        return 1
+    fi
+    OPENCODE_SERVER_USERNAME=$(sed -n 's/^OPENCODE_SERVER_USERNAME=//p' "$opencode_auth_file" | tail -n 1)
+    OPENCODE_SERVER_PASSWORD=$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' "$opencode_auth_file" | tail -n 1)
+    if [ -z "$OPENCODE_SERVER_PASSWORD" ]; then
+        eerror "OPENCODE_SERVER_PASSWORD empty in $opencode_auth_file"
+        return 1
+    fi
+    export OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-opencode}"
+    export OPENCODE_SERVER_PASSWORD
+}
+
+start_pre() {
+    [ -n "${opencode_user}" ] && [ -n "${user_home}" ] && [ -n "${opencode_port}" ] && [ -n "${opencode_serve_svc}" ] \
+        || { eerror "opencode_user, opencode_serve_svc and opencode_port must be set in /etc/conf.d/${RC_SVCNAME}"; return 1; }
+    load_server_auth || return 1
+    checkpath -f -m 0640 -o "${opencode_user}:${opencode_user}" "${output_log}"
+    apply_patches || return 1
+    # `need` orders starts but does not wait for the socket; wait up to 30s.
+    # (openrc-run scripts run under dash, so no /dev/tcp fallback.)
+    _i=0
+    while [ "$_i" -lt 30 ]; do
+        /bin/nc -z -w 1 127.0.0.1 "${opencode_port}" 2>/dev/null && return 0
+        _i=$((_i + 1))
+        sleep 1
+    done
+    ewarn "${opencode_serve_svc} not answering on loopback port ${opencode_port} after 30s; starting anyway"
+}
+
+# The guard, as the bot's user so patched files keep their owner. Its package is
+# the one the launcher belongs to: the prefix is two levels above the bin.
+apply_patches() {
+    [ -n "${opencode_patch_apply}" ] || return 0
+    if [ ! -x "${opencode_patch_apply}" ] || [ ! -d "${opencode_patch_root}" ]; then
+        eerror "opencode_patch_apply or opencode_patch_root missing: ${opencode_patch_apply} ${opencode_patch_root}"
+        return 1
+    fi
+    setpriv --reuid="${opencode_user}" --regid="${opencode_user}" --init-groups \
+        env -i HOME="${user_home}" PATH="${PATH}" HELMCORTEX_ROOT="${opencode_patch_root}" \
+        NPM_CONFIG_PREFIX="$(dirname "$(dirname "${opencode_telegram_bin}")")" \
+        OPENCODE_TELEGRAM_BIN="${opencode_telegram_bin}" \
+        "${opencode_patch_apply}" >>"${output_log}" 2>&1 \
+        || { eerror "opencode-telegram-patch-apply refused; see ${output_log}"; return 1; }
+}
+#+END_SRC
+
+* Installer
+#+BEGIN_SRC bash :tangle all/.local/share/dotcortex/opencode-openrc/opencode-openrc-install :tangle-mode (identity #o755)
+#!/usr/bin/env bash
+# opencode-openrc-install — install an OpenCode server or Telegram bot as an
+# OpenRC service from DotCortex (agents-bots-opencode-openrc.org).
+set -euo pipefail
+
+usage() {
+    cat <<'USAGE'
+Usage: opencode-openrc-install [--dry-run] <svc> serve|telegram <conf-file>
+       opencode-openrc-install -h|--help
+
+Run as root. Installs, from this DotCortex checkout:
+  - the body for the kind (opencode-serve or opencode-telegram) as /etc/init.d/<svc>
+  - <conf-file> as /etc/conf.d/<svc>
+Existing files are backed up next to themselves as <file>.bak-<timestamp>
+before they are replaced. Nothing is started or restarted.
+
+  --dry-run   print what would change; change nothing
+USAGE
+}
+
+DRY=0
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    --dry-run) DRY=1; shift ;;
+esac
+[ $# -eq 3 ] || { usage >&2; exit 2; }
+svc="$1"; kind="$2"; conf="$3"
+case "$svc" in *[!a-z0-9-]*|"") echo "bad service name: $svc" >&2; exit 2 ;; esac
+case "$kind" in serve) body=opencode-serve ;; telegram) body=opencode-telegram ;; *) usage >&2; exit 2 ;; esac
+[ -r "$conf" ] || { echo "conf file not readable: $conf" >&2; exit 2; }
+
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+body="$here/$body"
+[ -r "$body" ] || { echo "missing source: $body" >&2; exit 1; }
+ts="$(date +%Y%m%d-%H%M%S)"
+ETC="${OPENCODE_OPENRC_ETC:-/etc}"   # tests point this at a scratch tree
+
+run() { if [ "$DRY" -eq 1 ]; then echo "would: $*"; else "$@"; fi; }
+place() {  # src dst mode
+    if [ -e "$2" ] && cmp -s "$1" "$2"; then echo "unchanged $2"; return; fi
+    [ -e "$2" ] && run cp -p "$2" "$2.bak-$ts"
+    run install -m "$3" -o root -g root "$1" "$2"
+    [ "$DRY" -eq 1 ] || echo "installed $2"
+}
+
+[ "$DRY" -eq 1 ] || [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+place "$body" "$ETC/init.d/$svc" 0755
+place "$conf" "$ETC/conf.d/$svc" 0644
+#+END_SRC
+
+* Honey instances
+Non-secret settings only. The basic-auth password stays in =agent-opencode='s own =server-auth.env= (0600), and the bot token stays in the bot's =.env=. Cutover step 3 points =opencode_bin= / =opencode_telegram_bin= at =~/.npm-global/bin=. Until then they name today's =~/.local/bin= copies.
+
+*Patches (2026-10-05, Mètsàtron's word).* Possum's bot gets the fleet's seams (Whisper STT, operator STOP, reply recovery and the rest) the way kikin's does: =opencode_patch_apply= names HelmCortex's =opencode-telegram-patch-apply=, which the body runs as =agent-opencode= before every start; a version the guard has no seam set for refuses the start, as on kikin. Honey has no HelmCortex mount, so the guard and its =patches/= tree are a root-owned copy under =/usr/local/share/helm-opencode-telegram/= (HelmCortex's own layout, so =HELMCORTEX_ROOT= points at it). Refresh it whenever HelmCortex lists a new version, before Possum's bot floats to it, as =gille=:
+
+#+BEGIN_EXAMPLE
+t=$(mktemp -d) && rsync -a kikin:HelmCortex/FORGE/bin/opencode-telegram-patch-apply "$t/" \
+  && rsync -a kikin:HelmCortex/FORGE/brain/opencode-telegram/patches "$t/" \
+  && sudo install -D -m 0755 "$t/opencode-telegram-patch-apply" /usr/local/share/helm-opencode-telegram/FORGE/bin/opencode-telegram-patch-apply \
+  && sudo rm -rf /usr/local/share/helm-opencode-telegram/FORGE/brain/opencode-telegram/patches \
+  && sudo mkdir -p /usr/local/share/helm-opencode-telegram/FORGE/brain/opencode-telegram \
+  && sudo cp -r "$t/patches" /usr/local/share/helm-opencode-telegram/FORGE/brain/opencode-telegram/ \
+  && sudo chown -R root:root /usr/local/share/helm-opencode-telegram && rm -rf "$t"
+#+END_EXAMPLE
+
+The Whisper seam reads =STT_API_URL= and =STT_API_PROTOCOL=whisper-server= from the bot's =.env=; on Honey that is =helm-stt= on loopback port 3004.
+
+Install (Mètsàtron's word, root, dry-run first; nothing starts):
+=opencode-openrc-install --dry-run honey-opencode-serve serve conf/honey-opencode-serve= and =opencode-openrc-install --dry-run honey-opencode-bot telegram conf/honey-opencode-bot=, run from =all/.local/share/dotcortex/opencode-openrc/=.
+
+#+BEGIN_SRC sh :tangle all/.local/share/dotcortex/opencode-openrc/conf/honey-opencode-serve
+# Possum's OpenCode server on Honey, as agent-opencode (backend for honey_opencode_bot).
+opencode_description="OpenCode API server (backend for honey_opencode_bot)"
+opencode_user="agent-opencode"
+opencode_port="4096"
+opencode_bin="/home/agent-opencode/.local/bin/opencode"
+opencode_path_add="/home/agent-opencode/.guix-extra-profiles/agent/agent/bin"
+#+END_SRC
+
+#+BEGIN_SRC sh :tangle all/.local/share/dotcortex/opencode-openrc/conf/honey-opencode-bot
+# Possum's Telegram bot on Honey, as agent-opencode.
+opencode_description="OpenCode Telegram bot (honey_opencode_bot) for Metsatron on Honey"
+opencode_user="agent-opencode"
+opencode_serve_svc="honey-opencode-serve"
+opencode_port="4096"
+opencode_telegram_bin="/home/agent-opencode/.local/bin/opencode-telegram"
+opencode_path_add="/home/agent-opencode/.guix-extra-profiles/agent/agent/bin"
+opencode_patch_apply="/usr/local/share/helm-opencode-telegram/FORGE/bin/opencode-telegram-patch-apply"
+opencode_patch_root="/usr/local/share/helm-opencode-telegram"
+#+END_SRC
+
+* Tests
+No root and no OpenRC: each body is sourced under =bash= with stubbed OpenRC helpers. Run: =python3 ~/.local/share/dotcortex/tests/test-opencode-openrc.py=.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-opencode-openrc.py :shebang "#!/usr/bin/env python3"
+"""OpenCode OpenRC bodies and Honey instances (agents-bots-opencode-openrc.org)."""
+from __future__ import annotations
+
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+LANE = Path(__file__).resolve().parents[1] / "opencode-openrc"
+
+STUBS = r"""
+ebegin() { :; }; eend() { return "${1:-0}"; }
+einfo() { echo "INFO $*"; }; eerror() { echo "ERR $*"; }; ewarn() { echo "WARN $*"; }
+checkpath() { echo "CHECKPATH $*"; }
+getent() { [ "$2" = agent-opencode ] && echo "agent-opencode:x:2005:2005::/home/agent-opencode:/bin/bash"; }
+use() { echo "USE $*"; }; need() { echo "NEED $*"; }; after() { echo "AFTER $*"; }
+"""
+
+SHOW = 'echo "CMD=$command|$command_args|$command_user|$pidfile|$output_log|$error_log|$directory|$HOME|$OPENCODE_TELEGRAM_HOME"; echo "PATH=$PATH"'
+
+
+def run(body: str, conf: str, script: str, svc: str) -> subprocess.CompletedProcess[str]:
+    prog = f"{STUBS}\nRC_SVCNAME='{svc}'\nPATH=/usr/bin:/bin\n{conf}\n. '{LANE / body}'\n{script}\n"
+    return subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=30)
+
+
+class OpencodeOpenrcTests(unittest.TestCase):
+    def conf(self, name: str) -> str:
+        return (LANE / "conf" / name).read_text()
+
+    def test_serve_reproduces_the_hand_written_script(self) -> None:
+        out = run("opencode-serve", self.conf("honey-opencode-serve"), SHOW, "honey-opencode-serve")
+        self.assertIn("CMD=/home/agent-opencode/.local/bin/opencode|serve --hostname 127.0.0.1 --port 4096|"
+                      "agent-opencode:agent-opencode|/run/honey-opencode-serve.pid|/var/log/honey-opencode-serve.log|"
+                      "/var/log/honey-opencode-serve.log|/home/agent-opencode|/home/agent-opencode|", out.stdout)
+        self.assertIn("PATH=/usr/bin:/bin:/home/agent-opencode/.local/bin:"
+                      "/home/agent-opencode/.guix-extra-profiles/agent/agent/bin\n", out.stdout)
+
+    def test_bot_reproduces_the_hand_written_script(self) -> None:
+        out = run("opencode-telegram", self.conf("honey-opencode-bot"), SHOW + "; depend", "honey-opencode-bot")
+        self.assertIn("CMD=/home/agent-opencode/.local/bin/opencode-telegram|start --mode installed|"
+                      "agent-opencode:agent-opencode|/run/honey-opencode-bot.pid|/var/log/honey-opencode-bot.log|"
+                      "/var/log/honey-opencode-bot.log|/home/agent-opencode|/home/agent-opencode|"
+                      "/home/agent-opencode/.config/opencode-telegram-bot", out.stdout)
+        self.assertIn("NEED honey-opencode-serve", out.stdout)
+        self.assertIn("AFTER net honey-opencode-serve", out.stdout)
+
+    def test_auth_file_is_parsed_not_sourced_and_password_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = Path(tmp) / "auth.env"
+            marker = Path(tmp) / "sourced"
+            auth.write_text(f"touch {marker}\nOPENCODE_SERVER_USERNAME=u\nOPENCODE_SERVER_PASSWORD=\n")
+            conf = self.conf("honey-opencode-serve") + f"\nopencode_auth_file='{auth}'\n"
+            out = run("opencode-serve", conf, "start_pre; echo RC=$?", "honey-opencode-serve")
+            self.assertIn("RC=1", out.stdout)
+            self.assertIn("OPENCODE_SERVER_PASSWORD empty", out.stdout)
+            self.assertFalse(marker.exists(), "the auth file was sourced")
+            auth.write_text("OPENCODE_SERVER_PASSWORD=pw\n")
+            out = run("opencode-serve", conf, 'start_pre; echo "RC=$? U=$OPENCODE_SERVER_USERNAME"', "honey-opencode-serve")
+            self.assertIn("RC=0 U=opencode", out.stdout)
+
+    def test_missing_settings_are_refused(self) -> None:
+        out = run("opencode-serve", 'opencode_user="agent-opencode"', "start_pre; echo RC=$?", "x")
+        self.assertIn("RC=1", out.stdout)
+        out = run("opencode-telegram", 'opencode_user="agent-opencode"\nopencode_port="1"', "start_pre; echo RC=$?", "x")
+        self.assertIn("RC=1", out.stdout)
+
+    def test_patch_guard_runs_as_the_user_against_the_launchers_package(self) -> None:
+        stub = 'setpriv() { echo "SETPRIV $*"; }\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = Path(tmp) / "FORGE/bin/opencode-telegram-patch-apply"
+            guard.parent.mkdir(parents=True)
+            guard.write_text("#!/bin/sh\n")
+            guard.chmod(0o755)
+            conf = self.conf("honey-opencode-bot") + f"\nopencode_patch_apply='{guard}'\nopencode_patch_root='{tmp}'\n"
+            out = run("opencode-telegram", conf, stub + f'output_log="{tmp}/log"; apply_patches; echo RC=$?; cat "{tmp}/log"',
+                      "honey-opencode-bot")
+            self.assertIn("RC=0", out.stdout)
+            self.assertIn("SETPRIV --reuid=agent-opencode --regid=agent-opencode --init-groups env -i "
+                          f"HOME=/home/agent-opencode", out.stdout)
+            self.assertIn(f"HELMCORTEX_ROOT={tmp} NPM_CONFIG_PREFIX=/home/agent-opencode/.local "
+                          f"OPENCODE_TELEGRAM_BIN=/home/agent-opencode/.local/bin/opencode-telegram {guard}", out.stdout)
+            refuse = 'setpriv() { return 1; }\n'
+            out = run("opencode-telegram", conf, refuse + f'output_log="{tmp}/log"; apply_patches; echo RC=$?',
+                      "honey-opencode-bot")
+            self.assertIn("RC=1", out.stdout)
+            self.assertIn("refused", out.stdout)
+        out = run("opencode-telegram", self.conf("honey-opencode-bot") + "\nopencode_patch_apply=/nonexistent\n",
+                  "apply_patches; echo RC=$?", "honey-opencode-bot")
+        self.assertIn("RC=1", out.stdout)
+
+    def test_patch_guard_is_off_unless_configured(self) -> None:
+        out = run("opencode-telegram", 'opencode_user="agent-opencode"',
+                  'setpriv() { echo CALLED; }; apply_patches; echo RC=$?', "x")
+        self.assertIn("RC=0", out.stdout)
+        self.assertNotIn("CALLED", out.stdout)
+
+    def test_installer_dry_run_changes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            etc = Path(tmp)
+            (etc / "init.d").mkdir()
+            (etc / "conf.d").mkdir()
+            (etc / "init.d/honey-opencode-bot").write_text("old\n")
+            out = subprocess.run(["bash", str(LANE / "opencode-openrc-install"), "--dry-run", "honey-opencode-bot",
+                                  "telegram", str(LANE / "conf/honey-opencode-bot")],
+                                 env={"PATH": "/usr/bin:/bin", "OPENCODE_OPENRC_ETC": tmp},
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertIn(f"would: cp -p {etc}/init.d/honey-opencode-bot", out.stdout)
+            self.assertIn(f"would: install -m 0644 -o root -g root {LANE}/conf/honey-opencode-bot {etc}/conf.d/honey-opencode-bot",
+                          out.stdout)
+            self.assertEqual((etc / "init.d/honey-opencode-bot").read_text(), "old\n")
+            self.assertFalse((etc / "conf.d/honey-opencode-bot").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC

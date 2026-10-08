@@ -113,6 +113,44 @@ refused before delivery. Total raw attachments are capped at 25 MiB. Types are
 guessed from filenames, falling back to =application/octet-stream=. Without
 =--attach= the original single-part wire format is unchanged.
 
+** BBS fleet alerts
+
+=mailcortex bbs alert= extends the existing read-only BBS with a small durable
+system-signal lane. Records live below =~/Mail/.bbs/alerts/= as immutable,
+content-addressed JSON using =mailcortex.bbs-alert.v1=. Every alert has a
+required expiry and one of four levels, in descending display priority:
+
+- =pain=: outage, blocker, or safety condition;
+- =adrenaline=: urgent opportunity with a short window, such as quota that
+  should be used before a verified reset;
+- =notice=: bounded operational information;
+- =calm=: recovery or explicit all-clear.
+
+=scope= is either the whole =fleet= or =squadron:NAME=. A later record may
+name =supersedes=; readers compute expiry and supersession without editing old
+records. =current= returns only active, non-superseded records, highest level
+first, while =list= retains the append-only history.
+
+Posting is bound to the existing private seat registry. The operator adds this
+top-level fragment to =~/.config/mailcortex/seats.json=; every named value must
+also be a canonical key in the registry's existing =seats= object:
+
+#+BEGIN_SRC json :tangle no :comments no
+"bbs_alerts": {
+  "admiral": "YOUR_ADMIRAL_SEAT",
+  "coordinator": "YOUR_COORDINATOR_SEAT",
+  "emitters": ["YOUR_NAMED_EMITTER_SEAT"]
+}
+#+END_SRC
+
+The first deterministic emitter is =mailcortex bbs alert emit-reset=. It reads
+the existing local =ai-usage= Codex cache without refreshing it and posts one
+idempotent =adrenaline= record only when the native signal is at most five
+minutes old, carries an absolute future reset within 90 minutes, and still has
+quota to burn. Missing, stale, fallback, malformed, or ambiguous telemetry is a
+loud refusal and never creates an alert. No schedule or live post is installed
+by this source.
+
 #+BEGIN_SRC python :tangle all/.local/bin/mailcortex :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
 """MailCortex filesystem-native mail transport."""
 
@@ -133,7 +171,7 @@ from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
 from email.utils import format_datetime, make_msgid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -147,6 +185,13 @@ PERMISSION_AUTH_RE = re.compile(
     r"^seat=[a-z0-9][a-z0-9._-]{0,63};request_id=[a-km-z]{5};"
     r"behavior=(?:allow|deny);timestamp=[0-9]{1,12};hmac=[0-9a-f]{64}$"
 )
+COMPONENT_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+ALERT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+ALERT_SCHEMA = "mailcortex.bbs-alert.v1"
+ALERT_LEVELS = ("pain", "adrenaline", "notice", "calm")
+ALERT_LEVEL_RANK = {level: rank for rank, level in enumerate(ALERT_LEVELS)}
+ALERT_SIGNAL_MAX_AGE_SECONDS = 300
+ALERT_RESET_WINDOW_MINUTES = 90
 NAMESPACE = {
     None: "consorts",
     "consort": "consorts",
@@ -174,6 +219,440 @@ def mail_root() -> Path:
 
 def runtime_root() -> Path:
     return Path(os.environ.get("MAILCORTEX_RUNTIME", "~/.local/state/mailcortex")).expanduser()
+
+
+def alert_root() -> Path:
+    configured = os.environ.get("MAILCORTEX_ALERT_ROOT")
+    return Path(configured).expanduser() if configured else mail_root() / ".bbs" / "alerts"
+
+
+def seat_registry_path() -> Path:
+    return Path(
+        os.environ.get("MAILCORTEX_SEAT_REGISTRY", "~/.config/mailcortex/seats.json")
+    ).expanduser()
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_alert_timestamp(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not value or len(value) > 40:
+        raise MailCortexError(f"alert {label} must be an RFC 3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise MailCortexError(f"alert {label} must be an RFC 3339 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise MailCortexError(f"alert {label} must include a UTC offset")
+    return parsed.astimezone(timezone.utc)
+
+
+def format_alert_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def alert_text(value: object, label: str, limit: int) -> str:
+    if not isinstance(value, str):
+        raise MailCortexError(f"alert {label} must be text")
+    normalized = value.strip()
+    if not normalized or len(normalized) > limit or any(ord(char) < 32 for char in normalized):
+        raise MailCortexError(f"alert {label} must be one line of 1-{limit} characters")
+    return normalized
+
+
+def parse_alert_scope(value: object) -> dict[str, str]:
+    if not isinstance(value, str):
+        raise MailCortexError("alert scope must be fleet or squadron:NAME")
+    if value == "fleet":
+        return {"kind": "fleet"}
+    if value.startswith("squadron:") and COMPONENT_RE.fullmatch(value.removeprefix("squadron:")):
+        return {"kind": "squadron", "name": value.removeprefix("squadron:")}
+    raise MailCortexError("alert scope must be fleet or squadron:NAME")
+
+
+def validate_alert_scope(value: object) -> dict[str, str]:
+    if value == {"kind": "fleet"}:
+        return {"kind": "fleet"}
+    if (
+        isinstance(value, dict)
+        and set(value) == {"kind", "name"}
+        and value.get("kind") == "squadron"
+        and isinstance(value.get("name"), str)
+        and COMPONENT_RE.fullmatch(value["name"])
+    ):
+        return {"kind": "squadron", "name": value["name"]}
+    raise MailCortexError("alert scope is invalid")
+
+
+def alert_identifier(payload: dict[str, object]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_alert(value: object, path: Path | None = None) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise MailCortexError("alert record is not an object")
+    required = {
+        "schema", "id", "level", "title", "body", "issued_by", "issued_at",
+        "expires_at", "scope",
+    }
+    optional = {"supersedes"}
+    if not required <= set(value) or set(value) - required - optional:
+        raise MailCortexError("alert record fields are not exact")
+    if value.get("schema") != ALERT_SCHEMA:
+        raise MailCortexError("alert schema is invalid")
+    alert_id = value.get("id")
+    if not isinstance(alert_id, str) or not ALERT_ID_RE.fullmatch(alert_id):
+        raise MailCortexError("alert id is invalid")
+    if path is not None and path.name != f"{alert_id}.json":
+        raise MailCortexError("alert filename does not match its id")
+    level = value.get("level")
+    if level not in ALERT_LEVELS:
+        raise MailCortexError("alert level is invalid")
+    title = alert_text(value.get("title"), "title", 120)
+    body = alert_text(value.get("body"), "body", 500)
+    issued_by = value.get("issued_by")
+    if not isinstance(issued_by, str) or not COMPONENT_RE.fullmatch(issued_by):
+        raise MailCortexError("alert issued_by is invalid")
+    issued = parse_alert_timestamp(value.get("issued_at"), "issued_at")
+    expires = parse_alert_timestamp(value.get("expires_at"), "expires_at")
+    if expires <= issued:
+        raise MailCortexError("alert expires_at must be later than issued_at")
+    scope = validate_alert_scope(value.get("scope"))
+    supersedes = value.get("supersedes")
+    if supersedes is not None:
+        if not isinstance(supersedes, str) or not ALERT_ID_RE.fullmatch(supersedes):
+            raise MailCortexError("alert supersedes id is invalid")
+        if supersedes == alert_id:
+            raise MailCortexError("alert cannot supersede itself")
+    payload: dict[str, object] = {
+        "schema": ALERT_SCHEMA,
+        "level": level,
+        "title": title,
+        "body": body,
+        "issued_by": issued_by,
+        "issued_at": format_alert_timestamp(issued),
+        "expires_at": format_alert_timestamp(expires),
+        "scope": scope,
+    }
+    if supersedes is not None:
+        payload["supersedes"] = supersedes
+    if alert_identifier(payload) != alert_id:
+        raise MailCortexError("alert id does not match immutable content")
+    return payload | {"id": alert_id}
+
+
+def load_alerts() -> list[dict[str, object]]:
+    directory = alert_root()
+    if not directory.exists():
+        return []
+    if directory.is_symlink() or not directory.is_dir():
+        raise MailCortexError("alert root is not a safe directory")
+    alerts = []
+    for path in sorted(directory.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            raise MailCortexError("alert record is not a regular file")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise MailCortexError(f"alert record is unreadable: {path.name}") from error
+        alerts.append(validate_alert(value, path))
+    by_id = {str(alert["id"]): alert for alert in alerts}
+    if len(by_id) != len(alerts):
+        raise MailCortexError("duplicate alert id")
+    for alert in alerts:
+        target = alert.get("supersedes")
+        if target is None:
+            continue
+        if target not in by_id:
+            raise MailCortexError("alert supersedes an unknown id")
+        if parse_alert_timestamp(alert["issued_at"], "issued_at") < parse_alert_timestamp(
+            by_id[str(target)]["issued_at"], "issued_at"
+        ):
+            raise MailCortexError("alert supersedes a later record")
+        seen = {str(alert["id"])}
+        cursor: object = target
+        while cursor is not None:
+            if cursor in seen:
+                raise MailCortexError("alert supersession cycle")
+            seen.add(str(cursor))
+            cursor = by_id[str(cursor)].get("supersedes")
+    return alerts
+
+
+def alert_authorized(issued_by: str) -> None:
+    path = seat_registry_path()
+    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+        raise MailCortexError("private seat registry is unavailable")
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise MailCortexError("private seat registry is unreadable") from error
+    if not isinstance(registry, dict) or registry.get("schema") != "mailcortex.seats.v1":
+        raise MailCortexError("private seat registry is invalid")
+    host = registry.get("host")
+    seats = registry.get("seats")
+    policy = registry.get("bbs_alerts")
+    if not isinstance(host, str) or not host or not isinstance(seats, dict) or not isinstance(policy, dict):
+        raise MailCortexError("BBS alert authorization is not provisioned")
+    if set(policy) != {"admiral", "coordinator", "emitters"}:
+        raise MailCortexError("BBS alert authorization fields are not exact")
+    admiral = policy.get("admiral")
+    coordinator = policy.get("coordinator")
+    emitters = policy.get("emitters")
+    if (
+        not isinstance(admiral, str)
+        or not isinstance(coordinator, str)
+        or not isinstance(emitters, list)
+        or not all(isinstance(item, str) for item in emitters)
+    ):
+        raise MailCortexError("BBS alert authorization is invalid")
+    identities = [admiral, coordinator, *emitters]
+    if len(set(identities)) != len(identities) or not all(COMPONENT_RE.fullmatch(item) for item in identities):
+        raise MailCortexError("BBS alert authorization identities are invalid")
+    if issued_by not in identities:
+        raise MailCortexError(f"seat is not authorised to post BBS alerts: {issued_by}")
+    for identity in identities:
+        record = seats.get(identity)
+        if (
+            not isinstance(record, dict)
+            or record.get("host") != host
+            or record.get("mailbox") not in {f"seats/{identity}", f"consorts/{identity}"}
+        ):
+            raise MailCortexError("BBS alert authorization is not bound to canonical seats")
+
+
+def write_alert(payload: dict[str, object]) -> str:
+    alert_id = alert_identifier(payload)
+    record = payload | {"id": alert_id}
+    encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    directory = alert_root()
+    parent = directory.parent
+    for component in (parent, directory):
+        if component.exists() and component.is_symlink():
+            raise MailCortexError(f"refusing symlink in BBS alert path: {component}")
+    old_umask = os.umask(0o077)
+    try:
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.mkdir(mode=0o700, exist_ok=True)
+    finally:
+        os.umask(old_umask)
+    if not parent.is_dir() or not directory.is_dir():
+        raise MailCortexError("BBS alert path is unsafe")
+    path = directory / f"{alert_id}.json"
+    if path.exists():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != encoded:
+            raise MailCortexError("BBS alert id collision")
+        return alert_id
+    temporary = directory / f".{alert_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.is_symlink() or not path.is_file() or path.read_bytes() != encoded:
+                raise MailCortexError("BBS alert id collision")
+        fsync_directory(directory)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return alert_id
+
+
+def make_alert(
+    *, level: str, title: str, body: str, issued_by: str, issued_at: datetime,
+    expires_at: datetime, scope: dict[str, str], supersedes: str | None = None,
+) -> dict[str, object]:
+    if level not in ALERT_LEVELS:
+        raise MailCortexError("alert level is invalid")
+    normalized_issued = parse_alert_timestamp(
+        format_alert_timestamp(issued_at), "issued_at"
+    )
+    normalized_expires = parse_alert_timestamp(
+        format_alert_timestamp(expires_at), "expires_at"
+    )
+    if normalized_expires <= normalized_issued:
+        raise MailCortexError("alert expires_at must be later than issued_at")
+    payload: dict[str, object] = {
+        "schema": ALERT_SCHEMA,
+        "level": level,
+        "title": alert_text(title, "title", 120),
+        "body": alert_text(body, "body", 500),
+        "issued_by": issued_by,
+        "issued_at": format_alert_timestamp(normalized_issued),
+        "expires_at": format_alert_timestamp(normalized_expires),
+        "scope": scope,
+    }
+    if supersedes is not None:
+        if not ALERT_ID_RE.fullmatch(supersedes):
+            raise MailCortexError("alert supersedes id is invalid")
+        payload["supersedes"] = supersedes
+    return payload
+
+
+def post_bbs_alert(args: argparse.Namespace) -> int:
+    alert_authorized(args.issued_by)
+    now = utc_now()
+    expires = parse_alert_timestamp(args.expires_at, "expires_at")
+    if expires <= now:
+        raise MailCortexError("alert expires_at must be in the future")
+    alerts = load_alerts()
+    by_id = {str(alert["id"]): alert for alert in alerts}
+    if args.supersedes:
+        if args.supersedes not in by_id:
+            raise MailCortexError("alert supersedes an unknown id")
+        if now < parse_alert_timestamp(by_id[args.supersedes]["issued_at"], "issued_at"):
+            raise MailCortexError("alert cannot supersede a later record")
+    alert_id = write_alert(make_alert(
+        level=args.level,
+        title=args.title,
+        body=args.body,
+        issued_by=args.issued_by,
+        issued_at=now,
+        expires_at=expires,
+        scope=parse_alert_scope(args.scope),
+        supersedes=args.supersedes,
+    ))
+    print(alert_id)
+    return 0
+
+
+def alert_scope_text(scope: object) -> str:
+    validated = validate_alert_scope(scope)
+    return "fleet" if validated["kind"] == "fleet" else f"squadron:{validated['name']}"
+
+
+def output_alerts(alerts: list[dict[str, object]], as_json: bool) -> int:
+    if as_json:
+        print(json.dumps(alerts, sort_keys=True, separators=(",", ":")))
+        return 0
+    for alert in alerts:
+        print(
+            f"{str(alert['level']).upper():<10} "
+            f"[{alert_scope_text(alert['scope'])}] {alert['title']} — {alert['body']} "
+            f"(until {alert['expires_at']}) [{str(alert['id'])[:12]}]"
+        )
+    return 0
+
+
+def list_bbs_alerts(args: argparse.Namespace) -> int:
+    alerts = sorted(
+        load_alerts(),
+        key=lambda alert: (parse_alert_timestamp(alert["issued_at"], "issued_at"), str(alert["id"])),
+        reverse=True,
+    )
+    return output_alerts(alerts, args.json)
+
+
+def current_alerts(now: datetime | None = None) -> list[dict[str, object]]:
+    observed = now or utc_now()
+    alerts = load_alerts()
+    superseded = {
+        str(alert["supersedes"])
+        for alert in alerts
+        if alert.get("supersedes") is not None
+        and parse_alert_timestamp(alert["issued_at"], "issued_at") <= observed
+    }
+    current = [
+        alert for alert in alerts
+        if parse_alert_timestamp(alert["issued_at"], "issued_at") <= observed
+        < parse_alert_timestamp(alert["expires_at"], "expires_at")
+        and str(alert["id"]) not in superseded
+    ]
+    return sorted(
+        current,
+        key=lambda alert: (
+            ALERT_LEVEL_RANK[str(alert["level"])],
+            -parse_alert_timestamp(alert["issued_at"], "issued_at").timestamp(),
+            str(alert["id"]),
+        ),
+    )
+
+
+def show_current_bbs_alerts(args: argparse.Namespace) -> int:
+    return output_alerts(current_alerts(), args.json)
+
+
+def codex_reset_signal(path: Path, now: datetime) -> tuple[datetime, datetime, int]:
+    diagnostic = "trustworthy Codex quota signal unavailable"
+    if path.is_symlink() or not path.is_file():
+        raise MailCortexError(diagnostic + ": cache is absent or unsafe")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise MailCortexError(diagnostic + ": cache is unreadable") from error
+    if not isinstance(document, dict) or not isinstance(document.get("ts"), (int, float)):
+        raise MailCortexError(diagnostic + ": observation time is absent")
+    try:
+        observed = datetime.fromtimestamp(float(document["ts"]), tz=timezone.utc)
+    except (OSError, OverflowError, ValueError) as error:
+        raise MailCortexError(diagnostic + ": observation time is invalid") from error
+    age = (now - observed).total_seconds()
+    if age < -60 or age > ALERT_SIGNAL_MAX_AGE_SECONDS:
+        raise MailCortexError(diagnostic + ": cache is stale")
+    result = document.get("result")
+    if (
+        not isinstance(result, dict)
+        or result.get("provider") != "codex"
+        or result.get("state") != "ok"
+        or result.get("source") != "codex-native"
+        or result.get("stale") is True
+    ):
+        raise MailCortexError(diagnostic + ": provider state is not authoritative")
+    raw = result.get("raw")
+    if (
+        not isinstance(raw, dict)
+        or raw.get("provider") != "codex"
+        or raw.get("source") != "codex-native"
+        or not isinstance(raw.get("usage"), dict)
+        or not isinstance(raw["usage"].get("primary"), dict)
+    ):
+        raise MailCortexError(diagnostic + ": primary window is absent")
+    window = raw["usage"]["primary"]
+    used = window.get("usedPercent")
+    if not isinstance(used, (int, float)) or isinstance(used, bool) or not 0 <= float(used) <= 100:
+        raise MailCortexError(diagnostic + ": remaining quota is invalid")
+    reset = parse_alert_timestamp(window.get("resetsAt"), "reset signal")
+    if reset <= now:
+        raise MailCortexError(diagnostic + ": reset is not in the future")
+    return observed, reset, max(0, int(round(100.0 - float(used))))
+
+
+def emit_reset_alert(args: argparse.Namespace) -> int:
+    alert_authorized(args.issued_by)
+    now = utc_now()
+    cache = Path(
+        os.environ.get("MAILCORTEX_CODEX_USAGE_CACHE", "~/.cache/ai-usage/codex-v2.json")
+    ).expanduser()
+    observed, reset, remaining = codex_reset_signal(cache, now)
+    seconds_until_reset = (reset - now).total_seconds()
+    if seconds_until_reset > args.within_minutes * 60:
+        print("no-alert: Codex reset is not imminent")
+        return 0
+    if remaining <= 0:
+        print("no-alert: no remaining Codex quota to burn")
+        return 0
+    alert_id = write_alert(make_alert(
+        level="adrenaline",
+        title="Codex quota reset imminent",
+        body=(
+            f"{remaining}% remains; reset at {format_alert_timestamp(reset)}. "
+            "Burn the remaining window."
+        ),
+        issued_by=args.issued_by,
+        issued_at=observed,
+        expires_at=reset,
+        scope=parse_alert_scope(args.scope),
+    ))
+    print(alert_id)
+    return 0
 
 
 def atomic_json(path: Path, value: object) -> None:
@@ -482,13 +961,60 @@ def build_parser() -> argparse.ArgumentParser:
     acknowledge.add_argument("message_id")
     acknowledge.add_argument("state", choices=sorted(HANDLING_STATES))
     acknowledge.set_defaults(function=receipt)
+
+    bbs = subparsers.add_parser("bbs", help="read or post BBS records")
+    bbs_commands = bbs.add_subparsers(dest="bbs_command", required=True)
+    alert = bbs_commands.add_parser("alert", help="read or post fleet alerts")
+    alert_commands = alert.add_subparsers(dest="alert_command", required=True)
+
+    alert_post = alert_commands.add_parser("post", help="append one immutable alert")
+    alert_post.add_argument("--issued-by", required=True, type=validate_component)
+    alert_post.add_argument("--level", required=True, choices=ALERT_LEVELS)
+    alert_post.add_argument("--title", required=True)
+    alert_post.add_argument("--body", required=True)
+    alert_post.add_argument("--expires-at", required=True)
+    alert_post.add_argument("--scope", default="fleet")
+    alert_post.add_argument("--supersedes")
+    alert_post.set_defaults(function=post_bbs_alert)
+
+    alert_list = alert_commands.add_parser("list", help="list the immutable alert history")
+    alert_list.add_argument("--json", action="store_true")
+    alert_list.set_defaults(function=list_bbs_alerts)
+
+    alert_current = alert_commands.add_parser(
+        "current", help="show unexpired, non-superseded alerts by priority"
+    )
+    alert_current.add_argument("--json", action="store_true")
+    alert_current.set_defaults(function=show_current_bbs_alerts)
+
+    reset = alert_commands.add_parser(
+        "emit-reset", help="emit an adrenaline alert from a trustworthy Codex quota cache"
+    )
+    reset.add_argument("--issued-by", required=True, type=validate_component)
+    reset.add_argument("--scope", default="fleet")
+    reset.add_argument(
+        "--within-minutes", type=validate_alert_window,
+        default=ALERT_RESET_WINDOW_MINUTES,
+        help=f"emit only when reset is within this window (default: {ALERT_RESET_WINDOW_MINUTES})",
+    )
+    reset.set_defaults(function=emit_reset_alert)
     return parser
 
 
 def validate_component(value: str) -> str:
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", value):
+    if not COMPONENT_RE.fullmatch(value):
         raise argparse.ArgumentTypeError("invalid seat")
     return value
+
+
+def validate_alert_window(value: str) -> int:
+    try:
+        minutes = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("alert window must be an integer") from error
+    if not 1 <= minutes <= 1440:
+        raise argparse.ArgumentTypeError("alert window must be between 1 and 1440 minutes")
+    return minutes
 
 
 def validate_message_id(value: str) -> str:

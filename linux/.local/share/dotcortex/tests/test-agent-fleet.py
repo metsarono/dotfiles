@@ -50,6 +50,13 @@ class AgentFleetTests(unittest.TestCase):
         self.assertIn("COLLISION agent-clash", out.stdout)
         self.assertNotIn("agent-parked", out.stdout, "provision=no agents are not gaps")
 
+    def test_agents_column_narrows_the_host(self) -> None:
+        conf = Path(self.env["AGENT_CLI_CONF"])
+        (conf / "fleet.ssv").write_text(f"# alias hostname reach agents warm\nself {socket.gethostname()} - ghost -\n")
+        out = self.run_tool(CHECK)
+        self.assertIn("MISSING agent-ghost", out.stdout)
+        self.assertNotIn("agent-clash", out.stdout, "an agent the host does not carry is not expected there")
+
     def test_apply_needs_provision(self) -> None:
         self.assertEqual(self.run_tool(CHECK, "--apply").returncode, 2)
 

@@ -15,6 +15,8 @@
 #   ductor_port        DUCTOR_INTERAGENT_PORT (optional; pin it when several
 #                      Ductors share a host, or delegations land in the wrong hub)
 #   ductor_log_group   group that may read the log (default: ductor_group)
+#   ductor_path_add    extra PATH entries appended after ~/.local/bin and
+#                      ~/.npm-global/bin (e.g. the agent's Guix node profile)
 #   ductor_seams       seam directory holding ductor-seam-apply, readable by
 #                      ductor_user (default /usr/local/share/dotcortex/ductor-seams)
 #   ductor_umask       default 027
@@ -41,7 +43,7 @@ umask="${ductor_umask}"
 export HOME="${user_home}"
 export DUCTOR_HOME="${ductor_home}"
 [ -n "${ductor_port}" ] && export DUCTOR_INTERAGENT_PORT="${ductor_port}"
-export PATH="${PATH}:${user_home}/.local/bin:${user_home}/.npm-global/bin"
+export PATH="${PATH}:${user_home}/.local/bin:${user_home}/.npm-global/bin${ductor_path_add:+:${ductor_path_add}}"
 
 depend() {
     # `use`, never `need`: Devuan's OpenRC has no hard `net` service.

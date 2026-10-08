@@ -2,7 +2,7 @@
 # Script: agent-tool-bootstrap (dry-run by default)
 
 
-# [[file:../../../agents.org::*Script: agent-tool-bootstrap (dry-run by default)][Script: agent-tool-bootstrap (dry-run by default):1]]
+# [[file:../../../agents-users.org::*Script: agent-tool-bootstrap (dry-run by default)][Script: agent-tool-bootstrap (dry-run by default):1]]
 # ~/DotCortex/all/.local/bin/agent-tool-bootstrap
 # Prepares per-agent toolchain layout: npm prefix, pipx home, local bin, PATH.
 # Installs NO packages — package installation goes through manifests later.

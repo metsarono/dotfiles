@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
@@ -19,7 +22,28 @@ class MailCortexTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.base = Path(self.temporary.name)
         self.root = self.base / "Mail"
-        self.env = os.environ | {"MAILCORTEX_ROOT": str(self.root)}
+        self.registry = self.base / "seats.json"
+        seats = {
+            name: {"host": "fixture-host", "mailbox": f"seats/{name}"}
+            for name in ("leader", "coordinator", "quota-monitor", "outsider")
+        }
+        self.registry.write_text(json.dumps({
+            "schema": "mailcortex.seats.v1",
+            "host": "fixture-host",
+            "seats": seats,
+            "bbs_alerts": {
+                "admiral": "leader",
+                "coordinator": "coordinator",
+                "emitters": ["quota-monitor"],
+            },
+        }))
+        self.registry.chmod(0o600)
+        self.usage_cache = self.base / "codex-v2.json"
+        self.env = os.environ | {
+            "MAILCORTEX_ROOT": str(self.root),
+            "MAILCORTEX_SEAT_REGISTRY": str(self.registry),
+            "MAILCORTEX_CODEX_USAGE_CACHE": str(self.usage_cache),
+        }
         self.address = "reader@node-b.helm"
         self.maildir = self.root / "consorts/reader"
         for leaf in ("tmp", "new", "cur"):
@@ -36,6 +60,48 @@ class MailCortexTests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def post_alert(
+        self,
+        level: str,
+        title: str,
+        *,
+        body: str = "fixture body",
+        expires_at: str = "2999-01-01T00:00:00Z",
+        issued_by: str = "coordinator",
+        scope: str = "fleet",
+        supersedes: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        args = [
+            "bbs", "alert", "post", "--issued-by", issued_by,
+            "--level", level, "--title", title, "--body", body,
+            "--expires-at", expires_at, "--scope", scope,
+        ]
+        if supersedes:
+            args.extend(("--supersedes", supersedes))
+        return self.run_command(*args)
+
+    def write_alert_fixture(self, **changes: object) -> dict[str, object]:
+        alert: dict[str, object] = {
+            "schema": "mailcortex.bbs-alert.v1",
+            "level": "notice",
+            "title": "Fixture alert",
+            "body": "fixture body",
+            "issued_by": "coordinator",
+            "issued_at": "1999-01-01T00:00:00Z",
+            "expires_at": "2000-01-01T00:00:00Z",
+            "scope": {"kind": "fleet"},
+        }
+        alert.update(changes)
+        encoded = json.dumps(alert, sort_keys=True, separators=(",", ":")).encode()
+        alert_id = hashlib.sha256(encoded).hexdigest()
+        alert["id"] = alert_id
+        directory = self.root / ".bbs/alerts"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{alert_id}.json").write_text(
+            json.dumps(alert, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        return alert
 
     def test_help_is_side_effect_free(self) -> None:
         empty_root = self.base / "absent"
@@ -201,6 +267,128 @@ class MailCortexTests(unittest.TestCase):
         self.assertEqual(missing.returncode, 2)
         traversal = self.run_command("read", self.address, "../message")
         self.assertEqual(traversal.returncode, 2)
+
+    def test_bbs_alert_schema_enum_and_required_expiry(self) -> None:
+        posted = self.post_alert("pain", "Transport failed", scope="squadron:forge")
+        self.assertEqual(posted.returncode, 0, posted.stderr)
+        files = list((self.root / ".bbs/alerts").glob("*.json"))
+        self.assertEqual(len(files), 1)
+        alert = json.loads(files[0].read_text())
+        self.assertEqual(alert, {
+            "body": "fixture body",
+            "expires_at": "2999-01-01T00:00:00Z",
+            "id": posted.stdout.strip(),
+            "issued_at": alert["issued_at"],
+            "issued_by": "coordinator",
+            "level": "pain",
+            "schema": "mailcortex.bbs-alert.v1",
+            "scope": {"kind": "squadron", "name": "forge"},
+            "title": "Transport failed",
+        })
+        invalid = self.post_alert("emergency", "Unknown level")
+        self.assertEqual(invalid.returncode, 2)
+        missing_expiry = self.run_command(
+            "bbs", "alert", "post", "--issued-by", "coordinator",
+            "--level", "notice", "--title", "Missing", "--body", "expiry",
+        )
+        self.assertEqual(missing_expiry.returncode, 2)
+        self.assertEqual(len(list((self.root / ".bbs/alerts").glob("*.json"))), 1)
+
+    def test_bbs_alert_unauthorised_posts_are_refused(self) -> None:
+        for seat in ("outsider", "unknown"):
+            with self.subTest(seat=seat):
+                result = self.post_alert("notice", "Refused", issued_by=seat)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("not authorised", result.stderr)
+        self.assertFalse((self.root / ".bbs/alerts").exists())
+
+    def test_bbs_alert_current_orders_levels_and_omits_expired(self) -> None:
+        for level in ("calm", "notice", "pain", "adrenaline"):
+            result = self.post_alert(level, level.title())
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.write_alert_fixture(level="pain", title="Old pain")
+        current = self.run_command("bbs", "alert", "current", "--json")
+        self.assertEqual(current.returncode, 0, current.stderr)
+        alerts = json.loads(current.stdout)
+        self.assertEqual([item["level"] for item in alerts],
+                         ["pain", "adrenaline", "notice", "calm"])
+        compact = self.run_command("bbs", "alert", "current")
+        self.assertEqual(compact.returncode, 0, compact.stderr)
+        self.assertEqual(len(compact.stdout.splitlines()), 4)
+        self.assertNotIn("Old pain", compact.stdout)
+
+    def test_bbs_alert_supersession_is_computed_without_mutation(self) -> None:
+        original = self.post_alert("notice", "First state")
+        self.assertEqual(original.returncode, 0, original.stderr)
+        original_id = original.stdout.strip()
+        original_path = self.root / ".bbs/alerts" / f"{original_id}.json"
+        original_bytes = original_path.read_bytes()
+        replacement = self.post_alert(
+            "calm", "All clear", body="recovered", supersedes=original_id
+        )
+        self.assertEqual(replacement.returncode, 0, replacement.stderr)
+        current = json.loads(self.run_command("bbs", "alert", "current", "--json").stdout)
+        self.assertEqual([item["title"] for item in current], ["All clear"])
+        self.assertEqual(original_path.read_bytes(), original_bytes)
+        listed = json.loads(self.run_command("bbs", "alert", "list", "--json").stdout)
+        self.assertEqual(len(listed), 2)
+
+        future = self.write_alert_fixture(
+            title="Future state", issued_at="2998-01-01T00:00:00Z",
+            expires_at="2999-01-01T00:00:00Z",
+        )
+        refused = self.post_alert(
+            "calm", "Impossible all clear", supersedes=str(future["id"])
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("later record", refused.stderr)
+        self.assertEqual(len(list((self.root / ".bbs/alerts").glob("*.json"))), 3)
+
+    def test_reset_emitter_refuses_untrustworthy_signal_without_posting(self) -> None:
+        result = self.run_command(
+            "bbs", "alert", "emit-reset", "--issued-by", "quota-monitor"
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("trustworthy Codex quota signal unavailable", result.stderr)
+        self.assertFalse((self.root / ".bbs/alerts").exists())
+
+        self.usage_cache.write_text(json.dumps({
+            "ts": 1,
+            "result": {"provider": "codex", "state": "ok", "raw": {}},
+        }))
+        result = self.run_command(
+            "bbs", "alert", "emit-reset", "--issued-by", "quota-monitor"
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.root / ".bbs/alerts").exists())
+
+    def test_reset_emitter_posts_once_from_fresh_absolute_quota_signal(self) -> None:
+        observed = datetime.now(timezone.utc).replace(microsecond=0)
+        reset = observed + timedelta(minutes=45)
+        self.usage_cache.write_text(json.dumps({
+            "ts": observed.timestamp(),
+            "result": {
+                "provider": "codex", "state": "ok", "source": "codex-native",
+                "raw": {"provider": "codex", "source": "codex-native",
+                        "usage": {"primary": {
+                    "usedPercent": 35, "resetsAt": reset.isoformat(),
+                }}},
+            },
+            "backoff_until": 0,
+            "backoff_step": 0,
+        }))
+        args = ("bbs", "alert", "emit-reset", "--issued-by", "quota-monitor")
+        first = self.run_command(*args)
+        second = self.run_command(*args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(first.stdout, second.stdout)
+        files = list((self.root / ".bbs/alerts").glob("*.json"))
+        self.assertEqual(len(files), 1)
+        alert = json.loads(files[0].read_text())
+        self.assertEqual(alert["level"], "adrenaline")
+        self.assertEqual(alert["expires_at"], reset.isoformat().replace("+00:00", "Z"))
+        self.assertIn("65% remains", alert["body"])
 
 
 if __name__ == "__main__":

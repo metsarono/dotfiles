@@ -1,0 +1,253 @@
+--- a/nanobot/agent/loop.py
++++ b/nanobot/agent/loop.py
+@@ -1388,7 +1388,66 @@
+         """
+         self._preserve_inflight_turns_on_shutdown = True
+
+-    async def _dispatch(self, msg: InboundMessage) -> None:
++    @staticmethod
++    def _idle_prompt_lock_claimable(lock: asyncio.Lock) -> bool:
++        """True only for asyncio's no-suspension uncontended acquire path."""
++        return (type(lock) is asyncio.Lock and not lock.locked()
++                and not any(not waiter.cancelled()
++                            for waiter in (getattr(lock, "_waiters", None) or ())))
++
++    def idle_prompt_busy(self, session_key: str) -> bool | None:
++        """Fail-closed global-idle authority for conditional external admission."""
++        if not self._running or not isinstance(session_key, str) or not session_key:
++            return None
++        active = any(not task.done() for tasks in self._active_tasks.values() for task in tasks)
++        background = any(not task.done() for task in self._background_tasks)
++        deferred = any(queue for queue in self._deferred_automation_turns.values())
++        locks = list(self._session_locks.values())
++        gate = self._concurrency_gate
++        gate_busy = bool(gate is not None and (
++            gate.locked() or any(not waiter.cancelled()
++                                 for waiter in (getattr(gate, "_waiters", None) or ()))))
++        return bool(self.bus.inbound_size or self._pending_queues or active or background
++                    or deferred or gate_busy
++                    or any(not self._idle_prompt_lock_claimable(lock) for lock in locks))
++
++    async def try_admit_idle_message(self, msg: InboundMessage) -> str:
++        """Atomically reserve the real dispatch lock, then run one routed turn."""
++        session_key = self._effective_session_key(msg)
++        busy = self.idle_prompt_busy(session_key)
++        if busy is None:
++            return "unavailable"
++        if busy:
++            return "busy"
++        lock = self._get_session_lock(session_key)
++        if not self._idle_prompt_lock_claimable(lock):
++            return "busy"
++        # asyncio.Lock's uncontended acquire path does not suspend. There is no
++        # admission gap between the authoritative check and this reservation.
++        await lock.acquire()
++
++        async def run_admitted() -> None:
++            if msg.is_user_input:
++                await self.runtime_event_publisher.user_input_accepted(msg, session_key)
++            await self._dispatch(msg, _admitted_lock=lock)
++
++        try:
++            task = asyncio.create_task(run_admitted())
++        except BaseException:
++            lock.release()
++            raise
++
++        def settled(done: asyncio.Task[Any]) -> None:
++            if lock.locked():
++                lock.release()
++
++        task.add_done_callback(settled)
++        self._track_active_task(session_key, task)
++        return "accepted"
++
++    async def _dispatch(
++        self, msg: InboundMessage, *, _admitted_lock: asyncio.Lock | None = None,
++    ) -> None:
+         """Process a message: per-session serial, cross-session concurrent."""
+         session_key = self._effective_session_key(msg)
+         if session_key != msg.session_key:
+@@ -1409,13 +1468,16 @@
+                     recovery_admission.unregister_recovery_task(session_key, current_task)
+                 return
+         lock = self._get_session_lock(session_key)
++        if _admitted_lock is not None and _admitted_lock is not lock:
++            raise RuntimeError("idle admission lock does not match the routed session")
++        lock_context = nullcontext() if _admitted_lock is lock else lock
+         gate = self._concurrency_gate or nullcontext()
+
+         delivery = self.turn_delivery_factory.unrouted(msg, session_key)
+         pending: asyncio.Queue[InboundMessage] | None = None
+         completion_published = False
+         try:
+-            async with lock, gate:
++            async with lock_context, gate:
+                 # Only the task that owns the session lock may publish the
+                 # active mid-turn injection queue for this session.
+                 pending = asyncio.Queue(maxsize=20)
+--- a/nanobot/cli/gateway_runtime.py
++++ b/nanobot/cli/gateway_runtime.py
+@@ -759,11 +759,70 @@
+         console.print("[yellow]✗[/yellow] Heartbeat: disabled")
+
+     async def _health_server(host: str, health_port: int) -> None:
+-        """Lightweight HTTP health endpoint on the gateway port."""
++        """Health plus authenticated MailCortex conditional admission."""
++        import hmac as _hmac
+         import json as _json
++        import os as _os
++        import re as _re
++        import urllib.parse as _urlparse
++
++        from nanobot.bus.events import InboundMessage
+
+         connection_slots = asyncio.Semaphore(_GATEWAY_HEALTH_MAX_CONNECTIONS)
+
++        def admission_token() -> str | None:
++            raw = _os.environ.get("NANOBOT_MAILCORTEX_TOKEN_FILE", "").strip()
++            if not raw:
++                return None
++            path = Path(raw).expanduser()
++            try:
++                if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
++                    return None
++                token = path.read_text(encoding="utf-8").strip()
++            except OSError:
++                return None
++            return token or None
++
++        async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str], bytes]:
++            head = await asyncio.wait_for(
++                reader.readuntil(b"\r\n\r\n"),
++                timeout=_GATEWAY_HEALTH_READ_TIMEOUT_SECONDS,
++            )
++            if len(head) > 8192:
++                raise ValueError("request headers too large")
++            lines = head[:-4].split(b"\r\n")
++            parts = lines[0].decode("ascii", errors="strict").split(" ")
++            if len(parts) != 3:
++                raise ValueError("invalid request line")
++            headers: dict[str, str] = {}
++            for raw_line in lines[1:]:
++                name, separator, value = raw_line.partition(b":")
++                if not separator:
++                    raise ValueError("invalid request header")
++                headers[name.decode("ascii", errors="strict").strip().lower()] = (
++                    value.decode("utf-8", errors="strict").strip()
++                )
++            length = int(headers.get("content-length", "0"))
++            if length < 0 or length > 16384:
++                raise ValueError("request body too large")
++            body = await asyncio.wait_for(
++                reader.readexactly(length),
++                timeout=_GATEWAY_HEALTH_READ_TIMEOUT_SECONDS,
++            ) if length else b""
++            return parts[0], parts[1], headers, body
++
++        def response_payload(payload: object, status: str) -> tuple[str, str]:
++            return _json.dumps(payload, separators=(",", ":")), status
++
++        def authorized(headers: dict[str, str]) -> bool:
++            token = admission_token()
++            supplied = headers.get("authorization", "")
++            return bool(token and _hmac.compare_digest(supplied, "Bearer " + token))
++
++        def valid_session_key(value: object) -> bool:
++            return (isinstance(value, str) and value.startswith("telegram:")
++                    and 9 < len(value) <= 265)
++
+         async def handle(
+             reader: asyncio.StreamReader,
+             writer: asyncio.StreamWriter,
+@@ -774,22 +833,67 @@
+
+             async with connection_slots:
+                 try:
+-                    data = await asyncio.wait_for(
+-                        reader.read(4096),
+-                        timeout=_GATEWAY_HEALTH_READ_TIMEOUT_SECONDS,
+-                    )
+-                    request_line = data.split(b"\r\n", 1)[0].decode(
+-                        "utf-8", errors="replace",
+-                    )
+-                    method, path = "", ""
+-                    parts = request_line.split(" ")
+-                    if len(parts) >= 2:
+-                        method, path = parts[0], parts[1]
++                    method, raw_path, headers, raw_body = await read_request(reader)
++                    parsed_path = _urlparse.urlsplit(raw_path)
++                    path = parsed_path.path
+
+                     if method == "GET" and path == "/health":
+                         ready, payload = _gateway_readiness_payload(channels)
+-                        body = _json.dumps(payload)
+-                        status = "200 OK" if ready else "503 Service Unavailable"
++                        body, status = response_payload(
++                            payload, "200 OK" if ready else "503 Service Unavailable")
++                        content_type = "application/json"
++                    elif path in {"/mailcortex/idle-prompt/status", "/mailcortex/idle-prompt"} \
++                            and not authorized(headers):
++                        body, status = response_payload(
++                            {"error": "unauthorized"}, "401 Unauthorized")
++                        content_type = "application/json"
++                    elif method == "GET" and path == "/mailcortex/idle-prompt/status":
++                        query = _urlparse.parse_qs(parsed_path.query, strict_parsing=True)
++                        session_key = query.get("session_key", [None])[-1]
++                        busy = agent.idle_prompt_busy(session_key) if valid_session_key(session_key) else None
++                        payload = {"protocol": "nanobot.idle_prompt.v1", "known": busy is not None,
++                                   "busy": True if busy is None else busy,
++                                   "session_key": session_key}
++                        body, status = response_payload(
++                            payload, "200 OK" if busy is not None else "503 Service Unavailable")
++                        content_type = "application/json"
++                    elif method == "POST" and path == "/mailcortex/idle-prompt":
++                        try:
++                            value = _json.loads(raw_body.decode("utf-8"))
++                        except (UnicodeDecodeError, _json.JSONDecodeError):
++                            value = None
++                        target = value.get("target") if isinstance(value, dict) else None
++                        request_id = value.get("request_id") if isinstance(value, dict) else None
++                        session_key = target.get("session_key") if isinstance(target, dict) else None
++                        valid = (isinstance(value, dict)
++                                 and set(value) == {"protocol", "request_id", "target", "text"}
++                                 and value.get("protocol") == "nanobot.idle_prompt.v1"
++                                 and isinstance(request_id, str)
++                                 and _re.fullmatch(r"[0-9a-f]{32}", request_id)
++                                 and isinstance(target, dict)
++                                 and set(target) == {"mode", "channel", "chat_id", "session_key"}
++                                 and target.get("mode") == "telegram_gateway"
++                                 and target.get("channel") == "telegram"
++                                 and isinstance(target.get("chat_id"), str)
++                                 and session_key == f"telegram:{target['chat_id']}"
++                                 and valid_session_key(session_key)
++                                 and isinstance(value.get("text"), str)
++                                 and 0 < len(value["text"].strip()) <= 16000)
++                        if valid:
++                            outcome = await agent.try_admit_idle_message(InboundMessage(
++                                channel="telegram", sender_id="mailcortex",
++                                chat_id=target["chat_id"], content=value["text"],
++                                session_key_override=session_key,
++                            ))
++                        else:
++                            outcome = "invalid"
++                        payload = {"protocol": "nanobot.idle_prompt.v1",
++                                   "request_id": request_id, "session_key": session_key,
++                                   "status": outcome}
++                        code = {"accepted": "202 Accepted", "busy": "409 Conflict",
++                                "unavailable": "503 Service Unavailable",
++                                "invalid": "400 Bad Request"}[outcome]
++                        body, status = response_payload(payload, code)
+                         content_type = "application/json"
+                     else:
+                         body = "Not Found"
+@@ -805,7 +909,8 @@
+                     )
+                     writer.write(resp.encode())
+                     await writer.drain()
+-                except (asyncio.TimeoutError, ConnectionError):
++                except (asyncio.IncompleteReadError, asyncio.LimitOverrunError,
++                        asyncio.TimeoutError, ConnectionError, UnicodeError, ValueError):
+                     pass
+                 finally:
+                     writer.close()

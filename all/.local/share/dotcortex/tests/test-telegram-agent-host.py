@@ -373,39 +373,67 @@ class TelegramAgentHostColdStartTest(unittest.TestCase):
         self.assertIsNone(session.poll(), "an interactive hermes process must survive a gateway stop")
 
     def test_nanobot_wrapper_imports_only_allowlisted_env_keys(self) -> None:
-        self.prepare_nanobot_wrapper()
-        venv_bin = self.home / "HelmCortex/FORGE/brain/nanobot/.venv/bin"
+        workspace = self.home / "HelmCortex/FORGE/brain/nanobot"
+        venv_bin = workspace / ".venv/bin"
         venv_bin.mkdir(parents=True)
+        config_dir = self.home / ".config/nanobot-telegram"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.json").write_text("{}\n", encoding="utf-8")
+        expected = {
+            "NANOBOT_RECALL_MCP_URL": "synthetic recall URL",
+            "NANOBOT_TOOLS__SSRF_WHITELIST": json.dumps(["synthetic SSRF marker"]),
+            "NANOBOT_GATEWAY__HOST": "synthetic host value",
+            "NANOBOT_GATEWAY__PORT": str(len("synthetic port value")),
+        }
         probe = venv_bin / "nanobot"
         probe.write_text(
-            "#!/bin/sh\n"
-            "printf 'url=%s cidr=%s other=%s\\n' \"$NANOBOT_RECALL_MCP_URL\" \"$NANOBOT_TAILNET_CIDR\" \"${NANOBOT_UNLISTED-unset}\"\n",
+            "#!/usr/bin/env python3\n"
+            "import json, os\n"
+            "print(json.dumps({key: value for key, value in os.environ.items() "
+            "if key.startswith('NANOBOT_') and key in "
+            + repr([*expected, "NANOBOT_UNLISTED"]) + "}))\n",
             encoding="utf-8",
         )
         probe.chmod(0o755)
-        env_file = self.home / ".config/nanobot-telegram/env"
-        env_file.write_text(
-            "TELEGRAM_BOT_TOKEN=123456789:abcdefghijklmnopqrstuvwxyzABCDE\n"
-            "NANOBOT_RECALL_MCP_URL=http://recall.example:3004/mcp\n"
-            "NANOBOT_TAILNET_CIDR=192.0.2.0/24\n"
-            "NANOBOT_UNLISTED=leaked\n",
+        (config_dir / "env").write_text(
+            "".join(f"{key}={value}\n" for key, value in expected.items())
+            + "NANOBOT_UNLISTED=synthetic unlisted value\n",
             encoding="utf-8",
         )
-        wrapper = Path(__file__).resolve().parents[3] / "bin" / "nanobot-telegram"
+        wrapper = HERE.parents[3] / "bin/nanobot-telegram"
         result = subprocess.run(
-            [str(wrapper), "gateway"],
+            [str(wrapper), "--help"],
             env={"PATH": os.environ["PATH"], "HOME": str(self.home)},
             text=True, capture_output=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "url=http://recall.example:3004/mcp cidr=192.0.2.0/24 other=unset")
+        self.assertEqual(json.loads(result.stdout), expected)
 
     def test_managed_nanobot_template_holds_no_network_addresses(self) -> None:
-        template = Path(__file__).resolve().parents[4] / ".bots" / "templates" / "nanobot-config.json"
-        text = template.read_text(encoding="utf-8")
-        self.assertIn("${NANOBOT_RECALL_MCP_URL}", text)
-        self.assertIn("${NANOBOT_TAILNET_CIDR}", text)
-        self.assertIsNone(re.search(r"\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+", text))
+        templates = HERE.parents[4] / ".bots/templates"
+        def strict_pairs(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON key")
+                result[key] = value
+            return result
+        def invalid_constant(value):
+            raise ValueError("nonfinite JSON constant")
+        config = json.loads(
+            (templates / "nanobot-config.json").read_text(encoding="utf-8"),
+            object_pairs_hook=strict_pairs, parse_constant=invalid_constant,
+        )
+        self.assertNotIn("ssrfWhitelist", config["tools"])
+        self.assertNotIn("host", config["gateway"])
+        self.assertNotIn("port", config["gateway"])
+        self.assertEqual(config["tools"]["mcpServers"]["recall"]["url"],
+                         "${NANOBOT_RECALL_MCP_URL}")
+        env_lines = (templates / "nanobot-telegram.env").read_text(encoding="utf-8").splitlines()
+        for key in ("NANOBOT_RECALL_MCP_URL", "NANOBOT_TOOLS__SSRF_WHITELIST",
+                    "NANOBOT_GATEWAY__HOST", "NANOBOT_GATEWAY__PORT"):
+            self.assertIn(f"# {key}=", env_lines)
+            self.assertFalse(any(line.startswith(key + "=") for line in env_lines))
 
     def test_nanobot_refuses_unprovisioned_token(self) -> None:
         self.prepare_nanobot_wrapper()

@@ -45,9 +45,11 @@ with open(manifest, encoding="utf-8") as fh:
         if not line or line.startswith("#"):
             continue
         fields = shlex.split(line, posix=True)
-        if len(fields) != 9:
-            sys.stderr.write(f"{manifest}:{lineno}: expected 9 fields, got {len(fields)}\n")
+        if len(fields) not in (9, 10):
+            sys.stderr.write(f"{manifest}:{lineno}: expected 9 or 10 fields, got {len(fields)}\n")
             raise SystemExit(1)
+        if len(fields) == 9:
+            fields.append("")
         sys.stdout.write("\t".join(fields) + "\n")
 PY
 }
@@ -253,6 +255,284 @@ bun_build_write_fingerprint() {
 
   mkdir -p "$(dirname "$stamp_path")"
   printf '%s\n' "$fingerprint" >"$stamp_path"
+}
+
+bun_build_expand_extra_path() {
+  local path="$1"
+
+  case "$path" in
+    /*)
+      printf '%s\n' "$path"
+      ;;
+    '~/'*)
+      printf '%s/%s\n' "$HOME" "${path#\~/}"
+      ;;
+    '$HOME/'*)
+      printf '%s/%s\n' "$HOME" "${path#\$HOME/}"
+      ;;
+    *)
+      printf '%s/%s\n' "$DOTCORTEX_ROOT" "$path"
+      ;;
+  esac
+}
+
+bun_build_worktree_tree() {
+  local root_abs="$1" base_commit="$2" index_path="$3" diff_path="$4"
+
+  rm -f "$index_path" "$index_path.lock"
+  GIT_INDEX_FILE="$index_path" git -C "$root_abs" read-tree "$base_commit"
+  git -C "$root_abs" diff --binary --full-index "$base_commit" -- >"$diff_path"
+  if [ -s "$diff_path" ]; then
+    GIT_INDEX_FILE="$index_path" git -C "$root_abs" apply --cached --binary --whitespace=nowarn "$diff_path"
+  fi
+  GIT_INDEX_FILE="$index_path" git -C "$root_abs" write-tree
+}
+
+bun_build_patch_state_write() {
+  local name="$1" base_commit="$2" expected_tree="$3" applied_patch="$4"
+  local state_dir temporary
+
+  state_dir="$(bun_build_state_dir "$name")/patch-series"
+  mkdir -p "$state_dir"
+  temporary="$(mktemp -d "$state_dir/.write.XXXXXX")"
+  printf '%s\n' "$base_commit" >"$temporary/base.commit"
+  printf '%s\n' "$expected_tree" >"$temporary/applied.tree"
+  cp "$applied_patch" "$temporary/applied.patch"
+  printf '1\n' >"$temporary/schema"
+  mv "$temporary/base.commit" "$state_dir/base.commit"
+  mv "$temporary/applied.tree" "$state_dir/applied.tree"
+  mv "$temporary/applied.patch" "$state_dir/applied.patch"
+  mv "$temporary/schema" "$state_dir/schema"
+  rmdir "$temporary"
+}
+
+bun_build_patch_failure_details() {
+  local name="$1" root_abs="$2" base_commit="$3"
+
+  echo "!! [$name] checkout differs from the pinned ref in edits not recognized as the managed patch series; refusing to modify it" >&2
+  git -C "$root_abs" status --short --untracked-files=all >&2 || true
+  echo "!! [$name] pinned ref: $base_commit; no reset or checkout was performed" >&2
+}
+
+bun_build_apply_patch_series() {
+  local name="$1" root_abs="$2" ref="$3" allow_untracked_csv="$4"
+  shift 4
+  local patches=("$@")
+  local base_commit base_tree head patch patch_abs expected_tree current_tree
+  local state_dir state_patch prior_base="" prior_tree="" prior_valid=0
+  local temporary expected_index current_index prior_index expected_patch current_diff
+  local entry code path candidate allowed unknown_untracked=0 transition=base
+  local reverted_tree actual_tree restore_tree
+  local allowed_untracked=()
+
+  if [ "${#patches[@]}" -eq 0 ]; then
+    echo "!! [$name] patch guard requires at least one patch" >&2
+    return 1
+  fi
+  if ! bun_build_is_git_repo "$root_abs"; then
+    echo "!! [$name] patch guard requires a git checkout: $root_abs" >&2
+    return 1
+  fi
+  if [ -z "$ref" ]; then
+    echo "!! [$name] patch guard requires a pinned REF" >&2
+    return 1
+  fi
+
+  base_commit="$(git -C "$root_abs" rev-parse "$ref^{commit}")"
+  base_tree="$(git -C "$root_abs" rev-parse "$base_commit^{tree}")"
+  head="$(git -C "$root_abs" rev-parse HEAD)"
+  if [ "$head" != "$base_commit" ]; then
+    echo "!! [$name] patch guard expected HEAD $base_commit, got $head" >&2
+    return 1
+  fi
+  if ! git -C "$root_abs" diff --cached --quiet --; then
+    echo "!! [$name] staged checkout edits are never managed patch state; refusing to modify them" >&2
+    git -C "$root_abs" status --short --untracked-files=all >&2 || true
+    return 1
+  fi
+
+  if [ -n "$allow_untracked_csv" ]; then
+    IFS=',' read -r -a allowed_untracked <<<"$allow_untracked_csv"
+  fi
+  while IFS= read -r -d '' entry; do
+    code="${entry:0:2}"
+    [ "$code" = "??" ] || continue
+    path="${entry:3}"
+    allowed=0
+    for candidate in "${allowed_untracked[@]}"; do
+      if [ -n "$candidate" ] && [ "$path" = "$candidate" ]; then
+        allowed=1
+        break
+      fi
+    done
+    if [ "$allowed" = 0 ]; then
+      echo "!! [$name] unknown untracked checkout path: $path" >&2
+      unknown_untracked=1
+    fi
+  done < <(git -C "$root_abs" status --porcelain=v1 -z --untracked-files=all)
+  if [ "$unknown_untracked" = 1 ]; then
+    echo "!! [$name] refusing to modify a checkout with unknown local files" >&2
+    return 1
+  fi
+
+  temporary="$(mktemp -d)"
+  expected_index="$temporary/expected.index"
+  current_index="$temporary/current.index"
+  prior_index="$temporary/prior.index"
+  expected_patch="$temporary/expected.patch"
+  current_diff="$temporary/current.patch"
+
+  rm -f "$expected_index"
+  GIT_INDEX_FILE="$expected_index" git -C "$root_abs" read-tree "$base_commit"
+  for patch in "${patches[@]}"; do
+    patch_abs="$(bun_build_expand_extra_path "$patch")"
+    if [ ! -f "$patch_abs" ]; then
+      echo "!! [$name] managed patch is missing: $patch_abs" >&2
+      rm -rf "$temporary"
+      return 1
+    fi
+    if ! GIT_INDEX_FILE="$expected_index" git -C "$root_abs" apply --cached --check --unidiff-zero "$patch_abs"; then
+      echo "!! [$name] patch applies neither to the ordered pristine series nor as current state: $patch_abs" >&2
+      rm -rf "$temporary"
+      return 1
+    fi
+    GIT_INDEX_FILE="$expected_index" git -C "$root_abs" apply --cached --unidiff-zero "$patch_abs"
+  done
+  expected_tree="$(GIT_INDEX_FILE="$expected_index" git -C "$root_abs" write-tree)"
+  GIT_INDEX_FILE="$expected_index" git -C "$root_abs" diff --cached --binary --full-index "$base_commit" -- >"$expected_patch"
+  if [ ! -s "$expected_patch" ]; then
+    echo "!! [$name] managed patch series produced no change from $base_commit" >&2
+    rm -rf "$temporary"
+    return 1
+  fi
+
+  current_tree="$(bun_build_worktree_tree "$root_abs" "$base_commit" "$current_index" "$current_diff")"
+  state_dir="$(bun_build_state_dir "$name")/patch-series"
+  state_patch="$state_dir/applied.patch"
+  if [ -f "$state_dir/schema" ] && [ "$(<"$state_dir/schema")" = 1 ] \
+      && [ -f "$state_dir/base.commit" ] && [ -f "$state_dir/applied.tree" ] \
+      && [ -f "$state_patch" ]; then
+    prior_base="$(<"$state_dir/base.commit")"
+    prior_tree="$(<"$state_dir/applied.tree")"
+    if [ "$prior_base" = "$base_commit" ] && [ "$current_tree" = "$prior_tree" ]; then
+      cp "$current_index" "$prior_index"
+      if GIT_INDEX_FILE="$prior_index" git -C "$root_abs" apply --cached --reverse --check --binary "$state_patch" \
+          && GIT_INDEX_FILE="$prior_index" git -C "$root_abs" apply --cached --reverse --binary "$state_patch"; then
+        reverted_tree="$(GIT_INDEX_FILE="$prior_index" git -C "$root_abs" write-tree)"
+        if [ "$reverted_tree" = "$base_tree" ]; then
+          prior_valid=1
+        fi
+      fi
+    fi
+  fi
+
+  if [ "$current_tree" = "$expected_tree" ]; then
+    echo ">> [$name] patch series current"
+    bun_build_patch_state_write "$name" "$base_commit" "$expected_tree" "$expected_patch"
+    rm -rf "$temporary"
+    return 0
+  fi
+  if [ "$current_tree" = "$base_tree" ]; then
+    transition=base
+  elif [ "$prior_valid" = 1 ]; then
+    transition=prior
+  else
+    bun_build_patch_failure_details "$name" "$root_abs" "$base_commit"
+    rm -rf "$temporary"
+    return 1
+  fi
+
+  if [ "$transition" = prior ]; then
+    echo ">> [$name] replace recognized prior patch series"
+    if ! git -C "$root_abs" apply --reverse --check --binary "$state_patch" \
+        || ! git -C "$root_abs" apply --reverse --binary "$state_patch"; then
+      echo "!! [$name] recognized prior patch series could not be removed; checkout left unchanged or requires inspection" >&2
+      rm -rf "$temporary"
+      return 1
+    fi
+    actual_tree="$(bun_build_worktree_tree "$root_abs" "$base_commit" "$current_index" "$current_diff")"
+    if [ "$actual_tree" != "$base_tree" ]; then
+      echo "!! [$name] prior patch removal did not restore the pinned ref; refusing the new series" >&2
+      rm -rf "$temporary"
+      return 1
+    fi
+  else
+    echo ">> [$name] apply patch series (${#patches[@]} patches)"
+  fi
+
+  if ! git -C "$root_abs" apply --check --binary "$expected_patch" \
+      || ! git -C "$root_abs" apply --binary "$expected_patch"; then
+    echo "!! [$name] preflight passed but applying the managed patch series failed" >&2
+    if [ "$transition" = prior ]; then
+      restore_tree="$(bun_build_worktree_tree "$root_abs" "$base_commit" "$current_index" "$current_diff")"
+      if [ "$restore_tree" = "$base_tree" ] \
+          && git -C "$root_abs" apply --check --binary "$state_patch" \
+          && git -C "$root_abs" apply --binary "$state_patch"; then
+        echo "!! [$name] restored the recognized prior patch series after failure" >&2
+      else
+        echo "!! [$name] could not restore the prior patch series; inspect the checkout before retrying" >&2
+      fi
+    fi
+    rm -rf "$temporary"
+    return 1
+  fi
+
+  actual_tree="$(bun_build_worktree_tree "$root_abs" "$base_commit" "$current_index" "$current_diff")"
+  if [ "$actual_tree" != "$expected_tree" ]; then
+    echo "!! [$name] applied patch series does not match its preflighted tree" >&2
+    rm -rf "$temporary"
+    return 1
+  fi
+  bun_build_patch_state_write "$name" "$base_commit" "$expected_tree" "$expected_patch"
+  rm -rf "$temporary"
+}
+
+bun_build_apply_extra_guards() {
+  local name="$1" root_abs="$2" ref="$3" extra="$4"
+  local item key value patches_value="" allow_untracked=""
+  local seen_patches=0 seen_allow=0
+  local items=() patches=()
+
+  [ -n "$extra" ] || return 0
+  IFS=';' read -r -a items <<<"$extra"
+  for item in "${items[@]}"; do
+    [ -n "$item" ] || continue
+    if [[ "$item" != *=* ]]; then
+      echo "!! [$name] malformed EXTRA guard: $item" >&2
+      return 1
+    fi
+    key="${item%%=*}"
+    value="${item#*=}"
+    case "$key" in
+      patches)
+        if [ "$seen_patches" = 1 ] || [ -z "$value" ]; then
+          echo "!! [$name] duplicate or empty patches EXTRA guard" >&2
+          return 1
+        fi
+        seen_patches=1
+        patches_value="$value"
+        ;;
+      allow-untracked)
+        if [ "$seen_allow" = 1 ]; then
+          echo "!! [$name] duplicate allow-untracked EXTRA guard" >&2
+          return 1
+        fi
+        seen_allow=1
+        allow_untracked="$value"
+        ;;
+      *)
+        echo "!! [$name] unsupported EXTRA guard: $key" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if [ "$seen_patches" = 0 ]; then
+    echo "!! [$name] EXTRA declares no supported build guard" >&2
+    return 1
+  fi
+  IFS=',' read -r -a patches <<<"$patches_value"
+  bun_build_apply_patch_series "$name" "$root_abs" "$ref" "$allow_untracked" "${patches[@]}"
 }
 
 bun_build_submodule_declared() {

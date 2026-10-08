@@ -134,7 +134,21 @@ print(json.dumps({
     'session_id': request['session_id'],
     'provider': argument('--provider'),
     'model_pool': argument('--model-pool'),
+    'request_cache_expires_at': request['cache_expires_at'],
     'reset': {'reset_at': float(os.environ.get('FIXTURE_RESET_AT', str(__import__('time').time() + 60)))},
+}))
+"""
+
+CACHE_POLICY_HELPER = """#!/usr/bin/env python3
+import json, os, pathlib
+if os.environ.get('FIXTURE_CACHE_CALLS'):
+    pathlib.Path(os.environ['FIXTURE_CACHE_CALLS']).write_text('called')
+print(json.dumps({
+    'compact_before_seconds': 7080,
+    'cache_expires_seconds': 7200,
+    'mode': 'measured', 'confidence': 'supported',
+    'provider': 'fixture-provider', 'endpoint_id': 'fixture-provider',
+    'model': 'fixture-model', 'reason': 'exact-harness',
 }))
 """
 
@@ -152,6 +166,11 @@ class OpenCodeWarmFixture(unittest.TestCase):
         self.policy_helper = root / "opencode-continuity-policy"
         self.policy_helper.write_text(POLICY_HELPER, encoding="utf-8")
         self.policy_helper.chmod(0o700)
+        self.cache_policy_helper = root / "cache-policy"
+        self.cache_policy_helper.write_text(CACHE_POLICY_HELPER, encoding="utf-8")
+        self.cache_policy_helper.chmod(0o700)
+        self.cache_policy = root / "cache-policy.json"
+        self.cache_policy.write_text("{}", encoding="utf-8")
         self.scheduler_log = root / "scheduled.json"
         self.scheduler = root / "timeark-oneshot-schedule"
         self.scheduler.write_text(
@@ -259,6 +278,8 @@ class OpenCodeWarmFixture(unittest.TestCase):
         environment = os.environ.copy()
         environment.update({
             "XDG_STATE_HOME": str(self.root / "xdg-state"),
+            "FLEET_CACHE_POLICY_HELPER": str(self.cache_policy_helper),
+            "FLEET_CACHE_POLICY_PATH": str(self.root / "missing-policy.json"),
             "OPENCODE_WARM_STATE_DIR": str(self.state_dir),
             "OPENCODE_WARM_OWNER_STATE": str(self.owner_state),
             "OPENCODE_WARM_OWNER_HELPER": str(self.owner_helper),
@@ -334,6 +355,86 @@ class OpenCodeWarmFixture(unittest.TestCase):
             "OPENCODE_WARM_CACHE_TTL_SECONDS": "1800",
             "FIXTURE_POLICY_ACTION": action,
         }
+
+    def test_provider_configuration_does_not_bind_active_endpoint(self):
+        self.write_receipts()
+        # A declared custom route using the same label cannot authenticate
+        # the backend route of the completed native message.
+        config = self.root / "opencode.json"
+        config.write_text(json.dumps({"provider": {"fixture-provider": {
+            "options": {"baseURL": "declared-custom-route"}}}}), encoding="utf-8")
+        environment = self.policy_env("CONTINUE_LOCAL")
+        environment.update(OPENCODE_CONFIG=str(config),
+                           FLEET_CACHE_POLICY_HELPER=str(self.cache_policy_helper),
+                           FLEET_CACHE_POLICY_PATH=str(self.cache_policy),
+                           FIXTURE_CACHE_CALLS=str(self.root / "cache-calls"))
+        decided = self.call(**environment)
+        self.assertEqual(decided.returncode, 0, decided.stderr)
+        policy = json.loads(decided.stdout)["policy"]
+        self.assertAlmostEqual(policy["request_cache_expires_at"] - self.fixture.messages[-1]["info"]["time"]["completed"], 1800, delta=1)
+        self.assertEqual(policy["cache_policy"], {"mode": "fallback", "reason": "endpoint-unknown"})
+        self.assertFalse((self.root / "cache-calls").exists())
+        self.assertEqual(self.fixture.posts, [])
+
+    def test_cache_validator_shape_is_not_runtime_endpoint_certification(self):
+        decision = {"mode": "measured", "confidence": "supported",
+                    "provider": "fixture-provider", "endpoint_id": "fixture-route",
+                    "model": "fixture-model", "compact_before_seconds": 7080,
+                    "cache_expires_seconds": 7200}
+        module = load_module()
+        self.assertEqual(module.validated_cache_decision(decision, "fixture-provider", "fixture-route", "fixture-model"), decision)
+        with self.assertRaises(ValueError):
+            module.validated_cache_decision(decision, "fixture-provider", "other-route", "fixture-model")
+
+    def test_cache_invalid_stdout_retains_fixed_authority_ttl(self):
+        self.write_receipts()
+        valid = {"mode": "measured", "confidence": "supported",
+                 "provider": "fixture-provider", "endpoint_id": "fixture-provider",
+                 "model": "fixture-model", "compact_before_seconds": 7080,
+                 "cache_expires_seconds": 7200}
+        invalid = [[], None, True, {}, {**valid, "confidence": "observed"},
+                   {**valid, "model": "other"}, {**valid, "endpoint_id": "other"}]
+        invalid += [{**valid, "cache_expires_seconds": v}
+                    for v in (None, "7200", True, -1, 0, float("nan"), float("inf"), 7000)]
+        for value in invalid:
+            with self.subTest(value=value):
+                # Shape validation alone does not certify runtime routing.
+                with self.assertRaises(ValueError):
+                    load_module().validated_cache_decision(value, "fixture-provider", "fixture-provider", "fixture-model")
+                self.cache_policy_helper.write_text(
+                    "#!/usr/bin/env python3\nprint(" + repr(json.dumps(value)) + ")\n", encoding="utf-8")
+                environment = self.policy_env()
+                environment.update(FLEET_CACHE_POLICY_HELPER=str(self.cache_policy_helper),
+                                   FLEET_CACHE_POLICY_PATH=str(self.cache_policy))
+                decided = self.call(**environment)
+                self.assertEqual(decided.returncode, 0, decided.stderr)
+                payload = json.loads(decided.stdout)
+                self.assertAlmostEqual(payload["policy"]["request_cache_expires_at"] -
+                                       self.fixture.messages[-1]["info"]["time"]["completed"], 1800, delta=1)
+                self.assertEqual(self.fixture.posts, [])
+
+    def test_policy_changes_before_summarize_preserve_without_post(self):
+        self.write_receipts()
+        calls = self.root / "authority-calls"
+        for action in ("CONTINUE_LOCAL", "WAIT_AND_NUDGE"):
+            with self.subTest(action=action):
+                calls.write_text("0", encoding="utf-8")
+                self.policy_helper.write_text(
+                    "#!/usr/bin/env python3\nimport json,pathlib,sys\n"
+                    f"p=pathlib.Path({str(calls)!r})\n"
+                    "count=int(p.read_text())\np.write_text(str(count+1))\n"
+                    "json.load(sys.stdin)\n"
+                    "print(json.dumps({'schema':'helmcortex.opencode-continuity-policy-decision.v1',"
+                    f"'action':'HANDOFF_AND_COMPACT' if count == 0 else {action!r}}}))\n",
+                    encoding="utf-8")
+                decided = self.call(**self.policy_env())
+                self.assertEqual(decided.returncode, 0, decided.stderr)
+                payload = json.loads(decided.stdout)
+                self.assertEqual(payload["action"], "skipped")
+                self.assertEqual(payload["policy"]["action"], action)
+                self.assertEqual(calls.read_text(), "2")
+                self.assertEqual(self.fixture.posts, [])
+                self.assertFalse(json.loads((self.state_dir / "state.json").read_text())["in_flight"])
 
     def test_idle_busy_unknown_status(self) -> None:
         self.write_receipts()
@@ -450,6 +551,28 @@ class OpenCodeWarmFixture(unittest.TestCase):
         self.assertEqual(payload["reason"], "continuity-policy-continue")
         self.assertEqual(self.fixture.posts, [])
 
+    def test_unbound_provider_endpoint_keeps_fixed_authority_ttl(self) -> None:
+        self.write_receipts()
+        completed_at = self.fixture.messages[-1]["info"]["time"]["completed"]
+        environment = self.policy_env("CONTINUE_LOCAL")
+        environment.update({
+            "FLEET_CACHE_POLICY_HELPER": str(self.cache_policy_helper),
+            "FLEET_CACHE_POLICY_PATH": str(self.cache_policy),
+            "FIXTURE_CACHE_CALLS": str(self.root / "cache-calls"),
+        })
+        decided = self.call(**environment)
+        self.assertEqual(decided.returncode, 0, decided.stderr)
+        payload = json.loads(decided.stdout)
+        self.assertEqual(payload["reason"], "continuity-policy-continue")
+        self.assertAlmostEqual(
+            payload["policy"]["request_cache_expires_at"] - completed_at,
+            1800,
+            delta=1,
+        )
+        self.assertEqual(payload["policy"]["cache_policy"], {"mode": "fallback", "reason": "endpoint-unknown"})
+        self.assertFalse((self.root / "cache-calls").exists())
+        self.assertEqual(self.fixture.posts, [])
+
     def test_wait_and_nudge_schedules_one_typed_timeark_job(self) -> None:
         self.write_receipts()
         self.arm_nudge()
@@ -514,6 +637,8 @@ class OpenCodeWarmFixture(unittest.TestCase):
     def call_wakeup(self, job: dict, **environment_overrides: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.update({
+            "FLEET_CACHE_POLICY_HELPER": str(self.cache_policy_helper),
+            "FLEET_CACHE_POLICY_PATH": str(self.root / "missing-policy.json"),
             "OPENCODE_WARM_STATE_DIR": str(self.state_dir),
             "OPENCODE_WARM_OWNER_STATE": str(self.owner_state),
             "OPENCODE_WARM_OWNER_HELPER": str(self.owner_helper),
@@ -594,6 +719,8 @@ class OpenCodeWarmFixture(unittest.TestCase):
     def test_checkpoint_control_prepares_without_compacting(self) -> None:
         environment = os.environ.copy()
         environment.update({
+            "FLEET_CACHE_POLICY_HELPER": str(self.cache_policy_helper),
+            "FLEET_CACHE_POLICY_PATH": str(self.root / "missing-policy.json"),
             "OPENCODE_WARM_STATE_DIR": str(self.state_dir),
             "OPENCODE_WARM_OWNER_STATE": str(self.owner_state),
             "OPENCODE_WARM_OWNER_HELPER": str(self.owner_helper),
@@ -626,6 +753,8 @@ class OpenCodeWarmFixture(unittest.TestCase):
         environment = os.environ.copy()
         environment.update({
             "XDG_STATE_HOME": str(self.root / "xdg-state"),
+            "FLEET_CACHE_POLICY_HELPER": str(self.cache_policy_helper),
+            "FLEET_CACHE_POLICY_PATH": str(self.root / "missing-policy.json"),
             "OPENCODE_WARM_STATE_DIR": str(self.state_dir),
             "OPENCODE_WARM_OWNER_STATE": str(self.owner_state),
             "OPENCODE_WARM_OWNER_HELPER": str(self.owner_helper),
@@ -775,6 +904,8 @@ console.log(JSON.stringify({{context: compacting.context, enabled: continuation.
         dispatcher.chmod(0o700)
         environment = os.environ.copy()
         environment.update({
+            "FLEET_CACHE_POLICY_HELPER": str(self.cache_policy_helper),
+            "FLEET_CACHE_POLICY_PATH": str(self.root / "missing-policy.json"),
             "OPENCODE_WARM_STATE_DIR": str(self.state_dir),
             "OPENCODE_WARM_EVENT_BIN": str(dispatcher),
             "OPENCODE_TEST_DISPATCH_LOG": str(dispatch_log),
@@ -805,6 +936,8 @@ await hooks.event({{event: {{type: "session.compacted", properties: {{sessionID:
         dispatcher.chmod(0o700)
         environment = os.environ.copy()
         environment.update({
+            "FLEET_CACHE_POLICY_HELPER": str(self.cache_policy_helper),
+            "FLEET_CACHE_POLICY_PATH": str(self.root / "missing-policy.json"),
             "OPENCODE_WARM_STATE_DIR": str(self.state_dir),
             "OPENCODE_WARM_EVENT_BIN": str(dispatcher),
             "OPENCODE_TEST_DISPATCH_LOG": str(dispatch_log),

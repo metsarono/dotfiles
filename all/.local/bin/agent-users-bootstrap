@@ -2,7 +2,7 @@
 # Script: agent-users-bootstrap (dry-run by default)
 
 
-# [[file:../../../agents.org::*Script: agent-users-bootstrap (dry-run by default)][Script: agent-users-bootstrap (dry-run by default):1]]
+# [[file:../../../agents-users.org::*Script: agent-users-bootstrap (dry-run by default)][Script: agent-users-bootstrap (dry-run by default):1]]
 # ~/DotCortex/all/.local/bin/agent-users-bootstrap
 # Creates locked per-agent Unix users. DRY-RUN unless --apply.
 # --apply requires prior human approval per the staged rollout law.

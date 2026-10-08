@@ -177,13 +177,14 @@ alias glib-compile-schemas='hostenv glib-compile-schemas'
 # Claude Code model shortcuts — advised launches pair Opus 5.5 as advisor over
 # the main model (ruling 2026-09-24: Opus 5.5 replaces the Opus 5 advisor of
 # the 2026-08-03 ruling). Advisor pairing rule: advisor >= main.
+# claude-sonnet / ccs ride Sonnet 5.5 (ruling 2026-09-30; was Sonnet 4.6).
 # NOTE: no claude-opus alias here — that name belongs to the canonical
 # HelmCortex/FORGE/bin/claude-opus launcher (identity session in the
 # HelmCortex root, --telegram channel support); an alias shadows PATH in
 # interactive zsh and would strand --telegram at the claude CLI. The any-dir
 # shortcut lives on as cco (Opus 5.5, ruling 2026-09-24; no advisor —
 # nothing generally available sits above Opus 5.5).
-alias claude-sonnet='CLAUDE_WARM_HERDR_AGENT=Sonnet claude-warm --model claude-sonnet-4-6 --advisor claude-opus-5-5 --effort xhigh'
+alias claude-sonnet='CLAUDE_WARM_HERDR_AGENT=Sonnet claude-warm --model claude-sonnet-5-5 --advisor claude-opus-5-5 --effort xhigh'
 alias cch='CLAUDE_WARM_HERDR_AGENT=Haiku claude-warm --model claude-haiku-4-5'
 alias ccs='claude-sonnet'
 alias cco='claude-warm --model claude-opus-5-5 --effort xhigh'

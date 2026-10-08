@@ -1,0 +1,6 @@
+# Possum's OpenCode server on Honey, as agent-opencode (backend for honey_opencode_bot).
+opencode_description="OpenCode API server (backend for honey_opencode_bot)"
+opencode_user="agent-opencode"
+opencode_port="4096"
+opencode_bin="/home/agent-opencode/.local/bin/opencode"
+opencode_path_add="/home/agent-opencode/.guix-extra-profiles/agent/agent/bin"

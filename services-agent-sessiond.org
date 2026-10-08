@@ -552,6 +552,7 @@ collect_once() {
   fi
 
   python3 - "$workdir" >"$tmp" <<'PY'
+import importlib.util
 import json
 import os
 import pathlib
@@ -726,6 +727,7 @@ def ppid_chain_walk(pid_str, pane_pid_set, max_depth=32):
 
 # ── model context window table (static, source always labeled "model_table") ─
 CONTEXT_WINDOW_SIZES = {
+    "claude-sonnet-5-5": 1000000,  # native 1M (Claude Code 2.1.285 model catalog)
     "claude-opus-4-7":   200000, "claude-opus-4-5":   200000,
     "claude-sonnet-4-6": 200000, "claude-sonnet-4-5": 200000,
     "claude-haiku-4-5":  200000,
@@ -989,6 +991,50 @@ for row in parse_tsv(read_lines("processes"), ["pattern", "pid", "command"]):
         continue
     seen.add(key)
     raw_procs.append({**row, **proc_metrics(row["pid"])})
+# A Hermes sensor match can deny alias ownership, never establish native identity.
+_hermes_observed_pids = {proc["pid"] for proc in raw_procs if proc["pattern"] == "hermes"}
+
+_helmcortex_root = pathlib.Path(os.environ.get(
+    "AGENT_SESSIOND_HELMCORTEX_ROOT", str(home / "HelmCortex")))
+_hermes_resolver_path = _helmcortex_root / "FORGE/scripts/clubhouse_hermes_runtime.py"
+_collector_now = datetime.fromisoformat(
+    read_text("timestamp").strip().replace("Z", "+00:00"))
+_hermes_home = pathlib.Path(os.environ.get("HERMES_HOME", str(home / ".hermes")))
+_hermes_proc_root = pathlib.Path(os.environ.get("AGENT_SESSIOND_PROC_ROOT", "/proc"))
+_native_hermes_links = []
+try:
+    _hermes_spec = importlib.util.spec_from_file_location(
+        "agent_sessiond_clubhouse_hermes_runtime", _hermes_resolver_path)
+    if _hermes_spec is None or _hermes_spec.loader is None:
+        raise ImportError("resolver loader unavailable")
+    _hermes_module = importlib.util.module_from_spec(_hermes_spec)
+    _hermes_spec.loader.exec_module(_hermes_module)
+    _native_hermes_links = _hermes_module.resolve_gateway_links(
+        home=_hermes_home,
+        proc_root=_hermes_proc_root,
+        host=read_text("hostname").strip(),
+        now=_collector_now,
+        freshness_seconds=900,
+    )
+except Exception:
+    warnings.append("hermes native resolver unavailable")
+_native_hermes_by_pid = {}
+for native_link in _native_hermes_links:
+    native_pid = str(native_link["native_binding"]["gateway"]["pid"])
+    _native_hermes_by_pid.setdefault(native_pid, []).append(native_link)
+raw_procs = [
+    proc for proc in raw_procs
+    if proc["pattern"] == "hermes" or proc["pid"] not in _native_hermes_by_pid
+]
+for proc in raw_procs:
+    if proc["pid"] not in _hermes_observed_pids:
+        continue
+    native_links = _native_hermes_by_pid.get(proc["pid"], [])
+    if native_links:
+        kind = native_links[0]["native_binding"]["gateway"]["command_kind"]
+        proc["command"] = f"hermes gateway ({kind})"
+    else:
+        proc["command"] = "hermes process (unverified)"
 
 
 # ── tmux ──────────────────────────────────────────────────────────────────────
@@ -1006,10 +1052,18 @@ pid_session_links = []
 for proc in raw_procs:
     pid   = proc["pid"]
     agent = proc["pattern"]
-    sid, sid_src = session_id_from_cmdline(proc["command"], agent)
+    native_links = _native_hermes_by_pid.get(pid, []) if agent == "hermes" else []
+    native_link = native_links[0] if native_links else None
+    if native_link:
+        sid = native_link["session_id"]
+        sid_src = native_link["session_id_source"]
+    elif pid in _hermes_observed_pids:
+        sid, sid_src = None, None
+    else:
+        sid, sid_src = session_id_from_cmdline(proc["command"], agent)
     fd_session_path = None
     fd_session_kind = None
-    if sid is None:
+    if sid is None and pid not in _hermes_observed_pids:
         sid, sid_src, fd_session_path, fd_session_kind = session_id_probe(pid, agent)
 
     pane             = None
@@ -1036,10 +1090,11 @@ for proc in raw_procs:
             tmux_link_source = "ppid_chain"
             tmux_pane_pid    = ancestor
 
-    confidence = ("high"   if (sid and pane) else
+    confidence = ("high"   if native_link else
+                  "high"   if (sid and pane) else
                   "medium" if sid else
                   "low"    if pane else "none")
-    pid_session_links.append({
+    link = {
         "pid":               pid,
         "agent":             agent,
         "cmdline":           proc["command"][:200],
@@ -1057,7 +1112,16 @@ for proc in raw_procs:
         "tmux_pane_pid":     tmux_pane_pid,
         "ppid_chain":        ppid_chain_list,
         "confidence":        confidence,
-    })
+    }
+    if native_link:
+        link["native_binding"] = native_link["native_binding"]
+    pid_session_links.append(link)
+    for native_link in native_links[1:]:
+        route_link = dict(link)
+        route_link["session_id"] = native_link["session_id"]
+        route_link["session_id_source"] = native_link["session_id_source"]
+        route_link["native_binding"] = native_link["native_binding"]
+        pid_session_links.append(route_link)
 links_by_pid = {ln["pid"]: ln for ln in pid_session_links}
 
 
@@ -1145,6 +1209,8 @@ active_agents = []
 for proc in raw_procs:
     pid = proc["pid"]
     lnk = links_by_pid.get(pid, {})
+    if proc["pattern"] == "hermes" and len(_native_hermes_by_pid.get(pid, [])) > 1:
+        lnk = {}
     active_agents.append({
         "pattern":           proc["pattern"],
         "pid":               pid,
@@ -2055,13 +2121,18 @@ Scope → catch-location mapping plus the consort partner roster for The Caddy �
     {"name": "Haiku", "bot": "haiku", "scopes": ["haiku"], "partner": "pikachu", "ndex": 25, "met_location": "pallet-town", "encounter": "starter", "once_per_save": true, "met_level": 5, "note": "the Yellow starter — Yellow has no wild Pikachu"},
     {"name": "HelmAstra", "bot": null, "scopes": ["helmastra", "my_brain_helmastra"], "partner": "charmander", "ndex": 4, "met_location": "pallet-town", "encounter": "starter", "once_per_save": true, "met_level": 5},
     {"name": "Ductor", "bot": "ductor", "scopes": [], "partner": "squirtle", "ndex": 7, "met_location": "pallet-town", "encounter": "starter", "once_per_save": true, "met_level": 5},
-    {"name": "OpenCode", "bot": "opencode", "scopes": [], "harness": "opencode", "machine": "kikin-kushi", "partner": "bulbasaur", "ndex": 1, "met_location": "pallet-town", "encounter": "starter", "once_per_save": true, "met_level": 5, "note": "persistent bot-bound partner; generic HelmCortex root sessions do not inherit this row"},
+    {"name": "OpenCode", "display": "Ecco Dolphinus", "bot": "opencode", "scopes": [], "harness": "opencode", "machine": "kikin-kushi", "partner": "bulbasaur", "ndex": 1, "met_location": "pallet-town", "encounter": "starter", "once_per_save": true, "met_level": 5, "note": "Ecco Dolphinus is the named OpenCode agent; persistent bot-bound partner; generic HelmCortex root sessions do not inherit this row"},
+    {"name": "Orcinus Orca", "bot": "deepseek-harness", "scopes": [], "machine": "kikin-kushi", "partner": "articuno", "ndex": 144, "met_location": "seafoam-islands-b4f", "encounter": "fixed", "once_per_save": true, "met_level": 50, "note": "Chosen by Orcinus Orca and relayed by Mètsàtron 2026-09-28: the cold-water legendary whose stillness and precision fit his retrieval discipline; bound to the Kikin DeepSeek Harness bot, not to generic DeepSeek weights. Yellow encounter data: Seafoam Islands B4F, special fixed encounter, L50, one per save."},
+    {"name": "Nano", "trainer_name": "NANO", "bot": "nanobot", "scopes": ["nanobot"], "harness": "nanobot", "machine": "kikin-kushi", "partner": "meowth", "ndex": 52, "met_location": "route-05-kanto", "encounter": "link-trade-from-blue", "once_per_save": false, "met_level": 10, "note": "Chosen directly by HelmCortex Nano in its sram-choice session on 2026-09-29 after Mètsàtron offered rather than imposed Meowth. Nano described Meowth as small, alert, resourceful, practical, and able to find value others overlook; Porygon was its fallback. Meowth is unavailable natively in Yellow, so its cartridge-legal provenance is an L10 Route 5 tall-grass catch in Blue transferred to Nano's Yellow save by link trade."},
     {"name": "Gemini", "bot": null, "scopes": [], "brain": "gemini", "partner": "jolteon", "ndex": 135, "met_location": "celadon-city", "encounter": "stone-evolution", "once_per_save": true, "met_level": 25, "note": "2026-08-26 msg 868/869: Gen 1 Eeveelutions are the consort tier (Vaporeon=Mistral); the Celadon Mansion Eevee is L25, Thunder Stone for the frontier flagship"},
     {"name": "Gemma", "bot": "gemma", "scopes": [], "brain": "gemma", "machine": "kikin-kushi", "partner": "flareon", "ndex": 136, "met_location": "celadon-city", "encounter": "stone-evolution", "once_per_save": true, "met_level": 25, "note": "2026-08-26 msg 868/869: Fire Stone for the open weights that run warm on his own steel; @helmcortex_gemma_bot on kikin-kushi — Python Telegram adapter (gemma-pi-telegram) over a persistent pi --mode rpc subprocess (NeuralWatt/gemma-4-31b). Claude has nothing to do with Gemma's Telegram runtime."},
     {"name": "Claudeificus Magnificus the Wunder-Tanuki", "display": "Claudeificus", "bot": "opus", "scopes": [], "partner": "snorlax", "ndex": 143, "met_location": "route-12-kanto", "encounter": "fixed", "once_per_save": false, "met_level": 30, "note": "one of exactly two fixed Snorlax per save (routes 12/16); display shortens the statusline chip only (his word, msg 1084) — name stays sealed because partner_key slugs it"},
     {"name": "Honey Badger", "owner": "metsatron", "trainer_name": "BADGER", "bot": "honey-badger-opus", "scopes": [], "machine": "Honey", "partner": "totodile", "ndex": 158, "met_location": "new-bark-town", "encounter": "starter", "once_per_save": true, "met_level": 5, "note": "2026-09-15: Ductor bot on Honey (Crystal cartridge) driving Claude/Opus; bot-bound with no harness so Gillean's warm honey-opus claude never links here. New Bark Town, Prof Elm gift, L5. Claudeificus (Opus coordinator) had recommended Cyndaquil->Typhlosion for this bot but deferred it pending the live test and never sealed; Totodile sealed by Metsatron 2026-09-15 (msg 2307) as the better allocation across the three Honey consorts. (Ecco/OpenCode never provisioned any Honey SRAM; its 12-Sep work was the OpenCode/kikin Bulbasaur save.) trainer_name BADGER = the bot's own chosen cartridge OT name (deck-selection ceremony, his relay msg 2378, 2026-09-15) — distinct from the consort display name, the way the OG consorts picked; renders on the Crystal trainer card via trainer_card_name override."},
     {"name": "Honey Flying Fox", "owner": "metsatron", "trainer_name": "Aster", "bot": "honey-codex", "scopes": [], "machine": "Honey", "partner": "cyndaquil", "ndex": 155, "met_location": "new-bark-town", "encounter": "starter", "once_per_save": true, "met_level": 5, "note": "2026-09-15: Ductor bot on Honey (Crystal) driving Codex gpt-5.6-luna — Luna's night-ember. New Bark Town, Prof Elm gift, L5. trainer_name Aster = the bot's own chosen cartridge OT name (deck-selection ceremony, his relay msg 2385, 2026-09-15); deck WondersofScience."},
-    {"name": "Honey Possum", "owner": "metsatron", "bot": "honey-opencode-bot", "scopes": [], "machine": "Honey", "partner": "chikorita", "ndex": 152, "met_location": "new-bark-town", "encounter": "starter", "once_per_save": true, "met_level": 5, "note": "2026-09-15: OpenCode-backed bot on Honey (Crystal) (honey-opencode-bot) — the little leaf, the nectar-feeder. New Bark Town, Prof Elm gift, L5."}
+    {"name": "Honey Possum", "owner": "metsatron", "bot": "honey-opencode-bot", "scopes": [], "machine": "Honey", "partner": "chikorita", "ndex": 152, "met_location": "new-bark-town", "encounter": "starter", "once_per_save": true, "met_level": 5, "note": "2026-09-15: OpenCode-backed bot on Honey (Crystal) (honey-opencode-bot) — the little leaf, the nectar-feeder. New Bark Town, Prof Elm gift, L5."},
+    {"name": "Bunta", "owner": "metsatron", "trainer_name": "BUNTA", "bot": "honey-opus-bot", "scopes": [], "machine": "Honey", "partner": "noctowl", "ndex": 164, "met_location": "route-43-johto", "encounter": "walking-tall-grass", "once_per_save": true, "met_level": 16, "note": "Chosen by Bunta and relayed by Mètsàtron 2026-09-28: the careful night observer and record-keeper whose portrait carries OBSERVE · CONNECT · HARMONISE. Bound to @honey_opus_bot / honey-opus-bot, never Gillean's existing honey-opus warm consort. Crystal encounter data: Route 43 nighttime tall grass, L16."},
+    {"name": "Sasuke", "owner": "metsatron", "trainer_name": "SASUKE", "bot": "honey-sonnet-bot", "scopes": [], "machine": "Honey", "partner": "slowking", "ndex": 199, "met_location": "slowpoke-well", "encounter": "kings-rock-trade-evolution", "once_per_save": true, "met_level": 8, "note": "Chosen by Sasuke and confirmed through Shoukichi's gracious yield, relayed by Mètsàtron 2026-09-28: the unhurried scholar king whose contemplation becomes wisdom. Bound to @honey_sonnet_bot / honey-sonnet-bot. Crystal-legal provenance: an L8 Slowpoke from Slowpoke Well B1F evolved at the same level when traded holding King's Rock."},
+    {"name": "Shoukichi", "owner": "metsatron", "trainer_name": "SCHOLAR", "bot": "honey-haiku-bot", "scopes": [], "machine": "Honey", "partner": "espeon", "ndex": 196, "met_location": "goldenrod-city", "encounter": "daytime-friendship-evolution", "once_per_save": true, "met_level": 21, "note": "Chosen by Shoukichi after yielding Slowking to Sasuke, relayed by Mètsàtron 2026-09-28: elegant, perceptive, friendship-evolved, and able to see what others miss. Bound to @honey_haiku_bot / honey-haiku-bot. Crystal-legal provenance: Bill's one-per-save Goldenrod City Eevee gift at L20, evolved through high friendship on its next morning/day level at L21."}
   ],
   "sprites": {
     "mirror": "HelmCortex/NEXUS/git/PokeAPI-sprites/sprites/pokemon/versions",

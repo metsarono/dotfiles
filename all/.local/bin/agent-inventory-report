@@ -2,7 +2,7 @@
 # Script: agent-inventory-report (read-only)
 
 
-# [[file:../../../agents.org::*Script: agent-inventory-report (read-only)][Script: agent-inventory-report (read-only):1]]
+# [[file:../../../agents-users.org::*Script: agent-inventory-report (read-only)][Script: agent-inventory-report (read-only):1]]
 # ~/DotCortex/all/.local/bin/agent-inventory-report
 # Read-only. Reports per-agent Unix user state on this host as a markdown table.
 set -euo pipefail

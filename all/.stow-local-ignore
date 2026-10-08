@@ -7,11 +7,17 @@
 # folded from DotCortex — a stray all/.hermes once hijacked the ~/.hermes symlink and
 # stripped Hermes of its config.yaml + .env. Never let stow fold it again.
 ^/\.hermes(/|$)
+# The mutable Claude settings file is a regular live union. DotCortex and
+# HelmCortex merge their own entries; Stow must never claim this exact file.
+^/\.claude/settings\.json$
 # Sanctuary guest home dirs are managed by sanctuary-enter, not stow.
 # They contain absolute symlinks (bind-mount targets into the container) that stow cannot install.
 # ~/.local/share/dotcortex/guests/ is a real directory created by sanctuary setup,
 # so stow traverses into it and hits these symlinks — ignore the whole subtree.
 ^/\.local/share/dotcortex/guests(/|$)
+# Service lanes run from a root-owned system checkout, never from a home
+# (agents-bots-honey.org, "Service lane"): never link them.
+^/\.local/share/dotcortex/honey-claude(/|$)
 # skill-creator is an absolute symlink into the ductor_bot package tree.
 # ~/.claude/ is a real directory (repair_mutable_agent_dir converts it), so stow
 # traverses into it and hits this symlink. ductor_bot manages skill-creator directly.

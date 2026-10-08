@@ -677,7 +677,7 @@ class ReplyVoiceTests(unittest.TestCase):
             Path(argv[-1]).write_bytes(b"OggS fixture" if argv[0] == "ffmpeg" else b"RIFF fixture")
             directories.append(Path(argv[-1]).parent)
             if argv[0] != "ffmpeg":
-                self.assertEqual(Path(argv[-2]).read_text(), "**reply**")
+                self.assertEqual(Path(argv[-2]).read_text(), "reply")
             return subprocess.CompletedProcess(argv, 0, "", "")
         def put(cfg_, url, audio, headers):
             self.assertNotEqual(threading.get_ident(), main_thread)

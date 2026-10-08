@@ -907,12 +907,32 @@ def markdown_to_styling(text: str) -> str:
     return "".join(result)
 
 
+def normalize_voice_text(text: str) -> str:
+    normalizer = Path(os.environ.get(
+        "VOICE_TEXT_NORMALIZER", Path(__file__).resolve().with_name("voice-text-normalize")))
+    try:
+        result = subprocess.run(
+            [str(normalizer), "--format", "markdown"], input=text,
+            capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired as error:
+        raise BridgeError("voice text normalizer timed out") from error
+    except OSError as error:
+        raise BridgeError("voice text normalizer is unavailable") from error
+    if result.returncode:
+        raise BridgeError(f"voice text normalizer failed with exit status {result.returncode}")
+    spoken = result.stdout.strip()
+    if not spoken:
+        raise BridgeError("voice reply contains no spoken text")
+    return spoken
+
+
 def render_voice(text: str, agent: str, directory: Path, run=subprocess.run) -> Path:
     """Worker-only rendering/encoding. Never play audio, never invoke a rule."""
-    if len(text) > VOICE_TEXT_LIMIT:
-        LOG.info("voice reply truncated from %d to %d characters", len(text), VOICE_TEXT_LIMIT)
+    spoken = normalize_voice_text(text)
+    if len(spoken) > VOICE_TEXT_LIMIT:
+        LOG.info("voice reply truncated from %d to %d characters", len(spoken), VOICE_TEXT_LIMIT)
     source, wav, ogg = (directory / name for name in ("reply.md", "reply.wav", "reply.ogg"))
-    source.write_text(text[:VOICE_TEXT_LIMIT], encoding="utf-8")
+    source.write_text(spoken[:VOICE_TEXT_LIMIT], encoding="utf-8")
     source.chmod(0o600)
     pvox = Path.home() / "HelmCortex/FORGE/VoxForge/bin/pvox"
     commands = (

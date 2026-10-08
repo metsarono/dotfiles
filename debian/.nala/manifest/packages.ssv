@@ -194,6 +194,10 @@ apparmor-utils "" system ubuntu-only ""
 # AMD RX 560 (Baffin/Polaris, gfx803) firmware — required for amdgpu driver to bind and /dev/dri to appear.
 # non-free-firmware is already in excalibur sources.list.
 firmware-amd-graphics "" system kikin-kushi ""
+# Kikin runs sysvinit with no journald and, until 2026-10-08, no syslog daemon: elogind, earlyoom,
+# cron and kernel userspace messages had nowhere to go. Added after a user-wide SIGTERM at 21:01
+# that day left no record of who sent it. rsyslog ships its own logrotate policy.
+rsyslog "" system kikin-kushi ""
 
 # --- Network ---
 samba "" network shared ""

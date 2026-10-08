@@ -56,12 +56,9 @@
         "command": "/home/metsatron/.local/bin/agentify-desktop-mcp",
         "toolTimeout": 60
       }
-    },
-    "ssrfWhitelist": ["127.0.0.1/32", "${NANOBOT_TAILNET_CIDR}"]
+    }
   },
   "gateway": {
-    "host": "127.0.0.1",
-    "port": 18790,
     "restartMode": "auto",
     "heartbeat": {
       "enabled": true,

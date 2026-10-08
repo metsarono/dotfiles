@@ -299,6 +299,7 @@ def ppid_chain_walk(pid_str, pane_pid_set, max_depth=32):
 
 # ── model context window table (static, source always labeled "model_table") ─
 CONTEXT_WINDOW_SIZES = {
+    "claude-sonnet-5-5": 1000000,  # native 1M (Claude Code 2.1.285 model catalog)
     "claude-opus-4-7":   200000, "claude-opus-4-5":   200000,
     "claude-sonnet-4-6": 200000, "claude-sonnet-4-5": 200000,
     "claude-haiku-4-5":  200000,

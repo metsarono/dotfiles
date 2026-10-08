@@ -1,4 +1,4 @@
-# MANAGER PACKAGE VERSION
-npm opencode-ai 1.18.32
-npm @grinev/opencode-telegram-bot 0.25.2
-npm agent-browser 0.37.1
+# MANAGER PACKAGE [VERSION]
+npm opencode-ai
+npm @grinev/opencode-telegram-bot
+npm agent-browser

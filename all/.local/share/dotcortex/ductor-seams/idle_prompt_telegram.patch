@@ -1,0 +1,10 @@
+--- a/ductor_bot/orchestrator/core.py
++++ b/ductor_bot/orchestrator/core.py
+@@ -556,6 +556,7 @@ class Orchestrator:
+     ) -> None:
+         """Wire all observer result callbacks to the message bus."""
+         self._observers.wire_to_bus(bus, wake_handler=wake_handler)
++        self._message_bus = bus
+         bus.set_injector(self)
+         self._lock_pool = bus.lock_pool
+         # Share the bus lock pool with MemoryFlusher so silent flush / compact

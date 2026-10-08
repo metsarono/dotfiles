@@ -47,6 +47,7 @@ import struct
 import subprocess
 import sys
 import termios
+import time
 
 
 def report_size(_signum=None, _frame=None):
@@ -58,6 +59,60 @@ def report_size(_signum=None, _frame=None):
         pass
 
 
+def emit_development_channel_prompt():
+    entry = next(
+        (
+            argument.split("=", 1)[1]
+            for argument in sys.argv
+            if argument.startswith("--emit-dev-channel-prompt=")
+        ),
+        None,
+    )
+    if entry is None:
+        return
+    delay = next(
+        (
+            float(argument.split("=", 1)[1])
+            for argument in sys.argv
+            if argument.startswith("--dev-channel-prompt-delay=")
+        ),
+        0.0,
+    )
+    if delay:
+        time.sleep(delay)
+    prompt = (
+        b"\x1b[31mWARNING: Loading development channels\x1b[0m\n"
+        b"--dangerously-load-development-channels is for local channel development only. "
+        b"Do not use this option to run channels you have downloaded off the internet.\n"
+        b"Please use --channels to run a list of approved channels.\n"
+        + f"Channels: {entry}\n".encode()
+        + b"\x1b[1mI am using this for local development\x1b[0m\n"
+        b"Exit\n"
+    )
+    if "--alter-dev-channel-prompt" in sys.argv:
+        prompt = prompt.replace(
+            b"Please use --channels to run a list of approved channels.",
+            b"Please use --channels to run approved channels.",
+        )
+
+    def write_prompt():
+        if "--fragment-dev-channel-prompt" not in sys.argv:
+            os.write(1, prompt)
+            return
+        # Split both an ANSI escape and stable prompt phrases across distinct
+        # writes, as the real Ink renderer does while painting the PTY.
+        cuts = (2, 19, 71, 149, 231, 257, len(prompt))
+        start = 0
+        for end in cuts:
+            os.write(1, prompt[start:end])
+            start = end
+            time.sleep(0.04)
+
+    write_prompt()
+    if "--repeat-dev-channel-prompt" in sys.argv:
+        write_prompt()
+
+
 def main():
     os.write(1, (f"ARGS:{sys.argv[1:]!r}\n").encode())
     report_size()
@@ -67,10 +122,16 @@ def main():
     channel_child = None
     if "--spawn-channel-process" in sys.argv:
         channel_child = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)", "server.ts"]
+            [
+                os.environ["CLAUDE_TEST_PYTHON"],
+                "-c",
+                "import time; time.sleep(60)",
+                "server.ts",
+            ]
         )
     if "--exit-status=7" in sys.argv:
         return 7
+    emit_development_channel_prompt()
     try:
         while True:
             readable, _, _ = select.select([0], [], [], 0.1)
@@ -219,6 +280,7 @@ class Session:
         ttl=60,
         extra_args=(),
         terminal=False,
+        cache_result=None,
         channel=False,
         attach_wait=30,
         recovery_cooldown=0,
@@ -228,8 +290,12 @@ class Session:
         compact_timeout=900,
         preservation=False,
         preservation_mode="directive",
+        accept_dev_channels="",
+        dev_channel_accept_window=60,
+        lifecycle_wait=180,
     ):
         self.root = pathlib.Path(tempfile.mkdtemp(prefix="cw", dir="/tmp"))
+        self.environment = None
         self.fake = self.root / "fake-claude"
         self.fake.write_text(FAKE_CLAUDE, encoding="utf-8")
         self.fake.chmod(0o700)
@@ -243,9 +309,14 @@ class Session:
         environment = os.environ.copy()
         for key in PRESERVATION_ENV_KEYS:
             environment.pop(key, None)
+        environment.pop("CLAUDE_WARM_ACCEPT_DEV_CHANNELS", None)
+        environment.pop("CLAUDE_WARM_DEV_CHANNEL_ACCEPT_WINDOW_SECONDS", None)
         environment.update(
             {
                 "XDG_RUNTIME_DIR": str(self.root),
+                # sys.executable can be empty when PATH is absent; procfs still
+                # retains the actual interpreter running this Linux-only suite.
+                "CLAUDE_TEST_PYTHON": os.readlink("/proc/self/exe"),
                 "CLAUDE_IDLE_REAL_EXECUTABLE": str(self.fake),
                 "CLAUDE_IDLE_COMPACT_SECONDS": str(delay),
                 "CLAUDE_IDLE_COMPACT_LONG_CACHE_TTL_SECONDS": str(ttl),
@@ -260,8 +331,14 @@ class Session:
                 "CLAUDE_IDLE_CHANNEL_RECOVERY_CONFIRM_SECONDS": str(recovery_confirm),
                 "CLAUDE_IDLE_COMPACT_RETRY_SECONDS": str(retry),
                 "CLAUDE_IDLE_COMPACT_TIMEOUT_SECONDS": str(compact_timeout),
+                "CLAUDE_WARM_ACCEPT_DEV_CHANNELS": accept_dev_channels,
+                "CLAUDE_WARM_DEV_CHANNEL_ACCEPT_WINDOW_SECONDS": str(
+                    dev_channel_accept_window
+                ),
+                "CLAUDE_IDLE_LIFECYCLE_WAIT_SECONDS": str(lifecycle_wait),
             }
         )
+        self.environment = environment
         if preservation:
             environment.update({
                 "CLAUDE_WARM_PRESERVATION_BRIDGE": str(self.preservation_bridge),
@@ -291,6 +368,23 @@ class Session:
             extra_args = ("--channels", "plugin:fixture@fixture", *extra_args)
             if spawn_channel:
                 extra_args = (*extra_args, "--spawn-channel-process")
+        self.cache_result_path = self.root / "cache-result.json"
+        self.cache_calls = self.root / "cache-calls.jsonl"
+        environment["FLEET_CACHE_POLICY_PATH"] = str(self.root / "missing-policy.json")
+        if cache_result is not None:
+            self.cache_result_path.write_text(json.dumps(cache_result), encoding="utf-8")
+            cache_helper = self.root / "cache-policy"
+            cache_helper.write_text(
+                "#!/usr/bin/env python3\nimport json,pathlib,sys\n"
+                f"root=pathlib.Path({str(self.root)!r})\n"
+                "with (root/'cache-calls.jsonl').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
+                "print((root/'cache-result.json').read_text())\n", encoding="utf-8",
+            )
+            cache_helper.chmod(0o700)
+            policy = self.root / "cache-policy.json"
+            policy.write_text("{}", encoding="utf-8")
+            environment["FLEET_CACHE_POLICY_HELPER"] = str(cache_helper)
+            environment["FLEET_CACHE_POLICY_PATH"] = str(policy)
         self.parent_master = None
         self.outer_tty_fd = None
         self.outer_tty_baseline = None
@@ -484,6 +578,186 @@ class ClaudeWarmTests(unittest.TestCase):
         self.sessions.append(session)
         return session
 
+    def test_custom_anthropic_endpoint_retains_profile_fallback(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "fixture-custom"}), mock.patch.object(self.module.subprocess, "run", side_effect=AssertionError("guessed endpoint")):
+            idle, ttl, decision = self.module.measured_cache_window("Opus 4.8", "short")
+        self.assertEqual((idle, ttl), (self.module.IDLE_SECONDS["short"], self.module.TTL_SECONDS["short"]))
+        self.assertEqual(decision["mode"], "fallback")
+
+    def cache_decision(self, compact=1, expiry=2):
+        return {"mode": "measured", "confidence": "supported",
+                "provider": "anthropic", "endpoint_id": "anthropic-default",
+                "model": "claude-opus-4-8", "compact_before_seconds": compact,
+                "cache_expires_seconds": expiry, "reason": "exact-harness"}
+
+    def test_cache_adversarial_stdout_uses_fixed_fallback_timer(self):
+        valid = self.cache_decision()
+        invalid = [[], None, True, 5, "wrong", {},
+                   {**valid, "mode": "fallback", "confidence": "fallback", "reason": "policy-stale"},
+                   {**valid, "mode": "observed", "confidence": "observed"},
+                   {**valid, "confidence": "insufficient"},
+                   {**valid, "model": "other-model"},
+                   {**valid, "endpoint_id": "other-endpoint"}]
+        invalid += [{**valid, "compact_before_seconds": value}
+                    for value in (None, "1", True, -1, 0, float("nan"), float("inf"), 3)]
+        invalid += [{**valid, "cache_expires_seconds": value}
+                    for value in (None, "2", False, -1, 0, float("nan"), float("inf"), 1)]
+        for decision in invalid:
+            with self.subTest(decision=decision):
+                session = self.make_session(delay=20, ttl=30, cache_result=decision,
+                                            extra_args=("--model", "fixture-model"))
+                session.stop_and_bind()
+                state = session.read_state()
+                self.assertEqual(state["cache_policy"]["mode"], "fallback")
+                self.assertAlmostEqual(state["timer_deadline"] - state["last_normal_stop"], 20, delta=0.1)
+                self.assertFalse(session.output_contains("COMPACT_RECEIVED"))
+                session.close()
+
+    def test_cache_policy_change_at_fire_rearms_without_early_compaction(self):
+        session = self.make_session(delay=20, ttl=30, cache_result=self.cache_decision(),
+                                    extra_args=("--model", "fixture-model"))
+        session.stop_and_bind()
+        session.cache_result_path.write_text(json.dumps(self.cache_decision(5, 6)), encoding="utf-8")
+        wait_until(lambda: session.read_state() and
+                   session.read_state()["last_state_transition"] == "policy-refreshed-rearmed", timeout=4)
+        state = session.read_state()
+        self.assertAlmostEqual(state["timer_deadline"] - state["last_normal_stop"], 5, delta=0.1)
+        self.assertFalse(session.output_contains("COMPACT_RECEIVED"))
+        calls = [json.loads(line) for line in session.cache_calls.read_text().splitlines()]
+        self.assertGreaterEqual(len(calls), 2)
+        for command in calls:
+            self.assertEqual(command[command.index("--endpoint")+1], "anthropic-default")
+            self.assertNotIn("--allow-observed", command)
+
+    def test_cache_rejected_current_snapshot_cannot_reuse_previous_model(self):
+        session = self.make_session(delay=5, ttl=6, cache_result=self.cache_decision())
+        session.stop_and_bind()
+        session.status(session_id="different-owner-session", model="Sonnet 4.6")
+        wait_until(lambda: session.read_state() and session.read_state()["cache_policy"]["mode"] == "fallback", timeout=3)
+        state = session.read_state()
+        self.assertAlmostEqual(state["timer_deadline"] - state["last_normal_stop"], 5, delta=0.1)
+        self.assertFalse(session.output_contains("COMPACT_RECEIVED"))
+
+    def test_cache_current_snapshot_model_at_fire_rearms(self):
+        session = self.make_session(delay=20, ttl=30, cache_result=self.cache_decision())
+        session.stop_and_bind()
+        session.status(model="Sonnet 4.6")
+        decision = self.cache_decision(5, 6)
+        decision["model"] = "claude-sonnet-4-6"
+        session.cache_result_path.write_text(json.dumps(decision), encoding="utf-8")
+        wait_until(lambda: session.read_state() and session.read_state()["last_state_transition"] == "policy-refreshed-rearmed", timeout=4)
+        calls = [json.loads(line) for line in session.cache_calls.read_text().splitlines()]
+        self.assertEqual(calls[-1][calls[-1].index("--model")+1], "Sonnet 4.6")
+        self.assertFalse(session.output_contains("COMPACT_RECEIVED"))
+
+    def test_measured_cache_window_uses_current_model_and_strict_policy(self):
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = pathlib.Path(raw_root)
+            helper = root / "cache-policy"
+            policy = root / "cache-policy.json"
+            helper.write_text("fixture", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+            decision = {
+                "compact_before_seconds": 7080,
+                "cache_expires_seconds": 7200,
+                "mode": "measured",
+                "confidence": "supported",
+                "provider": "anthropic",
+                "endpoint_id": "anthropic-default",
+                "model": "claude-opus-4-8",
+                "reason": "endpoint-model-transfer",
+            }
+            completed = subprocess.CompletedProcess([], 0, json.dumps(decision), "")
+            with mock.patch.dict(os.environ, {
+                "FLEET_CACHE_POLICY_HELPER": str(helper),
+                "FLEET_CACHE_POLICY_PATH": str(policy),
+            }), mock.patch.object(self.module.subprocess, "run", return_value=completed) as run:
+                compact_after, cache_expires, resolved = self.module.measured_cache_window(
+                    "Opus 4.8", "long"
+                )
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--model") + 1], "Opus 4.8")
+        self.assertNotIn("--allow-observed", command)
+        self.assertEqual((compact_after, cache_expires), (7080, 7200))
+        self.assertEqual(resolved["reason"], "endpoint-model-transfer")
+
+    def test_action_refresh_rearms_when_new_policy_deadline_is_later(self):
+        supervisor = object.__new__(self.module.Supervisor)
+        supervisor.current_model = "Opus 4.8"
+        supervisor.cache_profile = "long"
+        supervisor.cache_idle_seconds = 60
+        supervisor.cache_ttl_seconds = 120
+        supervisor.cache_policy = {"mode": "fallback", "reason": "startup"}
+        supervisor.timer_generation = 4
+        supervisor.timer_deadline = None
+        supervisor.timer_kind = None
+        supervisor.last_state_transition = "armed"
+        supervisor._read_snapshot = mock.Mock(return_value=({}, None))
+        supervisor._idle_anchor = mock.Mock(return_value=900.0)
+        supervisor._guard_log = mock.Mock()
+        supervisor._write_state = mock.Mock()
+        decision = {
+            "mode": "measured", "reason": "exact-harness",
+            "confidence": "supported", "source_harness": "claude",
+            "provider": "anthropic", "endpoint_id": "anthropic-default",
+            "model": "claude-opus-4-8", "observed_at": "2026-09-30T00:00:00Z",
+            "sample_count": 500, "session_count": 40,
+        }
+        with mock.patch.object(self.module, "now", return_value=1000.0), mock.patch.object(
+            self.module, "measured_cache_window", return_value=(300, 360, decision)
+        ):
+            self.assertFalse(supervisor._refresh_cache_policy_for_action())
+        self.assertEqual(supervisor.timer_generation, 5)
+        self.assertEqual(supervisor.timer_deadline, 1200.0)
+        self.assertEqual(supervisor.timer_kind, "compact")
+        self.assertEqual(supervisor.last_state_transition, "policy-refreshed-rearmed")
+        event, fields = supervisor._guard_log.call_args.args[0], supervisor._guard_log.call_args.kwargs
+        self.assertEqual(event, "policy-refreshed-rearmed")
+        self.assertEqual(fields["policy_model"], "claude-opus-4-8")
+        self.assertEqual(fields["policy_session_count"], 40)
+
+    def test_automatic_attempt_refreshes_policy_before_final_gate(self):
+        supervisor = object.__new__(self.module.Supervisor)
+        supervisor.timer_generation = 7
+        supervisor._refresh_cache_policy_for_action = mock.Mock(return_value=False)
+        supervisor._gate_reason = mock.Mock(side_effect=AssertionError("gate ran before refresh"))
+        self.assertFalse(supervisor.attempt(expected_generation=7, purpose="compact"))
+        supervisor._refresh_cache_policy_for_action.assert_called_once_with()
+        supervisor._gate_reason.assert_not_called()
+
+    def test_session_without_lifecycle_hooks_is_flagged_loudly(self):
+        """No hook event after launch means the idle timer can never arm (2026-09-30)."""
+        session = self.make_session(lifecycle_wait=1)
+        alarm = session.root / "state" / "claude-idle-compaction" / f"{session.channel}.LIFECYCLE-HOOKS-MISSING"
+        wait_until(lambda: (session.read_state() or {}).get("lifecycle_health") == "missing",
+                   message="an unwired session was not flagged")
+        state = session.read_state()
+        self.assertEqual(state["last_state_transition"], "lifecycle-hooks-missing")
+        self.assertTrue(alarm.is_file())
+        self.assertEqual(json.loads(alarm.read_text())["channel"], session.channel)
+        listed = subprocess.run([str(WARM), "--control", "list"], capture_output=True, text=True,
+                                env=session.environment, timeout=10)
+        self.assertIn("claude-hook-idle-event is not wired", listed.stderr)
+        # A late first event (hooks fixed, or Claude got past a blocking prompt) clears it.
+        session.event("session-start", transcript_path=str(session.transcript))
+        self.assertEqual(session.read_state()["lifecycle_health"], "wired")
+        self.assertFalse(alarm.exists())
+
+    def test_channel_session_records_missing_lifecycle_hooks_in_guard_log(self):
+        session = self.make_session(channel=True, spawn_channel=True, lifecycle_wait=1)
+        wait_until(lambda: any(e.get("event") == "lifecycle-hooks-missing" for e in session.guard_events()),
+                   message="the guard log did not record the unwired session")
+        session.event("session-start", transcript_path=str(session.transcript))
+        wait_until(lambda: any(e.get("event") == "lifecycle-hooks-recovered" for e in session.guard_events()),
+                   message="the guard log did not record the recovery")
+
+    def test_wired_session_is_never_flagged(self):
+        session = self.make_session(lifecycle_wait=1)
+        session.event("session-start", transcript_path=str(session.transcript))
+        time.sleep(1.5)
+        self.assertEqual(session.read_state()["lifecycle_health"], "wired")
+        self.assertFalse(any(e.get("event") == "lifecycle-hooks-missing" for e in session.guard_events()))
+
     def test_herdr_registration_uses_supported_pane_contract(self):
         """The PTY owner reports logical identity and releases it cleanly."""
         root = pathlib.Path(tempfile.mkdtemp(prefix="cw-herdr-", dir="/tmp"))
@@ -601,6 +875,91 @@ class ClaudeWarmTests(unittest.TestCase):
             classifier.feed("✻ Crunched for 16m 38s\n\n❯\n".encode()),
             "idle",
         )
+
+    def test_development_channel_recorded_prompt_accepts_opted_in_server_once(self):
+        session = self.make_session(
+            accept_dev_channels="server:mailcortex",
+            extra_args=("--emit-dev-channel-prompt=server:mailcortex",),
+        )
+        session.wait_output("INPUT:b'\\n'")
+        self.assertEqual(bytes(session.output).count(b"INPUT:b'\\n'"), 1)
+        state = session.read_state()
+        self.assertEqual(
+            state["accepted_development_channels"], ["server:mailcortex"]
+        )
+        accepted = [
+            event
+            for event in session.guard_events()
+            if event.get("event") == "development-channel-accepted"
+        ]
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(accepted[0]["channels"], ["server:mailcortex"])
+
+    def test_development_channel_prompt_without_opt_in_sends_no_enter(self):
+        session = self.make_session(
+            extra_args=("--emit-dev-channel-prompt=server:mailcortex",),
+        )
+        session.wait_output("Channels: server:mailcortex")
+        time.sleep(0.2)
+        self.assertNotIn(b"INPUT:", bytes(session.output))
+
+    def test_development_channel_prompt_for_other_server_sends_no_enter(self):
+        session = self.make_session(
+            accept_dev_channels="server:mailcortex",
+            extra_args=("--emit-dev-channel-prompt=server:other",),
+        )
+        session.wait_output("Channels: server:other")
+        time.sleep(0.2)
+        self.assertNotIn(b"INPUT:", bytes(session.output))
+
+    def test_development_channel_prompt_after_startup_window_sends_no_enter(self):
+        session = self.make_session(
+            accept_dev_channels="server:mailcortex",
+            dev_channel_accept_window=0.05,
+            extra_args=(
+                "--emit-dev-channel-prompt=server:mailcortex",
+                "--dev-channel-prompt-delay=0.2",
+            ),
+        )
+        session.wait_output("Channels: server:mailcortex")
+        time.sleep(0.2)
+        self.assertNotIn(b"INPUT:", bytes(session.output))
+
+    def test_development_channel_prompt_repeated_sends_exactly_one_enter(self):
+        session = self.make_session(
+            accept_dev_channels="server:mailcortex",
+            extra_args=(
+                "--emit-dev-channel-prompt=server:mailcortex",
+                "--repeat-dev-channel-prompt",
+            ),
+        )
+        session.wait_output("INPUT:b'\\n'")
+        time.sleep(0.2)
+        session.output_contains(b"")
+        self.assertEqual(bytes(session.output).count(b"INPUT:b'\\n'"), 1)
+
+    def test_development_channel_altered_prompt_sends_no_enter(self):
+        session = self.make_session(
+            accept_dev_channels="server:mailcortex",
+            extra_args=(
+                "--emit-dev-channel-prompt=server:mailcortex",
+                "--alter-dev-channel-prompt",
+            ),
+        )
+        session.wait_output("Please use --channels to run approved channels.")
+        time.sleep(0.2)
+        self.assertNotIn(b"INPUT:", bytes(session.output))
+
+    def test_development_channel_ansi_fragmented_prompt_still_accepts_once(self):
+        session = self.make_session(
+            accept_dev_channels="server:mailcortex",
+            extra_args=(
+                "--emit-dev-channel-prompt=server:mailcortex",
+                "--fragment-dev-channel-prompt",
+            ),
+        )
+        session.wait_output("INPUT:b'\\n'")
+        self.assertEqual(bytes(session.output).count(b"INPUT:b'\\n'"), 1)
 
     def test_arguments_and_full_pty_submission(self):
         session = self.make_session(delay=0, extra_args=("--resume", "fixture", "--model", "test"))

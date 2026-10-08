@@ -74,6 +74,12 @@ stow:
 # already arrived (partial move, only the source needs clearing) versus nothing
 # copied (fall back to cp -a). Leftovers are reported loudly and stow continues.
 # Never re-tighten this into a bare `mv` under set -e.
+#
+# Host stow lanes (package-host-excludes.org, "Stow lanes"): a host's `stow`
+# rows become --ignore arguments for every package and its `stow-hook` rows
+# skip post-stow helpers. `stow -D` honours ignores too, so links made before a
+# path was excluded are pruned first (links into this checkout only, never real
+# files). A host without stow rows gets no arguments and no prune.
 safe-stow:
 | set -euo pipefail; \
 | cd $(HOME)/DotCortex; \
@@ -128,10 +134,20 @@ safe-stow:
 | repair_mutable_agent_dir .agents; \
 | repair_mutable_agent_dir .opencode; \
 | repair_mutable_agent_dir .codex; \
+| EXCL="$(HOME)/.local/bin/dotcortex-stow-excludes"; \
+| [ -x "$$EXCL" ] || EXCL="$(HOME)/DotCortex/all/.local/bin/dotcortex-stow-excludes"; \
+| HOST_STOW_IGNORES=""; \
+| if [ -x "$$EXCL" ]; then \
+|   HOST_STOW_IGNORES=$$("$$EXCL" ignore-args | tr '\n' ' '); \
+|   if [ -n "$$HOST_STOW_IGNORES" ]; then \
+|     echo ">> host stow excludes (package-host-excludes.org): $$("$$EXCL" paths | tr '\n' ' ')"; \
+|     "$$EXCL" prune --apply --target "$(STOW_TARGET)" --repo "$(HOME)/DotCortex"; \
+|   fi; \
+| fi; \
 | for pkg in $(STOW_PKGS); do \
 |   preview_file=$$(mktemp); \
 |   echo ">> preview $$pkg"; \
-|   stow $(STOW_FLAGS) -n --ignore='\.bak\.' $$pkg >"$$preview_file" 2>&1 || true; \
+|   stow $(STOW_FLAGS) -n --ignore='\.bak\.' $$HOST_STOW_IGNORES $$pkg >"$$preview_file" 2>&1 || true; \
 |   if grep -q 'existing target is stowed to a different package:' "$$preview_file"; then \
 |     cat "$$preview_file"; \
 |     rm -f "$$preview_file"; \
@@ -163,18 +179,20 @@ safe-stow:
 |       done; \
 |   rm -f "$$preview_file"; \
 |   echo ">> stow $$pkg"; \
-|   if stow $(STOW_FLAGS) --ignore='\.bak\.' $$pkg 2>&1; then \
+|   if stow $(STOW_FLAGS) --ignore='\.bak\.' $$HOST_STOW_IGNORES $$pkg 2>&1; then \
 |     true; \
 |   else \
 |     echo ">> stow $$pkg conflict — retrying with --ignore=HelmCortex"; \
-|     stow $(STOW_FLAGS) --ignore='HelmCortex' --ignore='\.bak\.' $$pkg; \
+|     stow $(STOW_FLAGS) --ignore='HelmCortex' --ignore='\.bak\.' $$HOST_STOW_IGNORES $$pkg; \
 |   fi; \
 | done; \
 | case " $(STOW_PKGS) " in \
 |   *" all "*|*" linux "*) \
 |     HELPER="$(HOME)/.local/bin/icons-home-sync"; \
 |     [ -x "$$HELPER" ] || HELPER="$(HOME)/DotCortex/all/.local/bin/icons-home-sync"; \
-|     if [ -x "$$HELPER" ]; then \
+|     if [ -x "$$EXCL" ] && "$$EXCL" skip-hook icons-home-sync; then \
+|       echo ">> icons-sync skipped (host stow-hook exclude)"; \
+|     elif [ -x "$$HELPER" ]; then \
 |       echo ">> icons-sync"; \
 |       "$$HELPER"; \
 |     fi; \
@@ -212,7 +230,9 @@ auto-stow:
 preview-auto-stow:
 | set -euo pipefail; \
 | pkgs="$$("$(LAYERS_HELPER)" resolve --explain)"; \
-| cd $(HOME)/DotCortex && stow $(STOW_FLAGS) -n $$pkgs || true
+| ign="$$("$(HOME)/DotCortex/all/.local/bin/dotcortex-stow-excludes" ignore-args | tr '\n' ' ')"; \
+| "$(HOME)/DotCortex/all/.local/bin/dotcortex-stow-excludes" prune --target "$(STOW_TARGET)" --repo "$(HOME)/DotCortex"; \
+| cd $(HOME)/DotCortex && stow $(STOW_FLAGS) -n $$ign $$pkgs || true
 
 # X11 apply for x230 overlay
 x11-apply: tangle

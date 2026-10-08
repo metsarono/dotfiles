@@ -47,7 +47,7 @@ BURN_OVERRIDES: dict[str, list[dict[str, Any]]] = {
         {"provider": "openai-codex", "model": "gpt-5.4-mini", "why": "burn small disposable quota"},
     ],
     "planning": [
-        {"provider": "claude", "model": "claude-sonnet-4-6", "why": "high-quality writing/planning candidate via bridge/orchestrator"},
+        {"provider": "claude", "model": "claude-sonnet-5-5", "why": "high-quality writing/planning candidate via bridge/orchestrator"},
         {"provider": "openai-codex", "model": "gpt-5.4", "why": "burn premium planning quota when desired"},
     ],
     "research": [

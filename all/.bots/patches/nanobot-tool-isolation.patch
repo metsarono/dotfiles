@@ -1,0 +1,29 @@
+--- a/nanobot/agent/tools/execution.py
++++ b/nanobot/agent/tools/execution.py
+@@ -169,7 +169,11 @@
+             if tool_call.name == "read_file" else nullcontext()
+         ):
+             if tool is not None:
+-                result = await tool.execute(**params)
++                if tool_call.name in {"grep", "find_files"}:
++                    from nanobot.agent.tools.search_isolation import isolated_search
++                    result = await isolated_search(tool, params, tool_call.name)
++                else:
++                    result = await tool.execute(**params)
+             else:
+                 result = await tools.execute(tool_call.name, params)
+     except asyncio.CancelledError:
+--- a/nanobot/agent/tools/registry.py
++++ b/nanobot/agent/tools/registry.py
+@@ -194,6 +194,10 @@
+         try:
+             assert tool is not None  # guarded by prepare_call()
+-            result = await tool.execute(**params)
++            if name in {"grep", "find_files"}:
++                from nanobot.agent.tools.search_isolation import isolated_search
++                result = await isolated_search(tool, params, name)
++            else:
++                result = await tool.execute(**params)
+             if is_tool_error_result(result):
+                 return ToolResult.error(str(result) + hint)
+             return result

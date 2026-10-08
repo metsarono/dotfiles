@@ -3,12 +3,12 @@
 
 # The single reproducible command. Runs the full chain for one agent (or all) on the
 # current host: user+group → tool layout (git/npm/safe.directory) → guix profile →
-# pinned CLI. SSH keys are NOT included by default (=--with-keys= opts in) — an agent
+# agent CLI (latest). SSH keys are NOT included by default (=--with-keys= opts in) — an agent
 # works via group permissions, not SSH, so the safe default provisions a fully
 # functional agent that has never held a key.
 
 
-# [[file:../../../agents.org::*Script: agent-provision (orchestrator, dry-run by default)][Script: agent-provision (orchestrator, dry-run by default):1]]
+# [[file:../../../agents-users.org::*Script: agent-provision (orchestrator, dry-run by default)][Script: agent-provision (orchestrator, dry-run by default):1]]
 # ~/DotCortex/all/.local/bin/agent-provision
 # Reproducible per-host agent provisioning. DRY-RUN unless --apply.
 set -euo pipefail
@@ -38,7 +38,7 @@ echo "--- 2/5 tool layout (git/npm/safe.directory) ---"
 "$BIN/agent-tool-bootstrap" $(flag) $(only_args)
 echo "--- 3/5 guix profile (node/npm) ---"
 "$BIN/agent-guix-apply" $(flag) $(only_args)
-echo "--- 4/5 pinned CLI ---"
+echo "--- 4/5 agent CLI (latest) ---"
 "$BIN/agent-cli-install" $(flag) $(only_args)
 if [ "$WITH_KEYS" -eq 1 ]; then
   echo "--- 5/5 ssh keypair (pubkey export only) ---"

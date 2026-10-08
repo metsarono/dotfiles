@@ -7,7 +7,7 @@
 
 This launcher is the owner for ordinary interactive Codex CLI processes. It uses Python's =pty.fork= so the Codex child receives a real controlling terminal while the parent owns the PTY master for the entire process lifetime. The parent proxies bytes in both directions, propagates terminal geometry and signals, and is the only component permitted to write the automatic =/compact= submission. Codex hook helpers communicate with the per-session Unix socket; they never write to a terminal.
 
-The default values match the Emacs governor heuristic: 27 minutes idle before compaction, a 30-minute warm-cache TTL, and an absolute 70,000 current input-context threshold. When =current_tokens= is unknown (=None=, the MVP default since Codex has no status-line snapshot mechanism), the threshold check is skipped — compaction proceeds on the idle timer alone. The environment variables documented in =--help= are the supervisor's configurable surface.
+The default values match the Emacs governor heuristic: 27 minutes idle before compaction, a 30-minute warm-cache TTL, and an absolute 70,000 current input-context threshold. Automatic compaction is fail-closed when =current_tokens= is unknown: a timer alone is not evidence that the context is large enough to compact. The environment variables documented in =--help= are the supervisor's configurable surface.
 
 This is a standalone adaptation of =claude-warm='s architecture. It reuses the patterns (PTY supervisor, lifecycle socket, idle timer, compaction gate, Herdr integration) but is its own file. The two supervisors diverge in: channel prefix (=codex-= vs =claude-=), environment namespace (=CODEX_IDLE_*= vs =CLAUDE_IDLE_*=), Herdr agent label, absence of transcript inotify, absence of cache profiles, and absence of channel guard.
 
@@ -19,6 +19,19 @@ fallback for Herdr's process detector: it is driven by PTY output, never by the
 Codex lifecycle socket or hook events. This matters because Herdr sees the outer
 Python supervisor as the foreground process while the nested Codex child owns the
 inner PTY.
+
+
+Resolver output is untrusted: only exact endpoint/model identity, supported
+confidence and positive ordered integer windows select measured timing.
+Malformed output retains this consumer's fixed fallback. Automatic actions
+refresh the cache window at their final gate; a later deadline preserves the
+idle window. Launch arguments and disk configuration are declarations, not
+observations of the active session. The owning lifecycle hook exposes neither
+current model nor endpoint, so the runtime identity remains unknown and uses
+fixed fallback timing. Extra socket fields cannot supply that missing evidence.
+Measured runtime timing requires a separately verified owning observation surface;
+this change does not add one. Custom endpoint identity is never inferred.
+Observed evidence requires the explicit =CODEX_CACHE_POLICY_ALLOW_OBSERVED= opt-in.
 
 * codex-warm script
 #+BEGIN_SRC python :tangle all/.local/bin/codex-warm :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755) :comments no
@@ -38,9 +51,11 @@ import shutil
 import signal
 import socket
 import struct
+import subprocess
 import sys
 import termios
 import time
+import tomllib
 import tty
 import uuid
 
@@ -104,9 +119,134 @@ DEBUG_LOG_MAX_BYTES = env_int(
     "CODEX_IDLE_DEBUG_MAX_BYTES", 2 * 1024 * 1024, 65536
 )
 DEBUG = os.environ.get("CODEX_IDLE_COMPACTION_DEBUG", "") in {"1", "true", "yes"}
+ALLOW_OBSERVED_POLICY = os.environ.get(
+    "CODEX_CACHE_POLICY_ALLOW_OBSERVED", "0"
+).lower() in {"1", "true", "yes"}
 COMPACTION_TIMEOUT_SECONDS = env_float(
     "CODEX_IDLE_COMPACTION_TIMEOUT_SECONDS", 5 * 60, 1.0
 )
+
+
+def configured_cache_identity(argv: list[str]) -> tuple[str, str]:
+    """Read declared selection; unrecognized/custom endpoints stay unsupported."""
+    config_root = pathlib.Path(os.environ.get("CODEX_HOME", str(pathlib.Path.home() / ".codex"))).expanduser()
+    try:
+        config = tomllib.loads((config_root / "config.toml").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        config = {}
+    except (OSError, ValueError):
+        return "unknown", "unknown"
+    selected = dict(config)
+    overrides = []
+    launch_model = None
+    endpoint_known = not os.environ.get("OPENAI_BASE_URL")
+    for index, value in enumerate(argv):
+        if value.startswith("--model="):
+            launch_model = value.split("=", 1)[1]
+        elif value in {"--model", "-m"} and index + 1 < len(argv):
+            launch_model = argv[index + 1]
+        elif value in {"--profile", "-p"} or value.startswith("--profile="):
+            profile = value.split("=", 1)[1] if "=" in value else argv[index + 1] if index + 1 < len(argv) else ""
+            profiles = config.get("profiles", {})
+            row = profiles.get(profile) if isinstance(profiles, dict) else None
+            if not isinstance(row, dict):
+                return "unknown", "unknown"
+            selected.update(row)
+        elif value in {"--config", "-c"} and index + 1 < len(argv):
+            overrides.append(argv[index + 1])
+        elif value.startswith("--config="):
+            overrides.append(value.split("=", 1)[1])
+        elif value in {"--oss", "--local-provider"} or value.startswith("--local-provider="):
+            endpoint_known = False
+    for override in overrides:
+        try:
+            row = tomllib.loads(override)
+        except ValueError:
+            return "unknown", "unknown"
+        if any(key not in {"model", "model_provider", "model_reasoning_effort"} for key in row):
+            endpoint_known = False
+        selected.update(row)
+    provider = selected.get("model_provider", "openai")
+    providers = config.get("model_providers", {})
+    if provider != "openai" or not isinstance(providers, dict) or "openai" in providers:
+        endpoint_known = False
+    model = launch_model or os.environ.get("CODEX_IDLE_MODEL") or selected.get("model")
+    if not isinstance(model, str) or not model.strip() or model.strip() != model:
+        model = "unknown"
+    return model, "openai-codex-oauth" if endpoint_known else "unknown"
+
+
+def configured_model(argv: list[str]) -> str:
+    return configured_cache_identity(argv)[0]
+
+
+def validated_cache_decision(decision: object, provider: str, endpoint: str,
+                             model: str, allow_observed: bool = False) -> dict:
+    """Accept only the resolver's exact identity and ordered integer window."""
+    if not isinstance(decision, dict):
+        raise ValueError("cache-policy-not-object")
+    mode, confidence = decision.get("mode"), decision.get("confidence")
+    if mode == "fallback" and confidence == "fallback":
+        # The caller owns fallback timing; stdout cannot redefine its profile.
+        return decision
+    if not (mode == "measured" and confidence == "supported" or
+            allow_observed and mode == "observed" and confidence == "observed"):
+        raise ValueError("cache-policy-confidence-invalid")
+    def canonical(value: str) -> str:
+        return value.strip().lower().replace("_", "-")
+    expected_provider = canonical(provider)
+    expected_provider = {"openai-codex": "openai",
+                         "openai-codex-oauth": "openai"}.get(expected_provider, expected_provider)
+    expected_endpoint = canonical(endpoint)
+    if expected_provider == "openai" and expected_endpoint in {"openai", "openai-codex", "openai-codex-oauth"}:
+        expected_endpoint = "openai-codex-oauth"
+    expected_model = canonical(model)
+    if expected_provider == "anthropic":
+        expected_model = re.sub(r"-+", "-", re.sub(r"[ .]+", "-", expected_model)).strip("-")
+        if not expected_model.startswith("claude-"):
+            expected_model = "claude-" + expected_model
+    for key, expected in (("provider", expected_provider), ("endpoint_id", expected_endpoint), ("model", expected_model)):
+        if decision.get(key) != expected:
+            raise ValueError("cache-policy-identity-mismatch")
+    compact, expiry = decision.get("compact_before_seconds"), decision.get("cache_expires_seconds")
+    if (type(compact) is not int or type(expiry) is not int or
+            not 0 < compact < expiry or expiry > 2**31 - 1):
+        raise ValueError("cache-policy-window-invalid")
+    return decision
+
+
+def measured_window(model: str, endpoint: str = "openai-codex-oauth") -> tuple[int, int, dict]:
+    if model == "unknown" or endpoint == "unknown":
+        return IDLE_SECONDS, TTL_SECONDS, {"mode": "fallback", "reason": "identity-unknown"}
+    helper = pathlib.Path(os.environ.get(
+        "FLEET_CACHE_POLICY_HELPER", str(pathlib.Path.home() / "HelmCortex/FORGE/bin/cache-policy")
+    )).expanduser()
+    policy = pathlib.Path(os.environ.get(
+        "FLEET_CACHE_POLICY_PATH",
+        str(pathlib.Path.home() / "HelmCortex/ROOTS/DotRoot/agent-session/centre/data/cache-policy.json"),
+    )).expanduser()
+    if not helper.is_file() or not policy.is_file():
+        return IDLE_SECONDS, TTL_SECONDS, {
+            "mode": "fallback",
+            "reason": "policy-unavailable",
+        }
+    try:
+        command = [str(helper), "resolve", "--policy", str(policy), "--harness", "codex",
+                   "--provider", "openai", "--endpoint", endpoint,
+                   "--model", model, "--fallback-compact", str(IDLE_SECONDS),
+                   "--fallback-cache", str(TTL_SECONDS)]
+        if ALLOW_OBSERVED_POLICY:
+            command.append("--allow-observed")
+        completed = subprocess.run(
+            command,
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        decision = validated_cache_decision(json.loads(completed.stdout), "openai", endpoint, model, ALLOW_OBSERVED_POLICY)
+        if decision["mode"] == "fallback":
+            return IDLE_SECONDS, TTL_SECONDS, decision
+        return decision["compact_before_seconds"], decision["cache_expires_seconds"], decision
+    except (OSError, TypeError, ValueError, KeyError, OverflowError, subprocess.SubprocessError):
+        return IDLE_SECONDS, TTL_SECONDS, {"mode": "fallback", "reason": "resolver-error"}
 TERMINAL_CLEANUP_BYTES = (
     b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l"
     b"\x1b[?1005l\x1b[?1006l\x1b[?1015l"
@@ -573,6 +713,7 @@ class Supervisor:
         self.compaction_requested_at: float | None = None
         self.compaction_ignore_next_stop = False
         self.current_tokens: int | None = None
+        self._refresh_current_cache_window()
         self.last_normal_stop: float | None = None
         self.last_local_input: float | None = None
         self.last_local_input_classification: str | None = None
@@ -603,6 +744,9 @@ class Supervisor:
             "session_id": self.session_id,
             "status": self.status,
             "current_input_context_tokens": self.current_tokens,
+            "model": self.model,
+            "endpoint_id": self.endpoint,
+            "cache_policy": self.cache_policy,
             "dirty": self.dirty,
             "compacting": self.compacting,
             "compaction_ignore_next_stop": self.compaction_ignore_next_stop,
@@ -662,7 +806,7 @@ class Supervisor:
         self._debug(f"cancelled:{reason} channel={short_id(self.channel)}")
         self._write_state()
 
-    def arm(self) -> None:
+    def arm(self, preserve_transition: bool = False) -> None:
         if not (
             self.enabled
             and self.dirty
@@ -673,15 +817,36 @@ class Supervisor:
             and self.timer_deadline is None
         ):
             return
+        self._refresh_current_cache_window()
         self.timer_generation += 1
-        self.timer_deadline = self.last_normal_stop + IDLE_SECONDS
+        self.timer_deadline = self.last_normal_stop + self.compact_after_seconds
         self.timer_kind = "compact"
-        self.last_state_transition = "armed"
+        if not preserve_transition:
+            self.last_state_transition = "armed"
         self._debug(
             f"armed channel={short_id(self.channel)} "
-            f"delay={IDLE_SECONDS}"
+            f"delay={self.compact_after_seconds} policy={self.cache_policy.get('mode')}"
         )
         self._write_state()
+
+    def _refresh_current_cache_window(self) -> None:
+        # The installed hook forwards lifecycle facts only. No authenticated
+        # model/endpoint observation exists here; declarations must not guess it.
+        self.model, self.endpoint = "unknown", "unknown"
+        self.compact_after_seconds, self.cache_expires_seconds, self.cache_policy = measured_window(self.model, self.endpoint)
+
+    def _refresh_cache_policy_for_action(self) -> bool:
+        self._refresh_current_cache_window()
+        deadline = self.last_normal_stop + self.compact_after_seconds if self.last_normal_stop else None
+        if deadline is not None and deadline > now():
+            self.timer_generation += 1
+            self.timer_deadline = deadline
+            self.timer_kind = "compact"
+            self.last_state_transition = "policy-refreshed-rearmed"
+            self._write_state()
+            return False
+        self._write_state()
+        return True
 
     def _compaction_failed(self, reason: str) -> None:
         if not self.compacting:
@@ -711,9 +876,10 @@ class Supervisor:
         # The failure is already being handled at the Stop/timeout boundary;
         # do not consume the next genuine turn's Stop hook as a late failure.
         self.compaction_ignore_next_stop = False
-        self.cancel("compaction-recovered")
-        self.arm()
         self.last_state_transition = "compaction-recovered"
+        self.cancel("compaction-recovered")
+        self.last_state_transition = "compaction-recovered"
+        self.arm(preserve_transition=True)
         self._debug(
             f"compaction-recovered channel={short_id(self.channel)} reason={reason}"
         )
@@ -878,8 +1044,8 @@ class Supervisor:
         if purpose == "compact":
             if not self.dirty:
                 return "clean"
-            if now() - self.last_normal_stop >= TTL_SECONDS:
-                return "cache-already-cold"
+            if MIN_TOKENS > 0 and self.current_tokens is None:
+                return "token-count-unknown"
             if self.current_tokens is not None and self.current_tokens < MIN_TOKENS:
                 return "below-token-threshold"
         elif purpose != "manual":
@@ -896,6 +1062,9 @@ class Supervisor:
             self.last_gate_rejection_reason = "stale-timer"
             self.last_state_transition = "gate-refused:stale-timer"
             self._write_state()
+            return False
+        if (purpose == "compact" and expected_generation is not None
+                and not self._refresh_cache_policy_for_action()):
             return False
         reason = self._gate_reason(purpose)
         if reason:
@@ -1333,6 +1502,8 @@ def main(argv: list[str]) -> int:
         print("Environment: CODEX_IDLE_COMPACTION_DEBUG,")
         print("CODEX_IDLE_COMPACT_SECONDS, CODEX_IDLE_COMPACT_TTL_SECONDS,")
         print("CODEX_IDLE_COMPACT_MIN_TOKENS,")
+        print("CODEX_CACHE_POLICY_ALLOW_OBSERVED,")
+        print("FLEET_CACHE_POLICY_HELPER, FLEET_CACHE_POLICY_PATH,")
         print("CODEX_IDLE_COMPACTION_TIMEOUT_SECONDS,")
         print("CODEX_IDLE_INPUT_ESCAPE_TIMEOUT_SECONDS,")
         print("CODEX_WARM_HERDR_AGENT, CODEX_WARM_HERDR_HEARTBEAT_SECONDS,")
@@ -1358,4 +1529,380 @@ if __name__ == "__main__":
 * codex-warmctl shim
 #+BEGIN_SRC bash :tangle all/.local/bin/codex-warmctl :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :comments no
 exec codex-warm --control "$@"
+#+END_SRC
+
+* Multi-account boot owner on OpenRC hosts
+
+On a headless OpenRC host (Honey) warm consorts start from =/etc/init.d=, not XDG autostart. Until 2026-09-26 that meant one hand-written script per kind, =claude-warm= and =codex-warm=, both running as the operator (=gille=) and sharing one runtime dir =/run/warm=. The agent-user wall (=agents-users.org= "Agent User Bootstrap") wants consorts to run as the account that owns their auth, and the host is to be replaced (processes move to Milk), so the boot owner must be per account and host-agnostic.
+
+One body serves both kinds and every account, in OpenRC's own multi-instance idiom (the =net.lo= / =net.eth0= pattern): the body is installed as =/etc/init.d/claude-warm= and =/etc/init.d/codex-warm=, and each instance is a symlink =<kind>-warm.<account>= to it. =RC_SVCNAME= carries both halves:
+
+| Derived from =RC_SVCNAME= | =claude-warm.agent-claude= | bare =claude-warm= (compat) |
+|---|---|---|
+| kind (binary =<home>/.local/bin/<kind>-warm=, else the system checkout's =/usr/local/share/dotcortex/DotCortex/all/.local/bin/<kind>-warm= (=warm_checkout=), else the account's own =~/DotCortex/all/.local/bin/<kind>-warm=) | =claude= | =claude= |
+| account (=su -l=, supervisor owner) | =agent-claude= | =warm_user= from conf.d, required |
+| tmux socket (=tmux -L=) and session | =claude-warm= / =claude-warm= | default socket / conf.d =warm_session= |
+| =XDG_RUNTIME_DIR= (0700, account-owned) | =/run/claude-warm.agent-claude= | conf.d =xdg= |
+| log (0640, account-owned) | =/var/log/claude-warm.agent-claude.log= | =/var/log/claude-warm.log= |
+| pid file (written by the pane just before its =exec=) | =/run/claude-warm.agent-claude/claude-warm.agent-claude.pid= | =<xdg>/claude-warm.pid= |
+| Herdr agent name (fleet-unique; exported for =claude= only) | =<host>-claude-agent-claude= | conf.d =warm_agent= |
+
+Per-instance values (working directory, model, extra arguments, overrides) live in =/etc/conf.d/<kind>-warm.<account>=, which OpenRC sources automatically (falling back to =/etc/conf.d/<kind>-warm=). A bare =claude-warm= / =codex-warm= refuses to start unless its conf.d names a =warm_user=: that is the *compat path*. Today's two services keep their names, runlevel links, tmux sessions (=warm=, =codex=), shared =/run/warm= and Herdr name (=honey-opus=) by carrying those exact values in =/etc/conf.d/claude-warm= and =/etc/conf.d/codex-warm=, so replacing the hand-written scripts with the body is a no-op until an instance is switched. The body never runs as root and refuses uid 0. The compat conf.d also pins =warm_path= to the scripts' exact =PATH= (they replace it; an instance appends =~/.local/bin= to the login =PATH=).
+
+*Revised 2026-09-26 after the Honey tanuki bots landed* (=agents-bots-honey.org=): three =claude-warm= supervisors now run under one account there (=agent-claude=), which is exactly the case where "the account's process running this binary" stops naming one supervisor. The body takes their lesson: the pane writes =<xdg>/<svc>.pid= and =exec='s (same pid), and stop/status trust that file, checked against the process command line. Only a supervisor started by a pre-body script (no pid file yet) is found by owner and binary path, which is what the compat swap needs. An agent account is not stowed, so the binary comes from the host's root-owned system checkout (=warm_checkout=, default =/usr/local/share/dotcortex/DotCortex=), as the bots' launchers do (=agents-bots-honey.org= "Service lane"), and only then from the account's own DotCortex checkout. The bots' own services (=honey-opus=, =honey-sonnet=, =honey-haiku=) are Telegram bodies, not warm consorts, and stay as they are.
+
+Which instances a host runs is declared in =fleet.ssv='s =warm= column (=agents-users.org=). *Next commit, specified here but not yet written:* =warm-openrc-apply= reads that row: =--dry-run= (default) prints the plan (body, symlinks, conf.d stubs it would create, runlevel links), =--check= compares the installed body, =--apply= needs =--host= equal to the live hostname and an OpenRC service manager, installs the body and symlinks, writes only *missing* conf.d files, adds runlevel links and verifies them in =/etc/runlevels/default=. It never starts, stops or restarts a consort (bounce via Nurse Joy) and never removes a link the row no longer lists (it prints the =rc-update del= for the operator). It supersedes the single-instance renderer proposed in MR !7 (=claude-warm-openrc-apply=) for hosts that need more than one account.
+
+#+BEGIN_SRC bash :tangle linux/.local/share/dotcortex/openrc/warm-consort :shebang "#!/sbin/openrc-run" :tangle-mode (identity #o755) :comments no
+# Warm consort boot owner, multi-account (agents-codex-idle-supervisor.org,
+# "Multi-account boot owner on OpenRC hosts"). Installed as
+# /etc/init.d/claude-warm and /etc/init.d/codex-warm; instances are symlinks
+# <kind>-warm.<account>. Per-instance values: /etc/conf.d/<kind>-warm.<account>.
+# Re-install from DotCortex instead of editing this file.
+
+warm_kind="${RC_SVCNAME%%-warm*}"
+warm_instance=""
+case "${RC_SVCNAME}" in
+    *.*) warm_instance="${RC_SVCNAME#*.}" ;;
+esac
+
+# Instance defaults, derived from the service name; conf.d wins.
+warm_user="${warm_user:-${warm_instance}}"
+warm_socket="${warm_socket:-${warm_instance:+${warm_kind}-warm}}"
+warm_session="${warm_session:-${warm_kind}-warm}"
+xdg="${xdg:-/run/${RC_SVCNAME}}"
+warm_pidfile="${warm_pidfile:-${xdg}/${RC_SVCNAME}.pid}"
+warm_log="${warm_log:-/var/log/${RC_SVCNAME}.log}"
+warm_log_mode="${warm_log_mode:-0640}"
+warm_host="${warm_host:-$(hostname -s 2>/dev/null || hostname)}"
+warm_agent="${warm_agent:-${warm_host}-${warm_kind}-${warm_user}}"
+warm_args="${warm_args:-}"
+# warm_path: empty = append ~/.local/bin to the login PATH; set = use exactly.
+warm_path="${warm_path:-}"
+
+name="${RC_SVCNAME}"
+description="Warm ${warm_kind} consort for ${warm_user:-?} (PTY supervisor + idle auto-compaction)"
+
+depend() {
+    # Soft deps: Honey has no hard `net` service; `need net` fails there.
+    use net dns
+    after net elogind dbus
+}
+
+warm_home() { getent passwd "${warm_user}" | cut -d: -f6; }
+
+# The account's stowed ~/.local/bin, else the host's root-owned system checkout
+# (agents-bots-honey.org "Service lane"; agent accounts are not stowed), else
+# the account's own DotCortex checkout.
+warm_checkout="${warm_checkout:-/usr/local/share/dotcortex/DotCortex}"
+warm_find_bin() {
+    local home
+    home="$(warm_home)"
+    if [ -n "${warm_bin:-}" ]; then printf '%s' "${warm_bin}"
+    elif [ -x "${home}/.local/bin/${warm_kind}-warm" ]; then printf '%s' "${home}/.local/bin/${warm_kind}-warm"
+    elif [ -x "${warm_checkout}/all/.local/bin/${warm_kind}-warm" ]; then printf '%s' "${warm_checkout}/all/.local/bin/${warm_kind}-warm"
+    else printf '%s' "${home}/DotCortex/all/.local/bin/${warm_kind}-warm"
+    fi
+}
+
+warm_valid() {
+    case "${warm_kind}" in
+        claude|codex) ;;
+        *) eerror "${RC_SVCNAME}: kind must be claude or codex"; return 1 ;;
+    esac
+    [ -n "${warm_user}" ] || { eerror "${RC_SVCNAME}: no account (use ${warm_kind}-warm.<account>, or set warm_user in /etc/conf.d/${RC_SVCNAME})"; return 1; }
+    local uid
+    uid="$(getent passwd "${warm_user}" | cut -d: -f3)"
+    [ -n "${uid}" ] || { eerror "${RC_SVCNAME}: unknown account ${warm_user}"; return 1; }
+    [ "${uid}" != 0 ] || { eerror "${RC_SVCNAME}: refusing to run a consort as root"; return 1; }
+    warm_cwd="${warm_cwd:-$(warm_home)/metsatron-peer}"
+    [ -d "${warm_cwd}" ] || { eerror "${RC_SVCNAME}: working dir ${warm_cwd} missing (set warm_cwd)"; return 1; }
+    warm_bin="$(warm_find_bin)"
+    [ -x "${warm_bin}" ] || { eerror "${RC_SVCNAME}: ${warm_bin} missing (set warm_bin)"; return 1; }
+    return 0
+}
+
+warm_tmux() { printf 'tmux%s' "${warm_socket:+ -L '${warm_socket}'}"; }
+
+# The supervisor's pid: the pid file the pane writes just before its exec
+# (same pid), checked against the command line; else, for a supervisor started
+# by a pre-body script, the account's process running this exact binary.
+# Several supervisors of one kind can share an account (agents-bots-honey.org),
+# so the pid file is the source of truth once the body has started it.
+warm_pid() {
+    local pid bin
+    bin="$(warm_find_bin)"
+    if [ -r "${warm_pidfile}" ]; then
+        pid="$(cat "${warm_pidfile}" 2>/dev/null)"
+        if [ -n "${pid}" ] && tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -qF "${bin}"; then
+            printf '%s' "${pid}"; return 0
+        fi
+        return 1
+    fi
+    pgrep -u "${warm_user}" -f "${bin}" 2>/dev/null | head -n 1
+}
+
+start_pre() {
+    warm_valid || return 1
+    checkpath -d -m 0700 -o "${warm_user}:${warm_user}" "${xdg}"
+    checkpath -f -m "${warm_log_mode}" -o "${warm_user}:${warm_user}" "${warm_log}"
+}
+
+start() {
+    local env_path herdr=""
+    warm_valid || return 1
+    ebegin "Starting ${description} (tmux: ${warm_socket:-default}/${warm_session}, cwd: ${warm_cwd})"
+    if [ -n "${warm_path}" ]; then env_path="'${warm_path}'"; else env_path="\"\${PATH}:\${HOME}/.local/bin\""; fi
+    # Only claude-warm reads the Herdr name from the environment; codex-warm
+    # carries its own HERDR_SOURCE.
+    [ "${warm_kind}" = claude ] && herdr="CLAUDE_WARM_HERDR_AGENT='${warm_agent}'"
+    # exec makes the pane's process the supervisor; the pid file names it.
+    su -l "${warm_user}" -c "export XDG_RUNTIME_DIR='${xdg}' PATH=${env_path} ${herdr}; \
+        $(warm_tmux) new-session -d -s '${warm_session}' -c '${warm_cwd}' \
+        -e XDG_RUNTIME_DIR='${xdg}' -e PATH=\"\${PATH}\" ${herdr:+-e ${herdr}} \
+        'echo \$\$ > ${warm_pidfile}; exec ${warm_bin} ${warm_args} >> ${warm_log} 2>&1'"
+    eend $? "Failed to start ${RC_SVCNAME}"
+}
+
+stop() {
+    local pid i=0
+    ebegin "Stopping ${description}"
+    [ -n "${warm_user}" ] || { eend 1 "no account"; return 1; }
+    # The supervisor ignores SIGHUP and survives its pane: SIGTERM it by pid,
+    # then tear down this instance's tmux session only.
+    pid="$(warm_pid)"
+    if [ -n "${pid}" ]; then
+        kill -TERM "${pid}" 2>/dev/null
+        while kill -0 "${pid}" 2>/dev/null && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
+        kill -0 "${pid}" 2>/dev/null && kill -KILL "${pid}" 2>/dev/null
+    fi
+    rm -f "${warm_pidfile}"
+    su -l "${warm_user}" -c "$(warm_tmux) kill-session -t '${warm_session}'" 2>/dev/null
+    eend 0
+}
+
+status() {
+    local pid
+    pid="$( [ -n "${warm_user}" ] && warm_pid )"
+    if [ -n "${pid}" ]; then
+        einfo "${RC_SVCNAME} supervisor is running as ${warm_user} (pid ${pid})"
+        return 0
+    fi
+    einfo "${RC_SVCNAME} is not running"
+    return 3
+}
+#+END_SRC
+
+** Compat conf.d for today's Honey services
+
+What =/etc/conf.d/claude-warm= and =/etc/conf.d/codex-warm= must say so the body reproduces the 2026-09-10 hand-written scripts exactly (same account, session, runtime dir, log mode, Herdr name, arguments). Tangled as reference copies; =warm-openrc-apply --apply= installs them only where no conf.d exists.
+
+#+BEGIN_SRC conf :tangle linux/.local/share/dotcortex/openrc/conf.d/claude-warm :comments no
+# /etc/conf.d/claude-warm: compat for the bare (pre-instance) service.
+warm_user="gille"
+warm_socket=""
+warm_session="warm"
+xdg="/run/warm"
+warm_log_mode="0644"
+warm_agent="honey-opus"
+warm_cwd="/home/gille/metsatron-peer"
+warm_args="--model claude-opus-4-8"
+warm_path="/home/gille/.local/bin:/usr/local/bin:/usr/bin:/bin"
+#+END_SRC
+
+#+BEGIN_SRC conf :tangle linux/.local/share/dotcortex/openrc/conf.d/codex-warm :comments no
+# /etc/conf.d/codex-warm: compat for the bare (pre-instance) service.
+warm_user="gille"
+warm_socket=""
+warm_session="codex"
+xdg="/run/warm"
+warm_log_mode="0644"
+warm_cwd="/home/gille/metsatron-peer"
+warm_args="--dangerously-bypass-hook-trust"
+warm_path="/home/gille/.local/bin:/usr/local/bin:/usr/bin:/bin"
+#+END_SRC
+
+** Switchover to the agent accounts (approved 2026-10-05; not applied)
+
+Mètsàtron approved the plan on 2026-10-05: the consorts leave =gille= for the account that owns their auth, Claude first, and MR !7 is closed when the switchover happens (not before). Both open points were decided on 2026-10-05: the peer-lane directory (step 0) and the Codex account (step 2). Every step is his word, dry-run first, on Honey as =gille=. Nothing here has been applied.
+
+0. *Peer lane (decided 2026-10-05).* Each consort's working directory moves to =~agent-<tool>/metsatron-peer= (=/home/agent-claude/metsatron-peer=, =/home/agent-codex/metsatron-peer=), each with a copy of the lane's =CLAUDE.md= contract. Mètsàtron confirmed this is the design he and Gillean had already agreed. It is needed because both consorts run in =/home/gille/metsatron-peer= today, which an agent account cannot enter (the agent-user wall), and a session as =agent-claude= never reads Gillean's =~/.claude/CLAUDE.md=. Create the directory owned by the agent before the instance starts; =warm_valid= refuses to start while it is missing. In the same step, *append a dated addendum to Gillean's consent paragraph* ("Peer-agent lane — my standing consent", in =/home/gille/.claude/CLAUDE.md=) that names the two new paths as her peer lane alongside =/home/gille/metsatron-peer=. Her original words stay as they are; the addendum adds to them and rewrites nothing. Nothing in DotCortex edits that file, and nothing edits it before this step.
+1. *Claude: =claude-warm.agent-claude=.* =agent-claude= already holds a copy of the Claude credential (the bots' ruling, 2026-09-26). Its =claude-warm= binary comes from the system checkout, whose =SPARSE= already carries it. Install the body as =/etc/init.d/claude-warm= (it serves the bare compat service unchanged), link =claude-warm.agent-claude= to it, and write =/etc/conf.d/claude-warm.agent-claude= from the reference copy below. Then stop the compat =claude-warm= (as gille), start the instance, and confirm =status= and the Herdr name from a peer.
+2. *Codex: =codex-warm.agent-codex= (account decided 2026-10-05).* The consort uses *Gillean's* ChatGPT/Codex account through the login =agent-codex= already holds: Flying Fox runs as =agent-codex= with its own =~/.codex= login to her account. =codex-warm= under =agent-codex= *shares that one file*, =/home/agent-codex/.codex/auth.json=. With a single file there is a single refresh token holder and no refresh conflict, so no new login and no copy. The rule stands: *never copy an =auth.json= between accounts*; a copied file shares one refresh token, and the first refresh logs the other copy out. =codex-warm=, =codex-warmctl= and =codex-hook-idle-event= are in the system checkout's =SPARSE= (=agents-bots-honey.org=), so the instance resolves them there and never from a checkout the agent can write. Swap it the same way as step 1. =gille='s own =~/.codex= login, which only the compat =codex-warm= uses, is retired at this switchover.
+3. *Retire the compat path.* Once both instances have run through a day, remove the bare services' runlevel links and their =/etc/conf.d= compat files, retire =gille='s =~/.codex= warm login (step 2), and close MR !7. =warm-openrc-apply= (above) is still only specified, so for now the install and links are operator commands.
+
+The Herdr name stays =honey-opus= for the Claude consort, so peers that address it keep working (the bots are =honey-<bot>-bot=). The model argument is copied from the compat conf; changing it is a separate decision.
+
+#+BEGIN_SRC conf :tangle linux/.local/share/dotcortex/openrc/conf.d/claude-warm.agent-claude :comments no
+# /etc/conf.d/claude-warm.agent-claude: reference copy (switchover step 1, not applied; cwd per step 0).
+warm_agent="honey-opus"
+warm_cwd="/home/agent-claude/metsatron-peer"
+warm_args="--model claude-opus-4-8"
+#+END_SRC
+
+#+BEGIN_SRC conf :tangle linux/.local/share/dotcortex/openrc/conf.d/codex-warm.agent-codex :comments no
+# /etc/conf.d/codex-warm.agent-codex: reference copy (switchover step 2, not applied; cwd per step 0; shares Flying Fox's ~/.codex login).
+warm_cwd="/home/agent-codex/metsatron-peer"
+warm_args="--dangerously-bypass-hook-trust"
+#+END_SRC
+** Test
+
+Run with =python3 linux/.local/share/dotcortex/tests/test-warm-consort.py -v= from the repo root. No root, no OpenRC, no tmux: the body is sourced into bash with the OpenRC helpers, =getent= and =su= stubbed, against a scratch home.
+
+#+BEGIN_SRC python :tangle linux/.local/share/dotcortex/tests/test-warm-consort.py :shebang "#!/usr/bin/env python3" :comments no :noweb no
+from __future__ import annotations
+
+import subprocess
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+BODY = ROOT / "linux/.local/share/dotcortex/openrc/warm-consort"
+CONF = ROOT / "linux/.local/share/dotcortex/openrc/conf.d"
+
+STUBS = r"""
+ebegin() { :; }; eend() { return "${1:-0}"; }
+einfo() { echo "INFO $*"; }; eerror() { echo "ERR $*"; }
+checkpath() { echo "CHECKPATH $*"; }
+hostname() { echo testhost; }
+getent() {
+    case "$2" in
+        gille) echo "gille:x:1000:1000::$FAKE_HOME:/bin/sh" ;;
+        agent-claude) echo "agent-claude:x:2002:2002::$FAKE_HOME:/bin/bash" ;;
+        rooty) echo "rooty:x:0:0::$FAKE_HOME:/bin/sh" ;;
+        *) return 2 ;;
+    esac
+}
+su() { printf 'SU %s\n' "$*"; }
+"""
+
+
+class WarmConsortTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        (self.home / "metsatron-peer").mkdir(parents=True)
+        self.run_dir = Path(self.tmp.name) / "run"
+        self.run_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def put_bin(self, rel: str) -> Path:
+        path = self.home / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nexec sleep 30\n")
+        path.chmod(0o755)
+        return path
+
+    def body(self, svc: str, script: str, conf: str = "") -> subprocess.CompletedProcess[str]:
+        prog = f"{STUBS}\nFAKE_HOME='{self.home}'\nRC_SVCNAME='{svc}'\n{conf}\n. '{BODY}'\n{script}\n"
+        return subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=30)
+
+    def test_instance_derives_from_the_service_name(self) -> None:
+        self.put_bin(".local/bin/claude-warm")
+        out = self.body("claude-warm.agent-claude",
+                        'warm_valid && echo "$warm_user|$warm_socket|$warm_session|$xdg|$warm_pidfile|$warm_log|$warm_log_mode|$warm_agent|$warm_bin"')
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn(
+            f"agent-claude|claude-warm|claude-warm|/run/claude-warm.agent-claude|"
+            f"/run/claude-warm.agent-claude/claude-warm.agent-claude.pid|/var/log/claude-warm.agent-claude.log|0640|"
+            f"testhost-claude-agent-claude|{self.home}/.local/bin/claude-warm", out.stdout)
+
+    def test_unstowed_account_falls_back_to_its_checkout(self) -> None:
+        bin_ = self.put_bin("DotCortex/all/.local/bin/codex-warm")
+        out = self.body("codex-warm.agent-claude", 'warm_valid && echo "BIN $warm_bin"',
+                        f"warm_checkout='{self.tmp.name}/none'")
+        self.assertIn(f"BIN {bin_}", out.stdout)
+
+    def test_unstowed_account_prefers_the_system_checkout(self) -> None:
+        self.put_bin("DotCortex/all/.local/bin/claude-warm")
+        lane = Path(self.tmp.name) / "system"
+        sys_bin = lane / "all/.local/bin/claude-warm"
+        sys_bin.parent.mkdir(parents=True)
+        sys_bin.write_text("#!/bin/sh\nexec sleep 30\n")
+        sys_bin.chmod(0o755)
+        out = self.body("claude-warm.agent-claude", 'warm_valid && echo "BIN $warm_bin"', f"warm_checkout='{lane}'")
+        self.assertIn(f"BIN {sys_bin}", out.stdout)
+
+    def test_agent_reference_conf_keeps_the_herdr_name_and_needs_its_lane(self) -> None:
+        conf = (CONF / "claude-warm.agent-claude").read_text()
+        out = self.body("claude-warm.agent-claude", 'echo "$warm_user|$warm_agent|$warm_cwd"', conf)
+        self.assertIn("agent-claude|honey-opus|/home/agent-claude/metsatron-peer", out.stdout)
+        missing = f"{self.tmp.name}/no-lane"
+        out = self.body("claude-warm.agent-claude", 'warm_valid; echo "RC=$?"', conf + f"\nwarm_cwd='{missing}'")
+        self.assertIn("RC=1", out.stdout)
+        self.assertIn(f"working dir {missing} missing", out.stdout)
+
+    def test_bare_service_needs_conf(self) -> None:
+        self.put_bin(".local/bin/claude-warm")
+        out = self.body("claude-warm", "warm_valid; echo rc=$?")
+        self.assertIn("rc=1", out.stdout)
+        self.assertIn("no account", out.stdout)
+
+    def test_compat_conf_reproduces_the_hand_written_scripts(self) -> None:
+        self.put_bin(".local/bin/claude-warm")
+        conf = (CONF / "claude-warm").read_text().replace("/home/gille", str(self.home))
+        out = self.body("claude-warm", "start", conf)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        su = next(line for line in out.stdout.splitlines() if line.startswith("SU "))
+        self.assertIn("-l gille", su)
+        self.assertIn("XDG_RUNTIME_DIR='/run/warm'", su)
+        self.assertIn(f"PATH='{self.home}/.local/bin:/usr/local/bin:/usr/bin:/bin'", su)
+        self.assertIn("CLAUDE_WARM_HERDR_AGENT='honey-opus'", su)
+        self.assertIn("tmux new-session -d -s 'warm'", su, "default socket, session warm")
+        self.assertNotIn("-L", su)
+        self.assertIn("echo $$ > /run/warm/claude-warm.pid; exec ", su)
+        self.assertIn("--model claude-opus-4-8 >> /var/log/claude-warm.log", su)
+
+    def test_codex_gets_no_claude_herdr_name(self) -> None:
+        self.put_bin(".local/bin/codex-warm")
+        conf = (CONF / "codex-warm").read_text().replace("/home/gille", str(self.home))
+        out = self.body("codex-warm", "start", conf)
+        su = next(line for line in out.stdout.splitlines() if line.startswith("SU "))
+        self.assertNotIn("CLAUDE_WARM_HERDR_AGENT", su)
+        self.assertIn("-s 'codex'", su)
+        self.assertIn("echo $$ > /run/warm/codex-warm.pid", su)
+
+    def test_instance_appends_to_the_login_path(self) -> None:
+        self.put_bin(".local/bin/claude-warm")
+        out = self.body("claude-warm.agent-claude", "start")
+        su = next(line for line in out.stdout.splitlines() if line.startswith("SU "))
+        self.assertIn('PATH="${PATH}:${HOME}/.local/bin"', su)
+        self.assertIn("tmux -L 'claude-warm' new-session", su)
+
+    def test_root_is_refused(self) -> None:
+        self.put_bin(".local/bin/claude-warm")
+        out = self.body("claude-warm.rooty", "warm_valid; echo rc=$?")
+        self.assertIn("rc=1", out.stdout)
+        self.assertIn("root", out.stdout)
+
+    def test_unknown_account_and_kind_are_refused(self) -> None:
+        self.assertIn("rc=1", self.body("claude-warm.nobody-here", "warm_valid; echo rc=$?").stdout)
+        self.assertIn("rc=1", self.body("gemini-warm.gille", "warm_valid; echo rc=$?").stdout)
+
+    def test_pid_file_names_one_supervisor_among_several(self) -> None:
+        bin_ = self.put_bin(".local/bin/claude-warm")
+        procs = [subprocess.Popen(["bash", "-c", f"exec -a '{bin_}' sleep 30"]) for _ in range(2)]
+        try:
+            time.sleep(0.2)
+            pidfile = self.run_dir / "svc.pid"
+            pidfile.write_text(f"{procs[1].pid}\n")
+            conf = f"warm_user=gille\nwarm_pidfile='{pidfile}'"
+            out = self.body("claude-warm", "warm_pid", conf)
+            self.assertEqual(out.stdout.strip(), str(procs[1].pid))
+            pidfile.write_text("999999\n")
+            out = self.body("claude-warm", 'warm_pid; echo "rc=$?"', conf)
+            self.assertEqual(out.stdout.strip(), "rc=1", "a stale pid file is not a running supervisor")
+        finally:
+            for p in procs:
+                p.kill()
+                p.wait()
+
+
+if __name__ == "__main__":
+    unittest.main()
 #+END_SRC

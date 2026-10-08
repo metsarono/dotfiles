@@ -996,6 +996,20 @@ created workspace just before its root shell becomes available; =peer-start=
 retries only the exact =agent_pane_busy= refusal for a bounded five seconds,
 then fails without broadening the retry class.
 
+** Ephemeral worker retirement
+
+An ephemeral worker must be created with =peer-start --peer-id ID --accept-from
+COORDINATOR=.  That call registers its exact Herdr pane and a private lifecycle
+record together.  Existing endpoints, manually registered endpoints, warm
+wrappers, and =default= are not inferred to be owned.  The coordinator verifies
+the worker's final reply and records =agent-peer complete ID= on the worker's
+host.  =retire ID= can then close that exact pane after checking Herdr identity,
+rest state, leases, and unresolved ledger records.  =reap --plan= lists eligible
+workers after 24 hours; =reap --apply= rechecks each worker before closing it.
+Both commands preserve the ledger and transcripts and write a tombstone.  They
+leave Herdr sessions intact, even when an agent-peer worker created the server:
+session teardown requires separate proof that every pane is owned and closed.
+
 * Production peer router
 
 The production CLI is deliberately a command-line transport rather than a new
@@ -1288,6 +1302,8 @@ def command_endpoint_set(
     }
     endpoints = registry["endpoints"]
     assert isinstance(endpoints, dict)
+    if isinstance(endpoints.get(peer_id), dict) and endpoints[peer_id].get("lifecycle"):
+        raise PeerError("managed endpoint cannot be overwritten by endpoint-set")
     endpoints[peer_id] = endpoint
     write_registry(registry)
     emit({"peer_id": peer_id, "endpoint": endpoint, "updated": True})
@@ -1302,13 +1318,65 @@ def command_peer_start(
     workspace: str | None = None,
     tab: str | None = None,
     intro_file: str | None = None,
+    peer_id: str | None = None,
+    accept_from: list[str] | None = None,
 ) -> int:
     intro_body: str | None = None
     if intro_file:
         intro_body = pathlib.Path(intro_file).expanduser().read_text(encoding="utf-8").strip()
         if not intro_body:
             raise PeerError("intro file is empty")
-    emit(start_peer(herdr_session, agent_name, cwd, command, workspace, tab, intro_body))
+    if peer_id:
+        if not command:
+            raise PeerError("managed peer-start requires an explicit command after --")
+        host, provider, identity = parse_peer_id(peer_id)
+        registry = read_registry()
+        if host != registry["local_host_id"] or identity != agent_name:
+            raise PeerError("managed peer ID must name this host and agent")
+        if herdr_session == "default" or pathlib.PurePosixPath(command[0]).name.endswith("-warm"):
+            raise PeerError("default and warm agents cannot be ephemeral workers")
+        if herdr_agent_kind(command[0]) != provider:
+            raise PeerError("managed peer provider does not match command")
+        if not accept_from:
+            raise PeerError("managed peer requires an exact --accept-from coordinator")
+        for sender in accept_from:
+            parse_peer_id(sender)
+        if peer_id in registry["endpoints"]:
+            raise PeerError("managed peer ID is already registered")
+    elif accept_from:
+        raise PeerError("--accept-from requires --peer-id")
+    started = start_peer(herdr_session, agent_name, cwd, command, workspace, tab, intro_body)
+    if peer_id:
+        root = pathlib.Path(cwd).expanduser().resolve(strict=True)
+        endpoint = {
+            "provider": provider, "session_id": agent_name,
+            "herdr_session": herdr_session, "herdr_target": agent_name,
+            "repo_root": str(root), "accept_from": sorted(set(accept_from or [])),
+            "delivery": "pane",
+        }
+        agent = resolve_herdr_agent(endpoint)
+        if not isinstance(agent.get("terminal_id"), str) or not agent["terminal_id"]:
+            raise PeerError("managed peer has no exact Herdr terminal identity")
+        endpoint["lifecycle"] = {
+            "kind": "agent-peer-ephemeral-v1",
+            "pane_id": agent["pane_id"],
+            "terminal_id": agent.get("terminal_id"),
+            "created_at": utc_now(), "completed_at": None,
+        }
+        lock = ledger_lock()
+        try:
+            registry = read_registry()
+            endpoints = registry["endpoints"]
+            assert isinstance(endpoints, dict)
+            if peer_id in endpoints:
+                raise PeerError("managed peer ID was registered concurrently")
+            endpoints[peer_id] = endpoint
+            write_registry(registry)
+        finally:
+            lock.close()
+        started["peer_id"] = peer_id
+        started["lifecycle"] = endpoint["lifecycle"]
+    emit(started)
     return 0
 
 
@@ -2465,6 +2533,17 @@ def receive_spawn(
             "delivery": "pane",
             "spawned_by": {"message_id": message_id, "profile": name, "origin_host": origin_host},
         }
+        if (endpoint["herdr_session"] != "default"
+                and not pathlib.PurePosixPath(str(command[0])).name.endswith("-warm")):
+            agent = resolve_herdr_agent(endpoint)
+            if not isinstance(agent.get("terminal_id"), str) or not agent["terminal_id"]:
+                raise PeerError("spawned peer has no exact Herdr terminal identity")
+            endpoint["lifecycle"] = {
+                "kind": "agent-peer-ephemeral-v1",
+                "pane_id": agent["pane_id"],
+                "terminal_id": agent.get("terminal_id"),
+                "created_at": utc_now(), "completed_at": None,
+            }
         lock = ledger_lock()
         try:
             current = read_registry()
@@ -2904,6 +2983,223 @@ def command_reply(args: argparse.Namespace) -> int:
     return 0
 
 
+def lifecycle_records(peer_id: str) -> None:
+    """Refuse any unresolved local traffic involving a worker."""
+    records: list[tuple[str, dict[str, object], dict[str, object]]] = []
+    for box in ("inbox", "outbox"):
+        directory = state_root() / box
+        if not directory.exists():
+            continue
+        if not directory.is_dir():
+            raise PeerError(f"{box} ledger is not a directory")
+        for path in directory.glob("*.json"):
+            record = load_json(path)
+            if not isinstance(record, dict) or record.get("schema") != LEDGER_SCHEMA:
+                raise PeerError(f"invalid ledger record: {path}")
+            envelope = record.get("envelope")
+            if not isinstance(envelope, dict):
+                raise PeerError(f"ledger record has no envelope: {path}")
+            records.append((box, record, envelope))
+    replies = {
+        str(envelope.get("in_reply_to"))
+        for box, record, envelope in records
+        if box == "outbox" and record.get("state") == "delivered"
+        and isinstance(envelope.get("from"), dict)
+        and envelope["from"].get("peer_id") == peer_id
+        and envelope.get("kind") == "reply"
+    }
+    checkout_ids: set[str] = set()
+    for box, record, envelope in records:
+        source = envelope.get("from")
+        destination = envelope.get("to")
+        if not isinstance(source, dict) or not isinstance(destination, dict):
+            raise PeerError("ledger record has malformed peer identity")
+        if peer_id not in (source.get("peer_id"), destination.get("peer_id")):
+            continue
+        workspace = envelope.get("workspace")
+        if not isinstance(workspace, dict) or not isinstance(workspace.get("checkout_id"), str):
+            raise PeerError("worker ledger record has malformed checkout")
+        checkout_ids.add(str(workspace["checkout_id"]))
+        state = record.get("state")
+        if box == "outbox" and state != "delivered":
+            raise PeerError(f"worker outbound message {record.get('message_id')} is {state}")
+        if box == "inbox" and source.get("peer_id") == peer_id and state not in {"delivered", "stored"}:
+            raise PeerError(f"worker inbound reply {record.get('message_id')} is {state}")
+        if box == "inbox" and destination.get("peer_id") == peer_id:
+            if state not in {"delivered", "spawned"}:
+                raise PeerError(f"worker inbound message {record.get('message_id')} is {state}")
+            if envelope.get("kind") != "reply" and str(record.get("message_id")) not in replies:
+                raise PeerError(f"worker task {record.get('message_id')} has no delivered reply")
+    leases = load_leases()["leases"]
+    assert isinstance(leases, dict)
+    for lease in leases.values():
+        if not isinstance(lease, dict) or not isinstance(lease.get("expires_at"), str):
+            raise PeerError("lease database has an ambiguous entry")
+        try:
+            dt.datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00"))
+        except ValueError as error:
+            raise PeerError("lease database has an invalid expiry") from error
+        if active_lease(lease) and (
+            lease.get("holder") == peer_id or lease.get("checkout_id") in checkout_ids
+        ):
+            raise PeerError("worker has an active checkout or upstream lease")
+
+
+def lifecycle_gate(peer_id: str, *, retention: bool, require_complete: bool = True) -> tuple[dict[str, object], dict[str, object]]:
+    host, _, _ = parse_peer_id(peer_id)
+    registry = read_registry()
+    if host != registry["local_host_id"]:
+        raise PeerError("worker does not belong to this host")
+    endpoints = registry["endpoints"]
+    assert isinstance(endpoints, dict)
+    endpoint = endpoints.get(peer_id)
+    if not isinstance(endpoint, dict):
+        raise PeerError("worker endpoint is absent")
+    lifecycle = endpoint.get("lifecycle")
+    if not isinstance(lifecycle, dict) or lifecycle.get("kind") != "agent-peer-ephemeral-v1":
+        raise PeerError("endpoint has no agent-peer ephemeral ownership record")
+    if lifecycle.get("retired_at"):
+        raise PeerError("worker is already retired")
+    if (state_root() / "tombstones" / (peer_id.replace("/", "__") + ".json")).exists():
+        raise PeerError("worker already has a tombstone; inspect it before retry")
+    session = endpoint.get("herdr_session")
+    if not isinstance(session, str) or session == "default" or not session:
+        raise PeerError("protected or unknown Herdr session")
+    if endpoint.get("herdr_target") != peer_id.split("/")[2]:
+        raise PeerError("worker target differs from owned identity")
+    completed_at = lifecycle.get("completed_at")
+    if require_complete and not isinstance(completed_at, str):
+        raise PeerError("worker completion has not been acknowledged")
+    if require_complete:
+        try:
+            completed = dt.datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise PeerError("worker completion time is invalid") from error
+        if completed.tzinfo is None:
+            raise PeerError("worker completion time lacks timezone")
+        if retention and dt.datetime.now(dt.timezone.utc) - completed < dt.timedelta(hours=24):
+            raise PeerError("worker has not reached 24-hour retention")
+    pane = lifecycle.get("pane_id")
+    if not isinstance(pane, str) or not pane:
+        raise PeerError("worker ownership has no exact pane")
+    if not isinstance(lifecycle.get("terminal_id"), str) or not lifecycle["terminal_id"]:
+        raise PeerError("worker ownership has no exact terminal")
+    agent = resolve_herdr_agent(endpoint)
+    if agent.get("pane_id") != pane or agent.get("terminal_id") != lifecycle.get("terminal_id"):
+        raise PeerError("Herdr worker identity changed since peer-start")
+    for other_id, other in endpoints.items():
+        if other_id == peer_id or not isinstance(other, dict) or other.get("herdr_session") != session:
+            continue
+        other_lifecycle = other.get("lifecycle")
+        if isinstance(other_lifecycle, dict) and other_lifecycle.get("retired_at"):
+            continue
+        if (other.get("herdr_target") in agent_identity_values(agent)
+                or (isinstance(other_lifecycle, dict) and other_lifecycle.get("pane_id") == pane)):
+            raise PeerError("worker pane is also claimed by another endpoint")
+    if agent.get("agent_status") not in {"idle", "done"}:
+        raise PeerError("worker is not idle or done")
+    lifecycle_records(peer_id)
+    return endpoint, agent
+
+
+def command_complete(peer_id: str) -> int:
+    # Coordinator acknowledgement is explicit; it follows verification of the
+    # worker's reply and artifacts. The ledger gate is checked again on retire.
+    registry = read_registry()
+    endpoint = registry["endpoints"].get(peer_id)
+    if not isinstance(endpoint, dict) or not isinstance(endpoint.get("lifecycle"), dict):
+        raise PeerError("endpoint is not a managed ephemeral worker")
+    lifecycle = endpoint["lifecycle"]
+    if lifecycle.get("retired_at"):
+        raise PeerError("worker is already retired")
+    if lifecycle.get("completed_at"):
+        raise PeerError("worker completion is already acknowledged")
+    lifecycle_gate(peer_id, retention=False, require_complete=False)
+    lock = ledger_lock()
+    try:
+        current = read_registry()
+        target = current["endpoints"].get(peer_id)
+        if target != endpoint:
+            raise PeerError("worker endpoint changed during completion acknowledgement")
+        target["lifecycle"]["completed_at"] = utc_now()
+        write_registry(current)
+    finally:
+        lock.close()
+    emit({"peer_id": peer_id, "completed_at": target["lifecycle"]["completed_at"]})
+    return 0
+
+
+def command_retire(peer_id: str, *, retention: bool = False, emit_result: bool = True) -> int:
+    lock = ledger_lock()
+    try:
+        endpoint, agent = lifecycle_gate(peer_id, retention=retention)
+        session = str(endpoint["herdr_session"])
+        pane = str(agent["pane_id"])
+        path = state_root() / "tombstones" / (peer_id.replace("/", "__") + ".json")
+        if path.exists():
+            raise PeerError("worker already has a tombstone; inspect it before retry")
+        # A bounded interrupt gives the agent a chance to leave cleanly. An
+        # unsupported key dialect fails closed before the pane close.
+        # Pane identity is the ownership boundary.  Herdr 0.8 exposes prompts
+        # through the agent API, but terminal control remains a pane operation.
+        gentle = run(
+            [herdr_binary(), "--session", session, "pane", "send-keys", pane, "C-c"],
+            timeout=10,
+        )
+        if gentle.returncode != 0:
+            raise PeerError(f"Herdr graceful interrupt failed: {(gentle.stderr or gentle.stdout).strip()}")
+        time.sleep(1)
+        endpoint, agent = lifecycle_gate(peer_id, retention=retention)
+        tombstone = {
+            "schema": "dotcortex.peer-tombstone.v1", "peer_id": peer_id,
+            "herdr_session": session, "pane_id": pane,
+            "terminal_id": agent.get("terminal_id"),
+            "completed_at": endpoint["lifecycle"]["completed_at"],
+            "at": utc_now(), "state": "closing",
+        }
+        atomic_json(path, tombstone)
+        closed = run([herdr_binary(), "--session", session, "pane", "close", pane], timeout=15)
+        if closed.returncode != 0:
+            tombstone["state"] = "close-failed"
+            tombstone["error"] = (closed.stderr or closed.stdout).strip()
+            atomic_json(path, tombstone)
+            raise PeerError(f"Herdr pane close failed: {tombstone['error']}")
+        tombstone["state"] = "retired"
+        tombstone["retired_at"] = utc_now()
+        atomic_json(path, tombstone)
+        current = read_registry()
+        current["endpoints"][peer_id]["lifecycle"]["retired_at"] = tombstone["retired_at"]
+        write_registry(current)
+        if emit_result:
+            emit(tombstone)
+        return 0
+    finally:
+        lock.close()
+
+
+def command_reap(apply: bool) -> int:
+    registry = read_registry()
+    endpoints = registry["endpoints"]
+    assert isinstance(endpoints, dict)
+    rows: list[dict[str, object]] = []
+    for peer_id, endpoint in sorted(endpoints.items()):
+        if not isinstance(endpoint, dict) or not isinstance(endpoint.get("lifecycle"), dict):
+            continue
+        if endpoint["lifecycle"].get("kind") != "agent-peer-ephemeral-v1":
+            continue
+        if endpoint["lifecycle"].get("retired_at"):
+            continue
+        try:
+            lifecycle_gate(peer_id, retention=True)
+            if apply:
+                command_retire(peer_id, retention=True, emit_result=False)
+            rows.append({"peer_id": peer_id, "state": "retired" if apply else "eligible"})
+        except PeerError as error:
+            rows.append({"peer_id": peer_id, "state": "refused", "reason": str(error)})
+    emit({"schema": "dotcortex.peer-reap.v1", "mode": "apply" if apply else "plan", "workers": rows})
+    return 1 if apply and any(row["state"] == "refused" for row in rows) else 0
+
+
 def command_inventory(session: str | None) -> int:
     registry = read_registry()
     sessions: list[str] = []
@@ -3025,6 +3321,7 @@ def command_selftest() -> int:
                 "AGENT_PEER_HERDR_START_TIMEOUT_MS",
                 "AGENT_PEER_HERDR_PANE_READY_TIMEOUT_MS",
                 "AGENT_PEER_ORIGIN_HOST",
+                "AGENT_PEER_TEST_NAME",
             )
         }
         try:
@@ -3043,7 +3340,7 @@ def command_selftest() -> int:
                 " pathlib.Path(call_log).write_text(json.dumps(calls), encoding='utf-8')\n"
                 "if args[-2:] == ['api', 'snapshot']:\n"
                 " print(json.dumps({'result': {'snapshot': {'agents': [{"
-                "'terminal_id':'term-1','pane_id':'pane-1','name':'peer',"
+                "'terminal_id':'term-1','pane_id':'pane-1','name':os.environ.get('AGENT_PEER_TEST_NAME','peer'),"
                 "'agent':'codex','agent_status':'idle','agent_session':"
                 "{'value':'session-b'}}]}}}))\n"
                 "elif 'workspace' in args and 'create' in args:\n"
@@ -3060,6 +3357,8 @@ def command_selftest() -> int:
                 " pathlib.Path(os.environ['AGENT_PEER_TEST_CAPTURE']).write_text("
                 "json.dumps(args), encoding='utf-8')\n"
                 " print('started')\n"
+                "elif ('pane' in args or 'agent' in args) and ('close' in args or 'send-keys' in args):\n"
+                " print('ok')\n"
                 "elif 'pane' in args and 'run' in args:\n"
                 " pathlib.Path(os.environ['AGENT_PEER_TEST_CAPTURE']).write_text("
                 "json.dumps(args), encoding='utf-8')\n"
@@ -3529,8 +3828,13 @@ def command_selftest() -> int:
 
             capture.write_text("[]", encoding="utf-8")
             request = spawn_request("host-b/codex/spawned-1")
+            os.environ["AGENT_PEER_TEST_NAME"] = "spawned-1"
             spawned = receive_envelope(request, origin_host="host-a")
-            started_argv = json.loads(capture.read_text(encoding="utf-8"))
+            os.environ.pop("AGENT_PEER_TEST_NAME", None)
+            started_argv = next(
+                call for call in json.loads(calls.read_text(encoding="utf-8"))
+                if "start" in call and "spawned-1" in call
+            )
             new_endpoint = read_registry()["endpoints"].get("host-b/codex/spawned-1", {})
             check("spawn-starts-profile-argv",
                   spawned.get("state") == "spawned"
@@ -3539,7 +3843,8 @@ def command_selftest() -> int:
                   json.dumps(started_argv))
             check("spawned-endpoint-accepts-only-requester",
                   new_endpoint.get("accept_from") == ["host-a/claude/session-a"]
-                  and new_endpoint.get("spawned_by", {}).get("profile") == "worker")
+                  and new_endpoint.get("spawned_by", {}).get("profile") == "worker"
+                  and new_endpoint.get("lifecycle", {}).get("pane_id") == "pane-1")
             check("spawn-duplicate-is-idempotent",
                   receive_envelope(request, origin_host="host-a").get("duplicate") is True)
             refused("spawn-names-are-single-use", "single-use",
@@ -3582,6 +3887,140 @@ def command_selftest() -> int:
                   zone_report.get("count") == 1 and zone_report["pulled"][0].get("state") == "rejected"
                   and "transport origin" in str(zone_report["pulled"][0].get("error")),
                   json.dumps(zone_report))
+
+            # Managed lifecycle: only a peer-start creation record can retire.
+            os.environ["AGENT_PEER_STATE_DIR"] = str(root / "lifecycle-state")
+            os.environ["AGENT_PEER_HERDR_STYLE"] = "cwd"
+            os.environ["AGENT_PEER_HERDR_PROMPT"] = "pane-run"
+            os.environ["AGENT_PEER_TEST_CALLS"] = str(calls)
+            calls.write_text("[]", encoding="utf-8")
+            managed = blank_registry("host-b")
+            managed["endpoints"] = {
+                "host-b/codex/human": {
+                    "provider": "codex", "session_id": "human", "herdr_session": "peer-lab",
+                    "herdr_target": "peer", "repo_root": str(root),
+                    "accept_from": ["host-a/claude/session-a"],
+                }
+            }
+            write_registry(managed)
+            refused("retire-protects-legacy-endpoint", "no agent-peer ephemeral",
+                    lambda: command_retire("host-b/codex/human"))
+            managed["endpoints"].pop("host-b/codex/human")
+            write_registry(managed)
+            refused("managed-start-protects-default", "default and warm",
+                    lambda: command_peer_start("default", "peer", str(root), ["codex"],
+                                               peer_id="host-b/codex/peer",
+                                               accept_from=["host-a/claude/session-a"]))
+            refused("managed-start-protects-warm", "default and warm",
+                    lambda: command_peer_start("peer-lab", "peer", str(root), ["codex-warm"],
+                                               peer_id="host-b/codex/peer",
+                                               accept_from=["host-a/claude/session-a"]))
+            with contextlib.redirect_stdout(io.StringIO()):
+                command_peer_start("peer-lab", "peer", str(root), ["codex"],
+                                   peer_id="host-b/codex/peer",
+                                   accept_from=["host-a/claude/session-a"])
+            worker = "host-b/codex/peer"
+            owner = read_registry()["endpoints"][worker]["lifecycle"]
+            check("peer-start-records-exact-pane",
+                  owner["kind"] == "agent-peer-ephemeral-v1"
+                  and owner["pane_id"] == "pane-1" and owner["terminal_id"] == "term-1")
+            pending = compose_envelope(
+                from_peer="host-a/claude/session-a", to_peer=worker, repo="fixture",
+                repo_root=str(root), checkout_id="host-b:fixture", access="read",
+                body="finish", handoff=None, allow_git=False, allow_push=False,
+                allow_pull=False, lease_id=None)
+            write_record("inbox", pending, "delivered")
+            refused("completion-requires-task-reply", "no delivered reply",
+                    lambda: command_complete(worker))
+            reply = compose_envelope(
+                from_peer=worker, to_peer="host-a/claude/session-a", repo="fixture",
+                repo_root=str(root), checkout_id="host-b:fixture", access="read",
+                body="done", handoff=None, allow_git=False, allow_push=False,
+                allow_pull=False, lease_id=None, kind="reply",
+                in_reply_to=str(pending["message_id"]))
+            write_record("outbox", reply, "queued")
+            refused("completion-requires-delivered-outbound", "no delivered reply",
+                    lambda: command_complete(worker))
+            write_record("outbox", reply, "delivered")
+            live_lease = {
+                "lease_id": str(uuid.uuid4()), "scopes": ["checkout-write"],
+                "checkout_id": "host-b:fixture", "holder": worker,
+                "acquired_at": utc_now(),
+                "expires_at": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat(),
+            }
+            atomic_json(leases_path(), {"schema": "dotcortex.peer-leases.v1",
+                                        "leases": {"fixture": live_lease}})
+            refused("completion-refuses-active-lease", "active checkout",
+                    lambda: command_complete(worker))
+            atomic_json(leases_path(), {"schema": "dotcortex.peer-leases.v1", "leases": {}})
+            with contextlib.redirect_stdout(io.StringIO()):
+                command_complete(worker)
+            atomic_json(leases_path(), {"schema": "dotcortex.peer-leases.v1",
+                                        "leases": {"fixture": live_lease}})
+            refused("retire-rechecks-lease-after-ack", "active checkout",
+                    lambda: command_retire(worker))
+            atomic_json(leases_path(), {"schema": "dotcortex.peer-leases.v1", "leases": {}})
+            alias = read_registry()
+            alias["endpoints"]["host-b/codex/human"] = {
+                "provider": "codex", "session_id": "human", "herdr_session": "peer-lab",
+                "herdr_target": "peer", "repo_root": str(root),
+                "accept_from": ["host-a/claude/session-a"],
+            }
+            write_registry(alias)
+            refused("retire-protects-shared-human-target", "another endpoint",
+                    lambda: command_retire(worker))
+            alias["endpoints"].pop("host-b/codex/human")
+            write_registry(alias)
+            before_plan = json.loads(calls.read_text(encoding="utf-8"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                command_reap(False)
+            after_plan = json.loads(calls.read_text(encoding="utf-8"))
+            check("reap-plan-does-not-close-or-write-tombstone",
+                  not (state_root() / "tombstones").exists()
+                  and not any("close" in call for call in after_plan[len(before_plan):]))
+            old = read_registry()
+            old["endpoints"][worker]["lifecycle"]["completed_at"] = (
+                dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)
+            ).isoformat()
+            write_registry(old)
+            with contextlib.redirect_stdout(io.StringIO()):
+                command_reap(True)
+            final_calls = json.loads(calls.read_text(encoding="utf-8"))
+            closes = [call for call in final_calls if "close" in call]
+            check("reap-closes-exact-owned-pane",
+                  closes == [["--session", "peer-lab", "pane", "close", "pane-1"]])
+            tombstone = load_json(state_root() / "tombstones" / "host-b__codex__peer.json")
+            check("retire-writes-tombstone", tombstone.get("state") == "retired"
+                  and tombstone.get("pane_id") == "pane-1")
+            refused("retire-idempotent-no-second-close", "already retired",
+                    lambda: command_retire(worker))
+            check("retire-never-closes-again", len([call for call in json.loads(calls.read_text(encoding="utf-8"))
+                                                      if "close" in call]) == 1)
+            # The modern dialect still uses exact-pane terminal control before
+            # the same exact pane close. The fake remains isolated from every
+            # live session.
+            os.environ["AGENT_PEER_HERDR_STYLE"] = "pane"
+            os.environ["AGENT_PEER_HERDR_PROMPT"] = "agent-prompt"
+            os.environ["AGENT_PEER_TEST_NAME"] = "modern"
+            with contextlib.redirect_stdout(io.StringIO()):
+                command_peer_start("peer-lab", "modern", str(root), ["codex"],
+                                   peer_id="host-b/codex/modern",
+                                   accept_from=["host-a/claude/session-a"])
+                command_complete("host-b/codex/modern")
+            recent = read_registry()
+            recent["endpoints"]["host-b/codex/modern"]["lifecycle"]["completed_at"] = (
+                dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)
+            ).isoformat()
+            write_registry(recent)
+            calls.write_text("[]", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                command_reap(True)
+            modern_calls = json.loads(calls.read_text(encoding="utf-8"))
+            check("modern-herdr-graceful-exact-close",
+                  [call for call in modern_calls if "send-keys" in call]
+                  == [["--session", "peer-lab", "pane", "send-keys", "pane-1", "C-c"]]
+                  and [call for call in modern_calls if "close" in call]
+                  == [["--session", "peer-lab", "pane", "close", "pane-1"]])
         finally:
             for key, value in old_env.items():
                 if value is None:
@@ -3626,6 +4065,8 @@ def build_parser() -> argparse.ArgumentParser:
     peer_start.add_argument("--workspace")
     peer_start.add_argument("--tab")
     peer_start.add_argument("--intro-file")
+    peer_start.add_argument("--peer-id")
+    peer_start.add_argument("--accept-from", action="append", default=[])
     peer_start.add_argument("peer_command", nargs=argparse.REMAINDER)
 
     send = sub.add_parser("send")
@@ -3676,6 +4117,14 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("message_id")
     sub.add_parser("status")
     sub.add_parser("selftest")
+    complete = sub.add_parser("complete")
+    complete.add_argument("peer_id")
+    retire = sub.add_parser("retire")
+    retire.add_argument("peer_id")
+    reap = sub.add_parser("reap")
+    mode = reap.add_mutually_exclusive_group()
+    mode.add_argument("--plan", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     pending = sub.add_parser("outbound-pending")
     pending.add_argument("dest_host")
     pull = sub.add_parser("pull")
@@ -3725,6 +4174,8 @@ def main() -> int:
                 workspace=args.workspace,
                 tab=args.tab,
                 intro_file=args.intro_file,
+                peer_id=args.peer_id,
+                accept_from=args.accept_from,
             )
         if args.command == "send":
             return command_send(args)
@@ -3754,6 +4205,12 @@ def main() -> int:
             return command_status()
         if args.command == "selftest":
             return command_selftest()
+        if args.command == "complete":
+            return command_complete(args.peer_id)
+        if args.command == "retire":
+            return command_retire(args.peer_id)
+        if args.command == "reap":
+            return command_reap(args.apply)
         if args.command == "outbound-pending":
             return command_outbound_pending(args.dest_host)
         if args.command == "pull":

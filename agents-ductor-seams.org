@@ -576,7 +576,10 @@ async def handle_busy_request(server, request):
     if handler is None:
         return reply({"busy": True, "known": False, "error": "authority_missing"}, 503)
     try:
-        return reply(await handler())
+        state = await handler()
+        if getattr(server, "_idle_message_handler", None) is not None:
+            state["idle_prompt"] = "ductor.idle_prompt.v2"
+        return reply(state)
     except Exception:
         logger.exception("Main-session busy authority failed")
         return reply({"busy": True, "known": False, "error": "busy_state_unavailable"}, 503)
@@ -631,6 +634,254 @@ async def handle_busy_request(server, request):
          upload_dir=paths.api_files_dir,
 #+END_SRC
 
+* Conditional idle prompt admission
+
+The =idle_prompt= seam adds =ductor.idle_prompt.v2= without another listener.
+=GET /busy= advertises it only when the callback is wired; watchers must require
+that capability.
+
+An authenticated, loopback-only, non-proxied connection may send an encrypted
+={type: "idle_message", request_id: "YOUR_REQUEST_ID", session_key:
+"YOUR_SESSION_KEY", text: "YOUR_PROMPT", mirror_to_telegram: true}=. Only the
+default flat Telegram session with a wired Telegram MessageBus is eligible.
+The encrypted ACK is =accepted=, =busy=, =unavailable= or =invalid=. Loss after
+sending is ambiguous and must never be retried automatically.
+
+The API and bus currently own distinct lock pools. Admission checks all existing
+busy authorities after session lookup, then acquires *both* per-session locks
+without yielding. Pending lock waiters are busy too. The detached turn holds
+both owners throughout =handle_message_streaming=. On completion it submits a
+lock-free =WEBHOOK_WAKE= result to Ductor's own Telegram transport before also
+offering the result on the encrypted channel. Disconnect after acknowledgment
+cannot abort the admitted turn; shutdown cancels and joins it.
+
+This branch-only seam adds no listener or private identity; apply/restart still
+requires operator approval.
+
+The applier classifies and replays the whole ordered series with zero fuzz on a
+disposable copy; it never reverses a live target. Tests cover shutdown, drift,
+idempotence and every prerequisite/admission state.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/ductor-seams/idle_prompt.py
+"""Atomic idle admission on Ductor's existing encrypted input surface."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from ductor_bot.api.busy_state import _loopback, main_busy_state
+from ductor_bot.session.key import SessionKey
+
+logger = logging.getLogger(__name__)
+PROTOCOL = "ductor.idle_prompt.v2"
+
+
+def idle_peer_allowed(server, request):
+    return bool(server._config.token and _loopback(server._config.host)
+        and _loopback(request.remote or "")
+        and not any(name.lower() == "forwarded" or name.lower().startswith("x-forwarded-")
+                    for name in request.headers))
+
+
+def _claimable(lock):
+    # asyncio.Lock.acquire's uncontended fast path has no suspension. An unlocked
+    # lock with a notified-but-not-resumed waiter is NOT that path. Fail closed
+    # on a different lock implementation instead of guessing its await semantics.
+    return (type(lock) is asyncio.Lock and not lock.locked()
+            and not any(not waiter.cancelled() for waiter in (lock._waiters or ())))
+
+
+async def _run_turn(orch, server, channel, key, text, start):
+    try:
+        await start.wait()
+        result = await orch.handle_message_streaming(key, text)
+        from ductor_bot.bus.adapters import from_webhook_wake
+        from ductor_bot.bus.envelope import LockMode
+        envelope = from_webhook_wake(key.chat_id, text)
+        envelope.topic_id = key.topic_id
+        envelope.transport = key.transport
+        envelope.result_text = result.text
+        envelope.status = "success"
+        envelope.lock_mode = LockMode.NONE
+        await orch._message_bus.submit(envelope)
+        logger.info("Idle-admitted turn completed key=%s", key.storage_key)
+        await channel.send({"type": "result", "text": result.text,
+                            "stream_fallback": result.stream_fallback})
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Idle-admitted turn failed key=%s", key.storage_key)
+
+
+async def handle_idle_message(orch, server, channel, key, data):
+    request_id = data.get("request_id")
+    async def reply(status):
+        await channel.send({"type": "idle_admission", "request_id": request_id,
+                            "session_key": key.storage_key, "status": status})
+    if (set(data) != {"type", "request_id", "session_key", "text", "mirror_to_telegram"}
+            or not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{32}", request_id)
+            or not isinstance(data.get("text"), str) or not data["text"].strip()
+            or len(data["text"]) > 16000 or data["session_key"] != key.storage_key
+            or data["mirror_to_telegram"] is not True):
+        await reply("invalid"); return
+    bus = getattr(orch, "_message_bus", None)
+    telegram = any(getattr(item, "transport_name", None) == "tg"
+                   for item in getattr(bus, "_transports", ()))
+    if (not channel.idle_prompt_allowed or key != SessionKey(chat_id=server._default_chat_id)
+            or key.transport != "tg" or not callable(getattr(bus, "submit", None)) or not telegram):
+        await reply("unavailable"); return
+    try:
+        state = await main_busy_state(orch, server)
+        if (server._idle_stopping or state["known"] is not True
+                or state["session_key"] != key.storage_key):
+            await reply("unavailable"); return
+        if state["busy"] is not False:
+            await reply("busy"); return
+        pools = (server._lock_pool, orch._lock_pool)
+        locks = []
+        for pool in pools:
+            lock = pool.get(key.lock_key)
+            if lock not in locks:
+                locks.append(lock)
+        if not all(_claimable(lock) for lock in locks):
+            await reply("busy"); return
+        # No suspension occurs between the authoritative decision and these
+        # uncontended acquire calls. Both pools remain held for the whole turn.
+        acquired = []
+        try:
+            for lock in locks:
+                await lock.acquire()
+                acquired.append(lock)
+            start = asyncio.Event()
+            task = asyncio.create_task(_run_turn(orch, server, channel, key, data["text"], start))
+        except BaseException:
+            for lock in reversed(acquired):
+                lock.release()
+            raise
+        server._idle_tasks.add(task)
+        def settled(done):
+            # A task cancelled before its coroutine first runs still owns locks.
+            for lock in reversed(locks):
+                lock.release()
+            server._idle_tasks.discard(done)
+        task.add_done_callback(settled)
+    except Exception:
+        logger.exception("Idle prompt authority unavailable")
+        await reply("unavailable"); return
+    try:
+        await reply("accepted")
+    finally:
+        # Admission is irrevocable even if sending the ACK fails. The watcher
+        # records ambiguity; the server still runs the accepted turn once.
+        start.set()
+#+END_SRC
+
+#+BEGIN_SRC diff :tangle all/.local/share/dotcortex/ductor-seams/idle_prompt_api.patch
+--- a/ductor_bot/api/server.py
++++ b/ductor_bot/api/server.py
+@@ -96,11 +96,12 @@
+ class _SecureChannel:
+     """Encrypted WebSocket channel for post-auth communication."""
+ 
+-    __slots__ = ("_e2e", "ws")
+-
+-    def __init__(self, ws: web.WebSocketResponse, e2e: E2ESession) -> None:
++    __slots__ = ("_e2e", "ws", "idle_prompt_allowed")
++
++    def __init__(self, ws: web.WebSocketResponse, e2e: E2ESession, *, idle_prompt_allowed=False) -> None:
+         self.ws = ws
+         self._e2e = e2e
++        self.idle_prompt_allowed = idle_prompt_allowed
+ 
+     @property
+     def closed(self) -> bool:
+@@ -194,6 +195,9 @@
+         self._provider_info: list[dict[str, object]] = []
+         self._active_state_getter: Callable[[], tuple[str, str]] | None = None
+         self._busy_state_handler: Callable[[], Awaitable[dict[str, object]]] | None = None
++        self._idle_message_handler = None
++        self._idle_tasks: set[asyncio.Task] = set()
++        self._idle_stopping = False
+ 
+     # -- Handler wiring --------------------------------------------------------
+ 
+@@ -227,6 +231,9 @@
+ 
+     def set_busy_state_handler(self, handler: Callable[[], Awaitable[dict[str, object]]]) -> None:
+         self._busy_state_handler = handler
++
++    def set_idle_message_handler(self, handler) -> None:
++        self._idle_message_handler = handler
+ 
+ 
+     # -- Lifecycle -------------------------------------------------------------
+@@ -262,6 +269,12 @@
+ 
+     async def stop(self) -> None:
+         """Close all connections and shut down the server."""
++        self._idle_stopping = True
++        tasks = list(self._idle_tasks)
++        for task in tasks:
++            task.cancel()
++        await asyncio.gather(*tasks, return_exceptions=True)
++        self._idle_tasks.clear()
+         for ws in list(self._active_ws):
+             await ws.close(
+                 code=aiohttp.WSCloseCode.GOING_AWAY,
+@@ -401,7 +414,9 @@
+             return ws
+ 
+         key, e2e = auth_result
+-        channel = _SecureChannel(ws, e2e)
++        from ductor_bot.api.idle_prompt import idle_peer_allowed
++        channel = _SecureChannel(ws, e2e,
++                                 idle_prompt_allowed=idle_peer_allowed(self, request))
+ 
+         self._active_ws.add(ws)
+         try:
+@@ -534,6 +549,14 @@
+             return
+ 
+         msg_type = str(data.get("type", ""))
++
++        if msg_type == "idle_message":
++            if self._idle_message_handler is None:
++                await channel.send({"type": "idle_admission", "request_id": data.get("request_id"),
++                                    "session_key": key.storage_key, "status": "unavailable"})
++            else:
++                await self._idle_message_handler(channel, key, data)
++            return
+ 
+         if msg_type == "message":
+             text = str(data.get("text", "")).strip()
+--- a/ductor_bot/orchestrator/lifecycle.py
++++ b/ductor_bot/orchestrator/lifecycle.py
+@@ -165,6 +165,10 @@
+     from ductor_bot.api.busy_state import main_busy_state
+ 
+     server.set_busy_state_handler(lambda: main_busy_state(orch, server))
++    from ductor_bot.api.idle_prompt import handle_idle_message
++
++    server.set_idle_message_handler(
++        lambda channel, key, data: handle_idle_message(orch, server, channel, key, data))
+     server.set_file_context(
+         allowed_roots=resolve_allowed_roots(config.file_access, paths.workspace),
+         upload_dir=paths.api_files_dir,
+#+END_SRC
+
+#+BEGIN_SRC diff :tangle all/.local/share/dotcortex/ductor-seams/idle_prompt_telegram.patch
+--- a/ductor_bot/orchestrator/core.py
++++ b/ductor_bot/orchestrator/core.py
+@@ -556,6 +556,7 @@ class Orchestrator:
+     ) -> None:
+         """Wire all observer result callbacks to the message bus."""
+         self._observers.wire_to_bus(bus, wake_handler=wake_handler)
++        self._message_bus = bus
+         bus.set_injector(self)
+         self._lock_pool = bus.lock_pool
+         # Share the bus lock pool with MemoryFlusher so silent flush / compact
+#+END_SRC
+
 * ductor-seam-apply
 #+BEGIN_SRC bash :tangle all/.local/bin/ductor-seam-apply :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
 # ductor-seam-apply — apply DotCortex's fleet-wide seams to an installed ductor_bot.
@@ -663,6 +914,7 @@ Seams:
   idle_compact  compact idle main sessions before the provider cache expires
                 (Claude 55/60 min, Codex 25/30 min; config.json "idle_compaction")
   busy_state    authenticated loopback GET /busy for the default main session
+  idle_prompt   encrypted idle-only prompt admission holding API and bus locks
 
 Seam files:  <dotcortex>/all/.local/share/dotcortex/ductor-seams/
              (override with DOTCORTEX_DUCTOR_SEAMS)
@@ -715,9 +967,9 @@ seam_file_state() {  # $1 = seam source, $2 = installed path
 }
 
 seam_patch_state() {  # $1 = patch file
-    if patch -d "$SITE" -p1 --fuzz=0 --dry-run --reverse --force -s <"$1" >/dev/null 2>&1; then
+    if patch -d "${2:-$SITE}" -p1 --fuzz=0 --dry-run --reverse --force -s <"$1" >/dev/null 2>&1; then
         echo applied
-    elif patch -d "$SITE" -p1 --fuzz=0 --dry-run --forward --force -s <"$1" >/dev/null 2>&1; then
+    elif patch -d "${2:-$SITE}" -p1 --fuzz=0 --dry-run --forward --force -s <"$1" >/dev/null 2>&1; then
         echo missing
     else
         echo drifted
@@ -731,40 +983,67 @@ hook_patch="$SEAMS_DIR/idle_compact_lifecycle.patch"
 [ -f "$module_src" ] && [ -f "$hook_patch" ] || fail "idle_compact seam files missing in $SEAMS_DIR"
 
 module_state="$(seam_file_state "$module_src" "$module_dst")"
-hook_state="$(seam_patch_state "$hook_patch")"
-[ "$hook_state" != drifted ] || fail "idle_compact: orchestrator/lifecycle.py drifted from the seam; regenerate it"
-echo "idle_compact: module=$module_state hook=$hook_state"
 
 busy_src="$SEAMS_DIR/busy_state.py"
 busy_dst="$PKG/api/busy_state.py"
 busy_patch="$SEAMS_DIR/busy_state_api.patch"
 [ -f "$busy_src" ] && [ -f "$busy_patch" ] || fail "busy_state seam files missing in $SEAMS_DIR"
 busy_module_state="$(seam_file_state "$busy_src" "$busy_dst")"
-busy_hook_state="$(seam_patch_state "$busy_patch")"
-[ "$busy_hook_state" != drifted ] || fail "busy_state: API/lifecycle upstream drift; regenerate it"
-echo "busy_state: module=$busy_module_state hook=$busy_hook_state"
 
-if [ "$CHECK_ONLY" -eq 1 ]; then
-    [ "$module_state" = applied ] && [ "$hook_state" = applied ] || missing=1
-    [ "$busy_module_state" = applied ] && [ "$busy_hook_state" = applied ] || missing=1
-    exit "$missing"
-fi
+prompt_src="$SEAMS_DIR/idle_prompt.py"
+prompt_dst="$PKG/api/idle_prompt.py"
+prompt_patch="$SEAMS_DIR/idle_prompt_api.patch"
+mirror_patch="$SEAMS_DIR/idle_prompt_telegram.patch"
+[ -f "$prompt_src" ] && [ -f "$prompt_patch" ] && [ -f "$mirror_patch" ] \
+    || fail "idle_prompt seam files missing in $SEAMS_DIR"
+prompt_module_state="$(seam_file_state "$prompt_src" "$prompt_dst")"
 
 # Validate the complete ordered series on a disposable staged copy first.
+# Later patches overlap earlier context. Peel an applied admission hook off
+# this copy before classifying its prerequisites; never reverse the live target.
 preflight="$(mktemp -d)"
 trap 'rm -rf "$preflight"' EXIT
 mkdir -p "$preflight/ductor_bot/orchestrator" "$preflight/ductor_bot/api"
 cp "$PKG/orchestrator/lifecycle.py" "$preflight/ductor_bot/orchestrator/"
+cp "$PKG/orchestrator/core.py" "$preflight/ductor_bot/orchestrator/"
 cp "$PKG/api/server.py" "$preflight/ductor_bot/api/"
 install -m 0644 "$module_src" "$preflight/ductor_bot/orchestrator/idle_compact.py"
 install -m 0644 "$busy_src" "$preflight/ductor_bot/api/busy_state.py"
+install -m 0644 "$prompt_src" "$preflight/ductor_bot/api/idle_prompt.py"
+prompt_hook_state=missing
+if patch -d "$preflight" -p1 --fuzz=0 --dry-run --reverse --force -s <"$prompt_patch" >/dev/null 2>&1; then
+    prompt_hook_state=applied
+    patch -d "$preflight" -p1 --fuzz=0 --reverse --force -s <"$prompt_patch" || fail "idle_prompt reverse preflight failed"
+fi
+hook_state="$(seam_patch_state "$hook_patch" "$preflight")"
+[ "$hook_state" != drifted ] || fail "idle_compact: orchestrator/lifecycle.py drifted from the seam; regenerate it"
+echo "idle_compact: module=$module_state hook=$hook_state"
+busy_hook_state="$(seam_patch_state "$busy_patch" "$preflight")"
+[ "$busy_hook_state" != drifted ] || fail "busy_state: API/lifecycle upstream drift; regenerate it"
+echo "busy_state: module=$busy_module_state hook=$busy_hook_state"
 if [ "$hook_state" = missing ]; then
     patch -d "$preflight" -p1 --fuzz=0 --forward -s <"$hook_patch" || fail "idle_compact preflight failed"
 fi
 if [ "$busy_hook_state" = missing ]; then
     patch -d "$preflight" -p1 --fuzz=0 --forward -s <"$busy_patch" || fail "busy_state preflight failed"
 fi
+[ "$(seam_patch_state "$prompt_patch" "$preflight")" = missing ] || fail "idle_prompt: API/lifecycle upstream drift; regenerate it"
+echo "idle_prompt: module=$prompt_module_state hook=$prompt_hook_state"
+patch -d "$preflight" -p1 --fuzz=0 --forward -s <"$prompt_patch" || fail "idle_prompt preflight failed"
+mirror_hook_state="$(seam_patch_state "$mirror_patch" "$preflight")"
+[ "$mirror_hook_state" != drifted ] || fail "idle_prompt: Telegram bus hook drifted"
+if [ "$mirror_hook_state" = missing ]; then
+    patch -d "$preflight" -p1 --fuzz=0 --forward -s <"$mirror_patch" || fail "Telegram bus preflight failed"
+fi
 "$PYTHON_BIN" -m compileall -q "$preflight/ductor_bot" || fail "complete series preflight compile failed"
+
+if [ "$CHECK_ONLY" -eq 1 ]; then
+    [ "$module_state" = applied ] && [ "$hook_state" = applied ] || missing=1
+    [ "$busy_module_state" = applied ] && [ "$busy_hook_state" = applied ] || missing=1
+    [ "$prompt_module_state" = applied ] && [ "$prompt_hook_state" = applied ] \
+        && [ "$mirror_hook_state" = applied ] || missing=1
+    exit "$missing"
+fi
 
 if [ "$module_state" = missing ]; then
     install -m 0644 "$module_src" "$module_dst"
@@ -784,14 +1063,28 @@ if [ "$busy_hook_state" = missing ]; then
     changed=1
 fi
 
-(cd /tmp && "$PYTHON_BIN" -m py_compile "$module_dst" "$busy_dst" "$PKG/api/server.py" "$PKG/orchestrator/lifecycle.py") \
+if [ "$prompt_module_state" = missing ]; then
+    install -m 0644 "$prompt_src" "$prompt_dst"
+    changed=1
+fi
+if [ "$prompt_hook_state" = missing ]; then
+    patch -d "$SITE" -p1 --fuzz=0 --forward -s <"$prompt_patch"
+    changed=1
+fi
+if [ "$mirror_hook_state" = missing ]; then
+    patch -d "$SITE" -p1 --fuzz=0 --forward -s <"$mirror_patch"
+    changed=1
+fi
+
+(cd /tmp && "$PYTHON_BIN" -m py_compile "$module_dst" "$busy_dst" "$prompt_dst" "$PKG/api/server.py" "$PKG/orchestrator/lifecycle.py" "$PKG/orchestrator/core.py") \
     || fail "py_compile failed after applying seams"
 [ "$changed" -eq 1 ] && echo "ductor-seam-apply: seams applied to $SITE" || echo "ductor-seam-apply: already applied"
 #+END_SRC
 
 * OpenRC service for Ductor bots
 
-On OpenRC hosts (Honey) each Ductor bot was a hand-written =/etc/init.d= script outside DotCortex, so a pip upgrade there would drop the seams until someone re-ran the applier. One shared body replaces them: settings live in =/etc/conf.d/<svc>=, and =start_pre= re-applies the seams as the bot's own user before every start, refusing an unpatched start. =ductor-openrc-install= (root) puts the applier and seam files in =/usr/local/share/dotcortex/ductor-seams= (readable by every bot user, including agent users that cannot read an operator's checkout), installs the body and the conf file, and backs up whatever it replaces. It never starts or restarts anything.
+OpenRC =start_pre= reapplies the complete seam set and refuses an unpatched
+start. The installer stages files and backups only; it never restarts a bot.
 
 ** Service body
 #+BEGIN_SRC sh :tangle all/.local/share/dotcortex/ductor-seams/openrc/ductor
@@ -812,6 +1105,8 @@ On OpenRC hosts (Honey) each Ductor bot was a hand-written =/etc/init.d= script 
 #   ductor_port        DUCTOR_INTERAGENT_PORT (optional; pin it when several
 #                      Ductors share a host, or delegations land in the wrong hub)
 #   ductor_log_group   group that may read the log (default: ductor_group)
+#   ductor_path_add    extra PATH entries appended after ~/.local/bin and
+#                      ~/.npm-global/bin (e.g. the agent's Guix node profile)
 #   ductor_seams       seam directory holding ductor-seam-apply, readable by
 #                      ductor_user (default /usr/local/share/dotcortex/ductor-seams)
 #   ductor_umask       default 027
@@ -838,7 +1133,7 @@ umask="${ductor_umask}"
 export HOME="${user_home}"
 export DUCTOR_HOME="${ductor_home}"
 [ -n "${ductor_port}" ] && export DUCTOR_INTERAGENT_PORT="${ductor_port}"
-export PATH="${PATH}:${user_home}/.local/bin:${user_home}/.npm-global/bin"
+export PATH="${PATH}:${user_home}/.local/bin:${user_home}/.npm-global/bin${ductor_path_add:+:${ductor_path_add}}"
 
 depend() {
     # `use`, never `need`: Devuan's OpenRC has no hard `net` service.
@@ -898,7 +1193,7 @@ applier="$(cd "$seams/../../../bin" && pwd)/ductor-seam-apply"
 body="$seams/openrc/ductor"
 dest=/usr/local/share/dotcortex/ductor-seams
 ts="$(date +%Y%m%d-%H%M%S)"
-for f in "$applier" "$body" "$seams/idle_compact.py" "$seams/idle_compact_lifecycle.patch" "$seams/busy_state.py" "$seams/busy_state_api.patch"; do
+for f in "$applier" "$body" "$seams/idle_compact.py" "$seams/idle_compact_lifecycle.patch" "$seams/busy_state.py" "$seams/busy_state_api.patch" "$seams/idle_prompt.py" "$seams/idle_prompt_api.patch" "$seams/idle_prompt_telegram.patch"; do
     [ -r "$f" ] || { echo "missing source: $f" >&2; exit 1; }
 done
 
@@ -917,6 +1212,9 @@ place "$seams/idle_compact.py" "$dest/idle_compact.py" 0644
 place "$seams/idle_compact_lifecycle.patch" "$dest/idle_compact_lifecycle.patch" 0644
 place "$seams/busy_state.py" "$dest/busy_state.py" 0644
 place "$seams/busy_state_api.patch" "$dest/busy_state_api.patch" 0644
+place "$seams/idle_prompt.py" "$dest/idle_prompt.py" 0644
+place "$seams/idle_prompt_api.patch" "$dest/idle_prompt_api.patch" 0644
+place "$seams/idle_prompt_telegram.patch" "$dest/idle_prompt_telegram.patch" 0644
 place "$body" "/etc/init.d/$svc" 0755
 place "$conf" "/etc/conf.d/$svc" 0644
 #+END_SRC
@@ -943,11 +1241,57 @@ ductor_workdir="/home/agent-codex"
 # keeps honey-codex delegations in its own hub (incident 2026-09-16).
 ductor_port="8800"
 ductor_log_group="gille"
+# The agent's Guix node (agent-guix-apply). It comes after ~/.local/bin, so the
+# hand-copied node there wins until cutover step 4 removes it
+# (agents-bots-honey.org, "Flying Fox and Possum lanes").
+ductor_path_add="/home/agent-codex/.guix-extra-profiles/agent/agent/bin"
 #+END_SRC
 
 * Tests
-Busy-state checks run against a disposable copy of the installed pinned package, never the daemon: =python3 all/.local/share/dotcortex/tests/test-ductor-busy-state.py -v=. They reverse the existing lifecycle hook in the copy, apply the complete series, check idempotence and drift refusal, invoke handlers without a listening socket, and run a forced-idle mutant in a separate process. Live API/network prompts are never sent.
+Busy-state checks use a disposable pinned-package copy, zero-fuzz series apply,
+drift/idempotence checks and no live socket or prompt.
 
+Unit tests use fake sessions, locks and CLI services only.
+
+** Body test
+No root, no OpenRC, no =ductor_bot=: the body is sourced under =bash= with stubbed helpers.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-ductor-openrc.py :shebang "#!/usr/bin/env python3"
+"""Ductor OpenRC body: PATH and the Honey confs (agents-ductor-seams.org)."""
+from __future__ import annotations
+
+import subprocess
+import unittest
+from pathlib import Path
+
+
+OPENRC = Path(__file__).resolve().parents[1] / "ductor-seams/openrc"
+STUBS = """
+getent() { echo "$2:x:2001:2001::/home/$2:/bin/sh"; }
+"""
+
+
+def path_for(conf: str) -> str:
+    prog = f"{STUBS}\nRC_SVCNAME=t\nPATH=/usr/bin:/bin\n{conf}\n. '{OPENRC / 'ductor'}'\necho \"$PATH\""
+    return subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=30).stdout.strip()
+
+
+class DuctorOpenrcTests(unittest.TestCase):
+    def test_path_without_addition_is_unchanged(self) -> None:
+        self.assertEqual(path_for('ductor_user="u"; ductor_home="/h"'),
+                         "/usr/bin:/bin:/home/u/.local/bin:/home/u/.npm-global/bin")
+
+    def test_honey_codex_appends_the_guix_node(self) -> None:
+        conf = (OPENRC / "conf/honey-codex").read_text()
+        self.assertEqual(path_for(conf), "/usr/bin:/bin:/home/agent-codex/.local/bin:/home/agent-codex/.npm-global/bin:"
+                         "/home/agent-codex/.guix-extra-profiles/agent/agent/bin")
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+** Idle compaction tests
 Unit tests use fake sessions, a fake lock pool and a fake CLI service: no network, no real CLI. Run: =python3 ~/.local/share/dotcortex/tests/test-ductor-idle-compact.py= with the installed =ductor_bot= importable.
 
 #+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-ductor-idle-compact.py
@@ -1154,6 +1498,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -1417,6 +1762,55 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(snapshot(site), before)
             print("DRIFT REFUSAL:\n" + result.stdout + result.stderr)
 
+    def test_ordered_series_all_valid_hook_states(self):
+        for mirror, compact, stage in itertools.product((False, True), (False, True), range(3)):
+            with self.subTest(mirror=mirror, compact=compact, stage=stage), tempfile.TemporaryDirectory() as root:
+                site = Path(root)
+                shutil.copytree(SITE / "ductor_bot", site / "ductor_bot",
+                                ignore=shutil.ignore_patterns("__pycache__"))
+                patches = []
+                if not mirror:
+                    patches.append("idle_prompt_telegram.patch")
+                if stage < 2:
+                    patches.append("idle_prompt_api.patch")
+                if stage < 1:
+                    patches.append("busy_state_api.patch")
+                if not compact:
+                    patches.append("idle_compact_lifecycle.patch")
+                for name in patches:
+                    subprocess.run(["patch", "-d", str(site), "-p1", "--fuzz=0",
+                                    "--reverse", "--force", "-s"],
+                                   input=(SEAMS / name).read_bytes(), check=True, capture_output=True)
+                before = snapshot(site)
+                checked = apply(site, "--check")
+                self.assertEqual(checked.returncode, int(bool(patches)), checked.stdout + checked.stderr)
+                self.assertEqual(snapshot(site), before)
+                result = apply(site)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                after = snapshot(site)
+                result = apply(site)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("already applied", result.stdout)
+                self.assertEqual(snapshot(site), after)
+                self.assertEqual(apply(site, "--check").returncode, 0)
+
+    def test_admission_drift_refuses_before_mutation_on_applied_series(self):
+        with tempfile.TemporaryDirectory() as root:
+            site = Path(root)
+            shutil.copytree(SITE / "ductor_bot", site / "ductor_bot",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            target = site / "ductor_bot/api/server.py"
+            needle = "        self._idle_message_handler = None"
+            source = target.read_text()
+            self.assertEqual(source.count(needle), 1)
+            target.write_text(source.replace(needle, needle + "  # fixture upstream drift"))
+            before = snapshot(site)
+            for args in ((), ("--check",)):
+                result = apply(site, *args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("upstream drift", result.stderr)
+                self.assertEqual(snapshot(site), before)
+
     def test_forced_idle_mutant_fails_active_turn_test(self):
         env = dict(os.environ, DUCTOR_BUSY_MUTANT="1", PYTHONDONTWRITEBYTECODE="1")
         result = subprocess.run([sys.executable, __file__, "BusyTests.test_active_turn", "-v"],
@@ -1432,4 +1826,418 @@ if __name__ == "__main__":
         unittest.main()
     finally:
         TEMP.cleanup()
+#+END_SRC
+
+* Conditional idle prompt fixtures
+
+The fixtures use the encrypted router and real locks on a disposable package.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-ductor-idle-prompt.py
+"""Conditional Ductor admission tests: copied package, no socket or live CLI."""
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import json
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+
+FIXTURE = Path(__file__).with_name("test-ductor-busy-state.py")
+spec = importlib.util.spec_from_file_location("ductor_busy_fixture", FIXTURE)
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+from ductor_bot.api.crypto import E2ESession
+from ductor_bot.api.server import _SecureChannel
+from ductor_bot.api import idle_prompt as seam
+from ductor_bot.bus.bus import MessageBus
+from ductor_bot.bus.envelope import LockMode, Origin
+
+
+class Socket:
+    closed = False
+    def __init__(self):
+        self.frames = []
+    async def send_str(self, frame):
+        self.frames.append(frame)
+
+
+class IdlePromptTests(unittest.IsolatedAsyncioTestCase):
+    setUp = fixture.BusyTests.setUp
+    request = fixture.BusyTests.request
+
+    def channel(self, allowed=True):
+        client, server = E2ESession(), E2ESession()
+        client.set_remote_key(server.local_pk_b64)
+        server.set_remote_key(client.local_pk_b64)
+        socket = Socket()
+        channel = _SecureChannel(socket, server, idle_prompt_allowed=allowed)
+        return client, channel
+
+    def prepare(self):
+        self.server.set_idle_message_handler(lambda channel, key, data:
+            seam.handle_idle_message(self.orch, self.server, channel, key, data))
+        self.telegram = []
+        test = self
+        class Telegram:
+            transport_name = "tg"
+            async def deliver(inner, envelope):
+                test.telegram.append(envelope)
+            async def deliver_broadcast(inner, envelope):
+                raise AssertionError("wake reply must be unicast")
+        bus = MessageBus(self.orch._lock_pool)
+        bus.register_transport(Telegram())
+        self.orch._message_bus = bus
+        self.calls = []
+        self.entered = asyncio.Event(); self.finish = asyncio.Event()
+        async def handler(key, text):
+            self.assertTrue(self.orch._lock_pool.is_locked(key.lock_key))
+            self.assertTrue(self.server._lock_pool.is_locked(key.lock_key))
+            self.calls.append((key, text)); self.entered.set()
+            await self.finish.wait()
+            return SimpleNamespace(text="handled", stream_fallback=False)
+        self.orch.handle_message_streaming = handler
+
+    async def route(self, client, channel, **overrides):
+        payload = {"type": "idle_message", "request_id": "a" * 32,
+                   "session_key": fixture.KEY.storage_key, "text": "MailCortex delivery",
+                   "mirror_to_telegram": True}
+        payload.update(overrides)
+        await self.server._route_text_message(channel, client.encrypt(payload), fixture.KEY,
+            self.server._lock_pool.get(fixture.KEY.lock_key))
+        return [client.decrypt(frame) for frame in channel.ws.frames]
+
+    async def settle(self):
+        self.finish.set()
+        await asyncio.gather(*list(self.server._idle_tasks))
+
+    async def test_idle_admission_uses_real_router_and_holds_both_lock_owners(self):
+        self.prepare(); client, channel = self.channel()
+        frames = await self.route(client, channel)
+        self.assertEqual(frames, [{"type": "idle_admission", "request_id": "a" * 32,
+            "session_key": fixture.KEY.storage_key, "status": "accepted"}])
+        await self.entered.wait()
+        self.assertEqual(self.calls, [(fixture.KEY, "MailCortex delivery")])
+        self.assertTrue(self.orch._lock_pool.is_locked(fixture.KEY.lock_key))
+        await self.settle()
+        self.assertFalse(self.orch._lock_pool.is_locked(fixture.KEY.lock_key))
+        self.assertFalse(self.server._lock_pool.is_locked(fixture.KEY.lock_key))
+        self.assertEqual(len(self.telegram), 1)
+        envelope = self.telegram[0]
+        self.assertEqual((envelope.origin, envelope.chat_id, envelope.topic_id,
+                          envelope.transport, envelope.result_text, envelope.lock_mode),
+                         (Origin.WEBHOOK_WAKE, fixture.KEY.chat_id, fixture.KEY.topic_id,
+                          "tg", "handled", LockMode.NONE))
+
+    async def test_mid_turn_nacks_without_dispatch_and_can_retry_when_idle(self):
+        self.prepare(); client, channel = self.channel()
+        async with self.orch._lock_pool.get(fixture.KEY.lock_key):
+            frames = await self.route(client, channel)
+        self.assertEqual(frames[-1]["status"], "busy")
+        self.assertEqual(self.calls, [])
+        channel.ws.frames.clear()
+        self.assertEqual((await self.route(client, channel))[-1]["status"], "accepted")
+        await self.settle()
+
+    async def test_turn_start_during_async_session_lookup_is_refused(self):
+        self.prepare(); client, channel = self.channel()
+        async def lookup(key):
+            await self.orch._lock_pool.get(key.lock_key).acquire()
+            return self.session
+        self.sessions.get_active.side_effect = lookup
+        frames = await self.route(client, channel)
+        self.assertEqual(frames[-1]["status"], "busy")
+        self.assertEqual(self.calls, [])
+        self.orch._lock_pool.get(fixture.KEY.lock_key).release()
+
+    async def test_api_owner_compaction_and_active_process_each_refuse(self):
+        self.prepare()
+        for reason in ("api", "compaction", "process"):
+            client, channel = self.channel()
+            if reason == "api":
+                lock = self.server._lock_pool.get(fixture.KEY.lock_key); await lock.acquire()
+            elif reason == "compaction":
+                self.orch._idle_compactor._compacting.add(fixture.KEY.storage_key)
+            else:
+                self.orch._process_registry.register(1, SimpleNamespace(returncode=None, pid=1), "fixture")
+            self.assertEqual((await self.route(client, channel))[-1]["status"], "busy")
+            if reason == "api":
+                lock.release()
+            elif reason == "compaction":
+                self.orch._idle_compactor._compacting.clear()
+        self.assertEqual(self.calls, [])
+
+    async def test_unlocked_lock_with_pending_waiter_refuses_without_yield(self):
+        self.prepare(); client, channel = self.channel()
+        lock = self.orch._lock_pool.get(fixture.KEY.lock_key)
+        await lock.acquire()
+        waiter = asyncio.create_task(lock.acquire())
+        await asyncio.sleep(0)
+        lock.release()
+        frames = await self.route(client, channel)
+        self.assertEqual(frames[-1]["status"], "busy")
+        self.assertEqual(self.calls, [])
+        await waiter; lock.release()
+
+    async def test_missing_authority_identity_or_peer_fails_closed(self):
+        self.prepare()
+        for change in ({"session_key": "tg:2"}, {"request_id": "bad"}, {"text": ""},
+                       {"mirror_to_telegram": False}):
+            client, channel = self.channel()
+            self.assertNotEqual((await self.route(client, channel, **change))[-1]["status"], "accepted")
+        client, channel = self.channel(allowed=False)
+        self.assertEqual((await self.route(client, channel))[-1]["status"], "unavailable")
+        client, channel = self.channel()
+        self.orch._message_bus = None
+        self.assertEqual((await self.route(client, channel))[-1]["status"], "unavailable")
+        self.prepare(); client, channel = self.channel()
+        self.orch._lock_pool = None
+        self.assertEqual((await self.route(client, channel))[-1]["status"], "unavailable")
+        self.assertEqual(self.calls, [])
+
+    async def test_disconnect_after_admission_does_not_abort_accepted_turn(self):
+        self.prepare(); client, channel = self.channel()
+        await self.route(client, channel)
+        channel.ws.closed = True
+        await self.entered.wait(); await self.settle()
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.orch._lock_pool.is_locked(fixture.KEY.lock_key))
+
+    async def test_handler_failure_and_shutdown_release_locks(self):
+        self.prepare(); client, channel = self.channel()
+        async def failed(*args):
+            raise RuntimeError("fixture failure")
+        self.orch.handle_message_streaming = failed
+        with self.assertLogs(seam.logger, "ERROR"):
+            await self.route(client, channel); await self.settle()
+        self.assertFalse(self.orch._lock_pool.is_locked(fixture.KEY.lock_key))
+        self.prepare(); client, channel = self.channel()
+        await self.route(client, channel); await self.entered.wait()
+        await self.server.stop()
+        self.assertFalse(self.orch._lock_pool.is_locked(fixture.KEY.lock_key))
+        self.assertFalse(self.server._lock_pool.is_locked(fixture.KEY.lock_key))
+        self.assertEqual(self.server._idle_tasks, set())
+
+    async def test_loopback_proxy_and_default_session_capability_gates(self):
+        self.prepare()
+        request = fixture.BusyTests.request(self)
+        self.assertTrue(seam.idle_peer_allowed(self.server, request))
+        for request in (fixture.BusyTests.request(self, peer="YOUR_PEER"),
+                        fixture.BusyTests.request(self, extra={"Forwarded": "YOUR_PROXY"}),
+                        fixture.BusyTests.request(self, extra={"X-Forwarded-Host": "YOUR_PROXY"})):
+            self.assertFalse(seam.idle_peer_allowed(self.server, request))
+        self.server._config.token = ""
+        self.assertFalse(seam.idle_peer_allowed(self.server, fixture.BusyTests.request(self)))
+
+    async def test_cancellation_before_turn_starts_releases_claimed_locks(self):
+        self.prepare(); client, channel = self.channel()
+        await self.route(client, channel)
+        await self.server.stop()
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.orch._lock_pool.is_locked(fixture.KEY.lock_key))
+        self.assertFalse(self.server._lock_pool.is_locked(fixture.KEY.lock_key))
+
+    async def test_shutdown_refuses_admission_even_during_session_lookup(self):
+        self.prepare(); client, channel = self.channel()
+        async def lookup(key):
+            await self.server.stop()
+            return self.session
+        self.sessions.get_active.side_effect = lookup
+        self.assertEqual((await self.route(client, channel))[-1]["status"], "unavailable")
+        self.sessions.get_active.side_effect = None
+        self.assertEqual((await self.route(client, channel))[-1]["status"], "unavailable")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.server._idle_tasks, set())
+        self.assertFalse(self.orch._lock_pool.is_locked(fixture.KEY.lock_key))
+        self.assertFalse(self.server._lock_pool.is_locked(fixture.KEY.lock_key))
+
+    async def test_second_admission_cannot_enter_during_first_turn(self):
+        self.prepare(); client, channel = self.channel()
+        await self.route(client, channel); await self.entered.wait()
+        other, second = self.channel()
+        self.assertEqual((await self.route(other, second, request_id="b" * 32))[-1]["status"], "busy")
+        self.assertEqual(len(self.calls), 1)
+        await self.settle()
+
+    async def test_authority_exception_never_claims_or_dispatches(self):
+        self.prepare(); client, channel = self.channel()
+        self.sessions.get_active.side_effect = RuntimeError("fixture unavailable")
+        with self.assertLogs(seam.logger, "ERROR"):
+            self.assertEqual((await self.route(client, channel))[-1]["status"], "unavailable")
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.server._lock_pool.is_locked(fixture.KEY.lock_key))
+
+    async def test_regular_encrypted_message_still_uses_original_handler(self):
+        client, channel = self.channel()
+        self.server.set_message_handler(mock.AsyncMock(return_value=SimpleNamespace(
+            text="normal result", stream_fallback=False)))
+        await self.server._route_text_message(channel, client.encrypt({"type": "message", "text": "normal"}),
+            fixture.KEY, self.server._lock_pool.get(fixture.KEY.lock_key))
+        self.assertEqual(client.decrypt(channel.ws.frames[-1])["text"], "normal result")
+        self.server._handle_message.assert_awaited_once()
+
+    def client_wire(self, *, ack_mode=None):
+        import aiohttp
+        import importlib.machinery
+        watcher_path = Path(__file__).resolve().parents[5] / "all/.local/bin/mailcortex-seat-watcher"
+        loader = importlib.machinery.SourceFileLoader("ductor_wire_watcher", str(watcher_path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        watcher = importlib.util.module_from_spec(spec); spec.loader.exec_module(watcher)
+        test = self
+        class AuthSocket:
+            closed = False
+            async def receive(inner):
+                return SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data=json.dumps(inner.auth))
+            async def send_json(inner, value):
+                inner.answer = value
+            async def close(inner):
+                inner.closed = True
+        class ClientSocket:
+            def __init__(inner):
+                inner.auth_socket = AuthSocket(); inner.server_socket = Socket()
+                inner.sent = []; inner.channel = None
+            async def __aenter__(inner):
+                return inner
+            async def __aexit__(inner, *args):
+                inner.server_socket.closed = True
+            async def send_json(inner, value):
+                inner.auth_socket.auth = value
+                result = await test.server._authenticate(inner.auth_socket)
+                if result:
+                    inner.key, box = result
+                    inner.channel = _SecureChannel(inner.server_socket, box, idle_prompt_allowed=True)
+            async def receive_json(inner, timeout):
+                return inner.auth_socket.answer
+            async def send_str(inner, frame):
+                inner.sent.append(inner.channel.decrypt(frame))
+                await test.server._route_text_message(inner.channel, frame, inner.key,
+                    test.server._lock_pool.get(inner.key.lock_key))
+            async def receive(inner, timeout):
+                if ack_mode == "lost":
+                    raise TimeoutError("fixture ACK loss")
+                frame = inner.server_socket.frames[0]
+                if ack_mode in {"request_id", "session_key"}:
+                    # Re-encrypt an authentic but identity-mismatched ACK.
+                    box = inner.channel._e2e
+                    value = {"type": "idle_admission", "request_id": inner.sent[0]["request_id"],
+                             "session_key": fixture.KEY.storage_key, "status": "accepted"}
+                    value[ack_mode] = "wrong"
+                    frame = box.encrypt(value)
+                return SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data=frame)
+        socket = ClientSocket()
+        class Session:
+            async def __aenter__(inner):
+                return inner
+            async def __aexit__(inner, *args):
+                pass
+            def ws_connect(inner, url):
+                test.assertTrue(url.endswith("/ws"))
+                return socket
+        return watcher, socket, mock.patch.object(aiohttp, "ClientSession", return_value=Session())
+
+    async def test_production_watcher_client_and_real_authenticated_router_agree(self):
+        self.prepare(); watcher, socket, patch = self.client_wire()
+        settings = {"url": "http://localhost:YOUR_PORT", "token": "YOUR_API_TOKEN"}
+        with patch as factory:
+            await watcher.DuctorAdapter()._deliver_idle(settings, fixture.KEY.storage_key, "MailCortex delivery")
+        factory.assert_called_once()
+        self.assertFalse(factory.call_args.kwargs["trust_env"])
+        self.assertEqual(set(socket.auth_socket.auth), {"type", "token", "e2e_pk"})
+        self.assertEqual(socket.sent[0]["type"], "idle_message")
+        self.assertEqual(socket.sent[0]["session_key"], fixture.KEY.storage_key)
+        self.assertIs(socket.sent[0]["mirror_to_telegram"], True)
+        await self.entered.wait(); await self.settle()
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_production_client_negative_ack_is_safe_busy_retry(self):
+        self.prepare(); watcher, socket, patch = self.client_wire()
+        with patch:
+            async with self.orch._lock_pool.get(fixture.KEY.lock_key):
+                with self.assertRaises(watcher.DuctorNotAdmittedError) as caught:
+                    await watcher.DuctorAdapter()._deliver_idle(
+                        {"url": "http://localhost:YOUR_PORT", "token": "YOUR_API_TOKEN"},
+                        fixture.KEY.storage_key, "mail")
+        self.assertEqual(caught.exception.reason, "busy")
+        self.assertEqual(self.calls, [])
+
+    async def test_production_client_lost_or_wrong_ack_is_ambiguous_not_safe_retry(self):
+        for mode in ("lost", "request_id", "session_key"):
+            self.prepare(); watcher, socket, patch = self.client_wire(ack_mode=mode)
+            with patch, self.assertRaises(watcher.WatcherError) as caught:
+                await watcher.DuctorAdapter()._deliver_idle(
+                    {"url": "http://localhost:YOUR_PORT", "token": "YOUR_API_TOKEN"},
+                    fixture.KEY.storage_key, "mail")
+            self.assertNotIsInstance(caught.exception, watcher.DuctorNotAdmittedError)
+            await self.entered.wait(); await self.settle()
+            self.assertEqual(len(self.calls), 1)
+
+    async def test_production_client_dependency_loss_before_send_is_safe_refusal(self):
+        import builtins
+        self.prepare(); watcher, socket, patch = self.client_wire()
+        original = builtins.__import__
+        def unavailable(name, *args, **kwargs):
+            if name == "aiohttp":
+                raise ImportError("fixture dependency loss")
+            return original(name, *args, **kwargs)
+        with mock.patch.object(builtins, "__import__", side_effect=unavailable), \
+                self.assertRaises(watcher.DuctorNotAdmittedError):
+            await watcher.DuctorAdapter()._deliver_idle(
+                {"url": "http://localhost:YOUR_PORT", "token": "YOUR_API_TOKEN"},
+                fixture.KEY.storage_key, "mail")
+        self.assertFalse(hasattr(socket.auth_socket, "auth"))
+        self.assertEqual(self.calls, [])
+
+    async def test_production_client_redirect_refused_before_authentication(self):
+        import aiohttp
+        self.prepare(); watcher, socket, patch = self.client_wire()
+        options = {}
+        class Redirect:
+            async def __aenter__(inner):
+                trace = options["trace_configs"][0]
+                trace.freeze()
+                await trace.on_request_redirect.send(None, None, None)
+                raise AssertionError("redirect was not refused")
+            async def __aexit__(inner, *args):
+                pass
+        class Session:
+            async def __aenter__(inner):
+                return inner
+            async def __aexit__(inner, *args):
+                pass
+            def ws_connect(inner, url):
+                return Redirect()
+        def factory(**kwargs):
+            options.update(kwargs)
+            return Session()
+        with mock.patch.object(aiohttp, "ClientSession", side_effect=factory), \
+                self.assertRaises(watcher.DuctorNotAdmittedError):
+            await watcher.DuctorAdapter()._deliver_idle(
+                {"url": "http://localhost:YOUR_PORT", "token": "YOUR_API_TOKEN"},
+                fixture.KEY.storage_key, "mail")
+        self.assertFalse(options["trust_env"])
+        self.assertFalse(hasattr(socket.auth_socket, "auth"))
+        self.assertEqual(self.calls, [])
+
+    async def test_production_client_bad_auth_never_sends_prompt(self):
+        self.prepare(); watcher, socket, patch = self.client_wire()
+        with patch, self.assertRaises(watcher.DuctorNotAdmittedError):
+            await watcher.DuctorAdapter()._deliver_idle(
+                {"url": "http://localhost:YOUR_PORT", "token": "wrong"}, fixture.KEY.storage_key, "mail")
+        self.assertEqual(socket.sent, [])
+        self.assertEqual(self.calls, [])
+
+    async def test_lifecycle_wires_real_conditional_handler(self):
+        await fixture.BusyTests.test_lifecycle_wires_real_authority(self)
+        server = self.orch._api_stop.__self__
+        self.assertIsNotNone(server._idle_message_handler)
+        response = await server._handle_busy(fixture.BusyTests.request(self))
+        self.assertEqual(json.loads(response.text)["idle_prompt"], "ductor.idle_prompt.v2")
+
+
+if __name__ == "__main__":
+    try:
+        unittest.main()
+    finally:
+        fixture.TEMP.cleanup()
 #+END_SRC

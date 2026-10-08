@@ -1,5 +1,6 @@
-# alias        hostname          seal-reach (top-level home entries agents may walk into; - = not yet decided)
-kikin          kikin-kushi       DotCortex,mnt,.guix-extra-profiles
-x230           ThinkPad-X230     -
-t480s          ThinkPad-T480s    -
-t480           ThinkPad-T480     -
+# alias        hostname          seal-reach (top-level home entries agents may walk into; - = not yet decided)  agents                 warm
+kikin          kikin-kushi       DotCortex,mnt,.guix-extra-profiles                                               all                    -
+x230           ThinkPad-X230     -                                                                                all                    -
+t480s          ThinkPad-T480s    -                                                                                all                    -
+t480           ThinkPad-T480     -                                                                                all                    -
+honey          beelink           DotCortex                                                                        claude,codex,opencode  claude-warm,codex-warm

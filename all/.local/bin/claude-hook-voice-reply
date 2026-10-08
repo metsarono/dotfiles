@@ -3,11 +3,11 @@
 
 # The other half of the voice loop, per Mètsàtron's ruling (2026-08-16): every Telegram reply an agent sends is ALSO spoken aloud through pvox, automatically, with the voice chosen by the agent's identity — no extra agent action, no extra tokens. A =PostToolUse= hook fires on the Telegram plugin's =reply= tool, lifts the already-generated =text= from the tool input, resolves the speaking identity, and fire-and-forgets it to pvox on the speaker host over SSH. The hook returns immediately (playback is fully detached), so replies are never delayed by synthesis.
 
-# Identity resolution, simplest-first: =CLAUDE_WARM_HERDR_AGENT= (set by every claude-* launcher: Fable, Haiku, Auryn, Opus, or OpenCode's Ecco hook) → the basename suffix of =TELEGRAM_STATE_DIR= (=telegram-fable= → fable) → =Default=. The identity maps onto the pvox agent roster (=pvox agents=); identities without their own pvox voice yet (Fable, Haiku, Opus) speak as =Claude= until Mètsàtron seals dedicated voices in VoxForge. Delivery is split-lane (ruling 2026-08-17, the night the phone earned its voice): synthesis runs on the hook's own machine via pvox (HelmCortex is NFS-shared, so pvox and the conda engines are everywhere), and playback ships as a *headered WAV* to =PVOX_REPLY_HOST= (default =s24= — the phone, always in his pocket), falling back to =PVOX_REPLY_FALLBACK_HOST= (default =t480s=) when the phone is unreachable. The old pvox-over-SSH law forbade piping *raw* PCM across SSH because the player cannot know the rate; WAV carries its header, so that law is honored, not repealed. Disable per-session with =PVOX_REPLY_OFF=1=.
+# Identity resolution, simplest-first: =CLAUDE_WARM_HERDR_AGENT= (set by every claude-* launcher: Fable, Haiku, Auryn, Opus, or OpenCode's Ecco hook) → the basename suffix of =TELEGRAM_STATE_DIR= (=telegram-fable= → fable) → =Default=. The identity maps onto the pvox agent roster (=pvox agents=); Nano identifies as =Nanobot= and shares the existing =Haiku= voice seat until Mètsàtron seals a dedicated voice. Delivery is split-lane (ruling 2026-08-17, the night the phone earned its voice): synthesis runs on the hook's own machine via pvox (HelmCortex is NFS-shared, so pvox and the conda engines are everywhere), and playback ships as a *headered WAV* to =PVOX_REPLY_HOST= (default =s24= — the phone, always in his pocket), falling back to =PVOX_REPLY_FALLBACK_HOST= (default =t480s=) when the phone is unreachable. The old pvox-over-SSH law forbade piping *raw* PCM across SSH because the player cannot know the rate; WAV carries its header, so that law is honored, not repealed. Disable per-session with =PVOX_REPLY_OFF=1=.
 
 # Delivery is *push-then-play* (fix 2026-08-17, the "stopped halfway" incident): the original design streamed the WAV over SSH straight into =sox='s stdin, which made the entire playback depend on the SSH connection staying alive — when the phone dozed mid-play (screen off, in pocket), the stream stalled and the audio truncated halfway. Now the play host receives the whole WAV into a temp file first, then playback detaches from the SSH session (=nohup=, backgrounded) with a Termux wake-lock held for its duration, so the network matters only during transfer and a doze can no longer cut the voice off. The SSH exit code therefore certifies *delivery*, not playback — the log field says =delivered=, honestly. Every skip and failure path logs one line to =~/.cache/pvox-reply.log= (empty-text skip with stdin byte count, render failure, per-host delivery failure, successful delivery with host + sizes) — the hook's original total silence meant every incident cost a fresh archaeology dig, against the silent-skip law.
 
-# Kitten seats render *on the play host itself* (his ruling 2026-08-17: the S24 out-muscles the fleet for small models, Q8-verified ~0.4–0.9 RTF): the hook resolves the seat via =pvox voicespec= and cleans the text via =pvox clean= (both fleet-side — pvox's config and markdown cleaner stay the single source of truth), then ships CLEANED TEXT instead of a WAV to =termux-kitten-say= on the play host, detached with a wake lock, sharing the same play queue lock as the ship lane. The fleet render+ship path remains the lane for non-kitten seats, fallback hosts, and a dead enclave — on-device failure logs =ON-DEVICE-FAIL= and falls through. Kill switch: =PVOX_REPLY_NO_ONDEVICE=1=.
+# Kitten seats render *on the play host itself* (his ruling 2026-08-17: the S24 out-muscles the fleet for small models, Q8-verified ~0.4–0.9 RTF): the hook resolves the seat via =pvox voicespec=, normalises every reply through the shared =voice-text-normalize= boundary, then ships CLEANED TEXT instead of a WAV to =termux-kitten-say= on the play host, detached with a wake lock, sharing the same play queue lock as the ship lane. The fleet render+ship path remains the lane for non-kitten seats, fallback hosts, and a dead enclave — on-device failure logs =ON-DEVICE-FAIL= and falls through. Kill switch: =PVOX_REPLY_NO_ONDEVICE=1=.
 
 
 # [[file:../../../agents-hooks.org::*Voice reply relay (outbound — pvox speaks what the agent sends)][Voice reply relay (outbound — pvox speaks what the agent sends):1]]
@@ -31,15 +31,16 @@ else
     HOOK_INPUT="$(cat 2>/dev/null || true)"
 fi
 
-TEXT="$(printf '%s' "$HOOK_INPUT" | python3 -c '
-import json, sys
-try:
-    j = json.load(sys.stdin)
-    t = (j.get("tool_input") or {}).get("text") or ""
-    print(t)
-except Exception:
-    pass
-' 2>/dev/null || true)"
+NORMALIZER="${VOICE_TEXT_NORMALIZER:-$(dirname "$(readlink -f "$0")")/voice-text-normalize}"
+if [ ! -x "$NORMALIZER" ]; then
+    printf '%s SKIP normalizer-missing\n' "$(date '+%F %T')" >> "$LOG" 2>/dev/null || true
+    exit 0
+fi
+if ! TEXT="$(printf '%s' "$HOOK_INPUT" | "$NORMALIZER" --hook-json 2>/dev/null)"; then
+    printf '%s SKIP normalize-failed (stdin %s bytes)\n' \
+      "$(date '+%F %T')" "${#HOOK_INPUT}" >> "$LOG" 2>/dev/null || true
+    exit 0
+fi
 if [ -z "$TEXT" ]; then
     printf '%s SKIP empty-text (stdin %s bytes)\n' "$(date '+%F %T')" "${#HOOK_INPUT}" >> "$LOG" 2>/dev/null || true
     exit 0
@@ -77,6 +78,7 @@ case "$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')" in
     metsatron) VOICE="Metsatron" ;;
     fable) VOICE="Fable"; HUD_AGENT="fable" ;;
     haiku) VOICE="Haiku"; HUD_AGENT="haiku" ;;
+    nanobot|nano) VOICE="Haiku"; HUD_AGENT="nanobot" ;;
     opus|claudeificus) VOICE="Opus"; HUD_AGENT="claudeificus" ;;
     hermes) VOICE="Hermes"; HUD_AGENT="hermes-agent" ;;
     claude) VOICE="Claude" ;;
@@ -85,7 +87,7 @@ esac
 # The speaker identity can differ from the selected voice. In particular,
 # HelmAstra keeps her working Default voice while her own HUD portrait speaks.
 case "${PVOX_HUD_AGENT:-}" in
-    helmastra|helmductor|auryn|fable|claudeificus|haiku|orcinus-orca|ecco-dolphinus|hermes-agent|gemma)
+    helmastra|helmductor|auryn|fable|claudeificus|haiku|nanobot|orcinus-orca|ecco-dolphinus|hermes-agent|gemma)
         HUD_AGENT="$PVOX_HUD_AGENT" ;;
 esac
 
@@ -144,8 +146,8 @@ setsid bash -c '
     # On-device lane (his ruling 2026-08-17: the phone renders its own
     # voices — "my phone has more horsepower for rendering on device").
     # Kitten seats render ON the play host when it carries
-    # termux-kitten-say: cleaned text travels (pvox clean here — one
-    # source of truth for markdown cleanup), is parked in a temp file on
+    # termux-kitten-say: text already crossed the shared normaliser before
+    # this worker detached. It is parked in a temp file on
     # the phone, and render+play detach from the ssh session with a wake
     # lock (doze cannot truncate; exit code means text delivered + spawn
     # ok). Fleet render+ship stays the lane for non-kitten seats, other
@@ -156,7 +158,7 @@ setsid bash -c '
 $(printf "%s" "$SPEC" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[\"engine\"], d[\"voice\"], d[\"speed\"])" 2>/dev/null)
 EOF2
         if [ "$ENGINE" = "kitten" ]; then
-            if printf "%s\n" "$TEXT" | "$PVOX" clean 2>/dev/null | ssh $SSHOPTS "$PLAY_HOST" "
+            if printf "%s\n" "$TEXT" | ssh $SSHOPTS "$PLAY_HOST" "
                 command -v termux-kitten-say >/dev/null 2>&1 || exit 9
                 T=\"\$(mktemp)\"; cat > \"\$T\"
                 if command -v pvox-speech-receipt >/dev/null 2>&1; then

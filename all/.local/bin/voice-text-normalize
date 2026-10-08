@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Turn Telegram Markdown/MarkdownV2 reply text into bounded plain speech."""
+
+import argparse
+import json
+import re
+import sys
+
+
+FENCED_CODE_CHAR_LIMIT = 600
+FENCED_CODE_LINE_LIMIT = 20
+MARKDOWN_V2_RESERVED = set("_*[]()~`>#+-=|{}.!" + chr(92))
+FENCE_START = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[^\r\n]*$")
+LINK = re.compile(r"!?\[([^\]\n]+)\]\((?:[^()\n]|\([^()\n]*\))*\)")
+REFERENCE_LINK = re.compile(r"!?\[([^\]\n]+)\]\[[^\]\n]*\]")
+INLINE_CODE = re.compile(r"(`+)(.*?)\1", re.DOTALL)
+LIST_MARKER = re.compile(r"^[ \t]*(?:[•*-]|[0-9]+[.)])[ \t]+")
+HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+")
+QUOTE = re.compile(r"^[ \t]{0,3}>[ \t]?")
+
+
+def markdown_v2_unescape(text: str) -> str:
+    """Unescape only Telegram MarkdownV2's reserved character set."""
+    result = []
+    index = 0
+    while index < len(text):
+        if (text[index] == "\\" and index + 1 < len(text)
+                and text[index + 1] in MARKDOWN_V2_RESERVED):
+            result.append(text[index + 1])
+            index += 2
+        else:
+            result.append(text[index])
+            index += 1
+    return "".join(result)
+
+
+def strip_fenced_code(text: str) -> str:
+    """Keep short fence contents; replace long or unterminated blocks safely."""
+    lines = text.splitlines()
+    result = []
+    index = 0
+    while index < len(lines):
+        match = FENCE_START.match(lines[index])
+        if match is None:
+            result.append(lines[index])
+            index += 1
+            continue
+        marker = match[1]
+        character, width = marker[0], len(marker)
+        closing = re.compile(
+            r"^[ \t]{0,3}" + re.escape(character) + "{" + str(width) + r",}[ \t]*$")
+        block = []
+        index += 1
+        while index < len(lines) and closing.match(lines[index]) is None:
+            block.append(lines[index])
+            index += 1
+        if index < len(lines):
+            index += 1
+        content = "\n".join(block).strip()
+        if (len(content) > FENCED_CODE_CHAR_LIMIT
+                or len(block) > FENCED_CODE_LINE_LIMIT):
+            result.append("code block omitted")
+        elif content:
+            result.append(content)
+    return "\n".join(result)
+
+
+def strip_links(text: str) -> str:
+    previous = None
+    while text != previous:
+        previous = text
+        text = LINK.sub(r"\1", text)
+        text = REFERENCE_LINK.sub(r"\1", text)
+    return text
+
+
+def strip_block_markers(text: str) -> str:
+    result = []
+    for raw_line in text.splitlines():
+        line = raw_line
+        if re.fullmatch(r"[ \t]*[-*_~=+#|]{3,}[ \t]*", line):
+            result.append("")
+            continue
+        while QUOTE.match(line):
+            line = QUOTE.sub("", line, count=1)
+        line = HEADING.sub("", line, count=1)
+        line = re.sub(r"[ \t]+#+[ \t]*$", "", line)
+        listed = LIST_MARKER.match(line) is not None
+        if listed:
+            line = LIST_MARKER.sub("", line, count=1).strip()
+            if line and line[-1] not in ".!?:;":
+                line += "."
+        result.append(line)
+    return "\n".join(result)
+
+
+def strip_emphasis(text: str) -> str:
+    for pattern in (
+            re.compile(r"\|\|(?=\S)(.*?\S)\|\|", re.DOTALL),
+            re.compile(r"~~(?=\S)(.*?\S)~~", re.DOTALL),
+            re.compile(r"(?<!~)~(?=\S)(.*?\S)~(?!~)", re.DOTALL),
+    ):
+        previous = None
+        while text != previous:
+            previous = text
+            text = pattern.sub(r"\1", text)
+    # Underscores are markup only at word boundaries.  Internal identifier
+    # underscores therefore survive unchanged.
+    text = re.sub(r"(?<![\w_])_{1,2}(?=\S)", "", text)
+    text = re.sub(r"(?<=\S)_{1,2}(?![\w_])", "", text)
+    # Asterisks and backslashes are forbidden in the final speech stream.
+    return text.replace("*", "").replace("\\", "").replace("~", "").replace("|", " ")
+
+
+def normalize(text: str, format_name: str = "markdown") -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = "".join(char if char in "\n\t" or ord(char) >= 32 else " " for char in text)
+    if format_name.casefold().replace("_", "") == "markdownv2":
+        text = markdown_v2_unescape(text)
+    text = strip_fenced_code(text)
+    text = INLINE_CODE.sub(r"\2", text).replace("`", "")
+    text = strip_links(text)
+    text = strip_block_markers(text)
+    text = strip_emphasis(text)
+    text = text.replace("[", "").replace("]", "").replace("{", "").replace("}", "")
+    text = re.sub(r"(?<!\w)[#=+<>^|~-]{2,}(?!\w)", " ", text)
+    text = re.sub(r"([#=+<>^])(?:[ \t]*\1)+", r"\1", text)
+    text = re.sub(r"([.!?,;:])\1+", r"\1", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Defence in depth for future transforms: these may never reach speech.
+    text = text.replace("\\", "").replace("*", "")
+    return text.strip()
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--format", default="markdown")
+    parser.add_argument("--hook-json", action="store_true",
+                        help="extract tool_input.text and tool_input.format from stdin JSON")
+    args = parser.parse_args(argv)
+    try:
+        if args.hook_json:
+            payload = json.load(sys.stdin)
+            tool_input = payload.get("tool_input", {}) if isinstance(payload, dict) else {}
+            text = tool_input.get("text", "") if isinstance(tool_input, dict) else ""
+            format_name = tool_input.get("format", args.format) if isinstance(tool_input, dict) else args.format
+            if not isinstance(text, str) or not isinstance(format_name, str):
+                raise ValueError("hook text and format must be strings")
+        else:
+            text = sys.stdin.read()
+            format_name = args.format
+        sys.stdout.write(normalize(text, format_name))
+        return 0
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        print(f"voice-text-normalize: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

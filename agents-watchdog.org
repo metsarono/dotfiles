@@ -17,6 +17,10 @@ An unknown reading (no status line, unparsable line, or a failed =status= call) 
 
 Alerts publish =helmcortex.notification.v1= events into the same spool the fleet-health collector uses (=~/.local/state/helmcortex-notifications/spool=), with source =agent_watchdog=. The spool is the transport; delivery to Telegram belongs to the spool consumer, so the pending alerts-bot token ruling gates delivery, not detection or relaunch. Every run writes =receipt.json= so a silent watchdog is itself detectable.
 
+** Warm Claude sessions
+
+Added 2026-10-08 after a user-wide SIGTERM on Kikin killed the Fable, Opus and Haiku warm sessions together. Cron brought every daemon back, but nothing revived the warm sessions, because =telegram-agent-host status= reports Claude only as one =claudecode= line that reads RUNNING while any Claude Telegram session is alive. The watchdog now also supervises the warm sessions named in a private, machine-local list (=~/.config/telegram-agent-watchdog/warm-sessions=, one name per line, =#= comments allowed; absent means none), so the fleet roster stays out of this public source. Each session's state comes from =nurse-joy status --json=: verdict =field= or =degraded= (alive, for example running stale agent code) is up, =down= is down, and any other verdict, a missing member, or unreadable output is unknown and never acted on, with one exception sealed after the 2026-10-09 02:26 kill left all three down for seven hours: when =tmux ls= reports that no tmux server is running at all, every unknown warm session is down, because every warm session lives in tmux. A down session is revived with =nurse-joy revive --no-visit <name>=, the sanctioned bounce path, under the same backoff, attempt cap, alerts and boot-lock stand-down as the Telegram agents. Its state key and intentional-stop marker are =warm-<name>=: to keep a session down on purpose, touch =~/.local/state/telegram-agents/intentional-stop/warm-<name>= first.
+
 ** Self-revive request lane
 
 Added 2026-09-30 at HelmAstra's requirement: an agent cannot safely stop and start itself, because the stop kills the caller's own process group before the start runs. Instead the agent runs =telegram-agent-watchdog request [AGENT]= and returns; the command only queues =requests/<agent>.json= under the watchdog state dir and never signals anything. A later watchdog run performs the =stop= and =start= from cron, outside the agent's process group.
@@ -36,6 +40,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -89,6 +94,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-attempts", type=int, default=3, help="relaunch attempts per down episode")
     parser.add_argument("--backoff", type=int, default=120, help="base seconds between attempts; doubles each attempt")
     parser.add_argument("--start-timeout", type=int, default=240)
+    parser.add_argument("--warm-file", default=str(Path.home() / ".config/telegram-agent-watchdog/warm-sessions"),
+                        help="private list of nurse-joy warm sessions to supervise, one name per line")
+    parser.add_argument("--nurse", default=shutil.which("nurse-joy") or str(Path.home() / ".local/hx/bin/nurse-joy"))
+    parser.add_argument("--tmux", default=shutil.which("tmux") or "tmux", help="tmux binary used to tell a dead server from a stale reading")
     parser.add_argument("--dry-run", action="store_true", help="report decisions without relaunching or publishing")
     return parser.parse_args(argv)
 
@@ -148,6 +157,57 @@ def classify(agent: str, status_text: str) -> str:
             elif re.search(r"\bSTOPPED\b", line):
                 verdicts.add("down")
     return verdicts.pop() if len(verdicts) == 1 else "unknown"
+
+
+def read_warm_sessions(path: Path) -> list[str]:
+    """Warm Claude sessions to supervise, from a private machine-local list (topology stays out of source)."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    names: list[str] = []
+    for line in lines:
+        name = line.split("#", 1)[0].strip()
+        if name and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", name) and name.lower() not in [n.lower() for n in names]:
+            names.append(name)
+    return names
+
+
+def tmux_server_running(tmux: str) -> bool | None:
+    """True or False when tmux answers clearly; None when the probe itself fails."""
+    try:
+        run = subprocess.run([tmux, "ls"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, text=True, timeout=15, close_fds=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if run.returncode == 0:
+        return True
+    if re.search(r"no server running|error connecting to .*No such file or directory", run.stderr or ""):
+        return False
+    return None
+
+
+def warm_verdicts(nurse: str, names: list[str], timeout: int, tmux: str | None = None) -> dict[str, str]:
+    """Map each warm session to up, down, or unknown from nurse-joy's own verdict; anything unreadable is unknown."""
+    verdicts = {name: "unknown" for name in names}
+    if not names:
+        return verdicts
+    try:
+        run = subprocess.run([nurse, "status", "--json"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True, timeout=timeout, close_fds=True)
+        members = json.loads(run.stdout).get("members", [])
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        return verdicts
+    seen = {str(m.get("name", "")).lower(): m.get("verdict") for m in members if isinstance(m, dict)}
+    for name in names:
+        verdict = seen.get(name.lower())
+        # field and degraded (alive, e.g. stale agent code) are up; only down drives action.
+        verdicts[name] = "up" if verdict in ("field", "degraded") else "down" if verdict == "down" else "unknown"
+    # Every warm session lives in tmux. When the tmux server itself is gone (a user-wide kill took it),
+    # nurse-joy can only report "unknown"; that is not ambiguity, every warm session is down.
+    if tmux and "unknown" in verdicts.values() and tmux_server_running(tmux) is False:
+        verdicts = {name: ("down" if verdict == "unknown" else verdict) for name, verdict in verdicts.items()}
+    return verdicts
 
 
 def make_event(host: str, agent: str, kind: str, severity: str, title: str, body: str, payload: dict, when: dt.datetime) -> dict:
@@ -367,9 +427,15 @@ def main(argv: list[str]) -> int:
     # read whatever the exit code; a probe that printed nothing still reads as unknown per agent.
     status_text = status_run.stdout if status_run is not None else ""
 
-    for agent in enabled:
+    # Telegram agents relaunch through the host manager; warm Claude sessions through nurse-joy.
+    targets = [(agent, classify(agent, status_text), [args.manager, "start", agent]) for agent in enabled]
+    warm = read_warm_sessions(Path(args.warm_file))
+    warm_status = warm_verdicts(args.nurse, warm, 60, args.tmux)
+    targets += [("warm-" + name.lower(), warm_status[name], [args.nurse, "revive", "--no-visit", name.lower()]) for name in warm]
+    supervised = {agent for agent, _, _ in targets}
+
+    for agent, verdict, start_cmd in targets:
         entry = agents_state.setdefault(agent, {})
-        verdict = classify(agent, status_text)
         marker = Path(args.intent_dir) / agent
         if verdict == "up":
             if entry.get("down_since"):
@@ -413,14 +479,14 @@ def main(argv: list[str]) -> int:
         entry["attempts"] = attempts + 1
         entry["last_attempt"] = int(now)
         try:
-            started = run_manager(args.manager, ["start", agent], args.start_timeout)
+            started = run_manager(start_cmd[0], start_cmd[1:], args.start_timeout)
             outcomes[agent] = "relaunched" if started.returncode == 0 else "relaunch-failed"
             entry["last_result"] = started.returncode
         except (OSError, subprocess.SubprocessError) as exc:
             outcomes[agent] = "relaunch-failed"
             entry["last_result"] = type(exc).__name__
 
-    agents_state_out = {name: value for name, value in agents_state.items() if name in enabled or value}
+    agents_state_out = {name: value for name, value in agents_state.items() if name in supervised or value}
     if not args.dry_run:
         for event in events:
             try:
@@ -526,6 +592,23 @@ esac
 """
 
 
+FAKE_NURSE = """#!/usr/bin/env bash
+root="$FAKE_ROOT"
+case "$1" in
+  status) cat "$root/nurse_status" ;;
+  revive) shift; for a in "$@"; do case "$a" in --*) ;; *) echo "$a" >> "$root/revives" ;; esac; done ;;
+  *) exit 2 ;;
+esac
+"""
+
+
+FAKE_TMUX = """#!/usr/bin/env bash
+if [ -f "$FAKE_ROOT/tmux_dead" ]; then echo "no server running on /tmp/tmux-1000/default" >&2; exit 1; fi
+if [ -f "$FAKE_ROOT/tmux_broken" ]; then echo "some other failure" >&2; exit 1; fi
+echo "Fable: 1 windows"
+"""
+
+
 class WatchdogTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -535,6 +618,13 @@ class WatchdogTests(unittest.TestCase):
         self.manager.chmod(self.manager.stat().st_mode | stat.S_IXUSR)
         (self.root / "enabled").write_text("ductor codex\n")
         self.set_status("RUNNING", "RUNNING")
+        self.nurse = self.root / "nurse"
+        self.nurse.write_text(FAKE_NURSE)
+        self.nurse.chmod(self.nurse.stat().st_mode | stat.S_IXUSR)
+        self.set_warm({})
+        self.tmux = self.root / "tmux"
+        self.tmux.write_text(FAKE_TMUX)
+        self.tmux.chmod(self.tmux.stat().st_mode | stat.S_IXUSR)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -549,7 +639,8 @@ class WatchdogTests(unittest.TestCase):
             [str(WATCHDOG), "--expected-host", HOST, "--manager", str(self.manager),
              "--state-dir", str(self.root / "state"), "--intent-dir", str(self.root / "intent"),
              "--boot-lock", str(self.root / "boot.lock"), "--spool", str(self.root / "spool"),
-             "--pid-dir", str(self.root / "pids"), "--backoff", backoff, *extra],
+             "--pid-dir", str(self.root / "pids"), "--backoff", backoff,
+             "--warm-file", str(self.root / "warm"), "--nurse", str(self.nurse), "--tmux", str(self.tmux), *extra],
             env=dict(os.environ, FAKE_ROOT=str(self.root)), text=True, capture_output=True, timeout=30,
         )
 
@@ -715,6 +806,77 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(refused.returncode, 2)
         self.assertFalse((self.root / "state/requests/ductor.json").exists())
 
+    def set_warm(self, verdicts: dict[str, str]) -> None:
+        members = [{"name": name, "verdict": verdict} for name, verdict in verdicts.items()]
+        (self.root / "nurse_status").write_text(json.dumps({"members": members}))
+
+    def revives(self) -> list[str]:
+        path = self.root / "revives"
+        return path.read_text().split() if path.exists() else []
+
+    def test_no_warm_list_never_calls_nurse(self) -> None:
+        self.set_warm({"Fable": "down"})
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])
+
+    def test_down_warm_session_is_revived_through_nurse_joy(self) -> None:
+        (self.root / "warm").write_text("Fable\nOpus  # sealed consort\nHaiku\n")
+        self.set_warm({"Fable": "field", "Opus": "down", "Haiku": "field", "Auryn": "down"})
+        self.run_watchdog()
+        self.assertEqual(self.revives(), ["opus"])  # Auryn is down but not listed: untouched
+        self.assertEqual(self.starts(), [])  # never routed through the Telegram host manager
+        self.assertEqual([(e["kind"], e["payload"]["agent"]) for e in self.events()], [("down", "warm-opus")])
+        self.set_warm({"Fable": "field", "Opus": "field", "Haiku": "field"})
+        self.run_watchdog()
+        self.assertEqual([e["kind"] for e in self.events()], ["down", "recovered"])
+
+    def test_warm_operator_stop_marker_is_respected(self) -> None:
+        (self.root / "warm").write_text("Opus\n")
+        (self.root / "intent").mkdir()
+        (self.root / "intent" / "warm-opus").write_text("")
+        self.set_warm({"Opus": "down"})
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])
+
+    def test_unreadable_or_unusual_warm_state_never_revives(self) -> None:
+        (self.root / "warm").write_text("Opus\nHaiku\nFable\n")
+        self.set_warm({"Opus": "fainted", "Haiku": "field"})  # Fable missing from the roster entirely
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])
+        (self.root / "nurse_status").write_text("not json")
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])
+
+    def test_degraded_warm_session_counts_as_up(self) -> None:
+        (self.root / "warm").write_text("Opus\n")
+        self.set_warm({"Opus": "degraded"})
+        (self.root / "tmux_dead").write_text("")  # even a failed tmux probe never overrides an observed live verdict
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])
+
+    def test_unknown_with_dead_tmux_server_is_down_and_revived(self) -> None:
+        (self.root / "warm").write_text("Fable\nOpus\n")
+        self.set_warm({"Fable": "unknown", "Opus": "unknown"})
+        (self.root / "tmux_dead").write_text("")
+        self.run_watchdog()
+        self.assertEqual(sorted(self.revives()), ["fable", "opus"])
+
+    def test_unknown_with_live_or_unreadable_tmux_is_left_alone(self) -> None:
+        (self.root / "warm").write_text("Opus\n")
+        self.set_warm({"Opus": "unknown"})
+        self.run_watchdog()  # tmux server answers: unknown stays unknown
+        (self.root / "tmux_broken").write_text("")
+        self.run_watchdog()  # tmux probe fails for another reason: still no action
+        self.assertEqual(self.revives(), [])
+
+    def test_warm_attempt_cap_holds(self) -> None:
+        (self.root / "warm").write_text("Opus\n")
+        self.set_warm({"Opus": "down"})
+        for _ in range(5):
+            self.run_watchdog()
+        self.assertEqual(self.revives(), ["opus", "opus", "opus"])
+        self.assertIn("relaunch_failed", [e["kind"] for e in self.events()])
+
     def test_wrong_host_refuses(self) -> None:
         result = subprocess.run([str(WATCHDOG), "--expected-host", "not-" + HOST, "--manager", str(self.manager)],
                                 text=True, capture_output=True, timeout=30)
@@ -722,6 +884,192 @@ class WatchdogTests(unittest.TestCase):
 
     def test_help_is_side_effect_free(self) -> None:
         result = subprocess.run([str(WATCHDOG), "--help"], text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+* Session anchor
+
+Sealed 2026-10-09 after two user-wide SIGTERMs on Kikin (2026-10-08 21:01 and 2026-10-09 01:16). Each one fired the moment the user's last live elogind login ended: all week the only live login had been one long-running SSH connection from a laptop, and when it dropped, every process the user owned died with it: tmux, herdr, the Telegram agents, the warm Claude sessions. The kernel log orders it each time: =Removed session N=, then the kill. elogind reports =KillUserProcesses=false=, so the exact mechanism is not the textbook one, but the trigger is reproducible: the user dropping to zero live sessions.
+
+The anchor keeps one live login open at all times, independent of any laptop. It is a loopback SSH session with a dedicated key that sshd confines to =from="127.0.0.1,::1",restrict,command="/bin/sleep infinity"=, so the key can do nothing but hold a session open. The host key is pinned from the machine's own =/etc/ssh= public key in a private known_hosts file, never accepted on first use. A cron entry starts the supervisor every minute; =flock= keeps exactly one alive, and the supervisor reconnects with a short backoff if the session ever drops.
+
+Machine-local setup (private, never tracked): generate =~/.ssh/session-anchor= (ed25519, no passphrase), append the restricted line above with its public key to =~/.ssh/authorized_keys=, and write =~/.config/session-anchor/known_hosts= as =127.0.0.1 <type> <key>= taken from =/etc/ssh/ssh_host_ed25519_key.pub=. The supervisor refuses to start without all three.
+
+#+BEGIN_SRC bash :tangle all/.local/bin/session-anchor :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :comments no
+# session-anchor: hold one permanent loopback SSH login so the user never drops to zero live elogind sessions.
+set -uo pipefail
+
+TAG="session-anchor"
+KEY="${SESSION_ANCHOR_KEY:-$HOME/.ssh/session-anchor}"
+KNOWN_HOSTS="${SESSION_ANCHOR_KNOWN_HOSTS:-$HOME/.config/session-anchor/known_hosts}"
+STATE_DIR="${SESSION_ANCHOR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/session-anchor}"
+SSH_BIN="${SESSION_ANCHOR_SSH_BIN:-ssh}"
+BACKOFF="${SESSION_ANCHOR_BACKOFF:-10}"
+ONCE=0
+
+usage() { echo "Usage: $TAG [--once] [--check]  (holds a loopback SSH session; see agents-watchdog.org)"; }
+
+CHECK=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --once) ONCE=1 ;;
+    --check) CHECK=1 ;;
+    -h|--help|help) usage; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -r "$KEY" ] || { echo "$TAG: missing key $KEY (machine-local setup not done)" >&2; exit 69; }
+[ -s "$KNOWN_HOSTS" ] || { echo "$TAG: missing pinned known_hosts $KNOWN_HOSTS" >&2; exit 69; }
+[ "$CHECK" = 0 ] || { echo "$TAG: setup present"; exit 0; }
+
+mkdir -p "$STATE_DIR"
+exec 9>"$STATE_DIR/anchor.lock"
+if ! flock -n 9; then
+  exit 0  # another supervisor already holds the anchor
+fi
+
+while :; do
+  date +%s > "$STATE_DIR/last-connect"
+  "$SSH_BIN" -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ControlMaster=no -o ControlPath=none \
+    -T 127.0.0.1 9>&- </dev/null >>"$STATE_DIR/anchor.log" 2>&1
+  echo "$(date -Is) $TAG: session ended (rc=$?); reconnecting in ${BACKOFF}s" >>"$STATE_DIR/anchor.log"
+  [ "$ONCE" = 0 ] || exit 0
+  sleep "$BACKOFF"
+done
+#+END_SRC
+
+** Session anchor cron deployment helper
+
+#+BEGIN_SRC bash :tangle all/.local/bin/session-anchor-cron-apply :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :comments no
+set -euo pipefail
+
+TAG="session-anchor-cron-apply"
+TARGET="/etc/cron.d/dotcortex-session-anchor"
+EXPECTED_HOST=""
+DRY=0
+REMOVE=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "$TAG: --host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --dry-run) DRY=1 ;;
+    --remove) REMOVE=1 ;;
+    -h|--help|help) echo "Usage: $TAG --host EXACT_HOST [--dry-run] [--remove]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+run_priv() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
+
+if [ "$REMOVE" = 1 ]; then
+  if [ "$DRY" = 1 ]; then echo "remove $TARGET"; else run_priv rm -f "$TARGET"; echo "$TAG: removed $TARGET"; fi
+  exit 0
+fi
+
+[ -n "$EXPECTED_HOST" ] || { echo "$TAG: --host EXACT_HOST is required" >&2; exit 2; }
+[ "$(hostname)" = "$EXPECTED_HOST" ] || { echo "$TAG: refusing installation on $(hostname); expected $EXPECTED_HOST" >&2; exit 1; }
+
+USER_NAME="$(id -un)"
+TARGET_HOME="$HOME"
+ANCHOR="$TARGET_HOME/.local/bin/session-anchor"
+[ "$DRY" = 1 ] || "$ANCHOR" --check || { echo "$TAG: machine-local setup missing; see agents-watchdog.org" >&2; exit 1; }
+
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+cat >"$TMP" <<EOF
+# DotCortex session anchor; managed by $TAG.
+,* * * * * ${USER_NAME} HOME=${TARGET_HOME} PATH=/usr/local/bin:/usr/bin:/bin ${ANCHOR} >/dev/null 2>&1
+EOF
+
+if [ "$DRY" = 1 ]; then
+  cat "$TMP"
+else
+  run_priv install -o root -g root -m 0644 "$TMP" "$TARGET"
+  echo "$TAG: installed $TARGET"
+fi
+#+END_SRC
+
+** Session anchor tests
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-session-anchor.py :comments no
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import stat
+import subprocess
+import tempfile
+import time
+import unittest
+
+ANCHOR = Path(__file__).resolve().parents[3] / "bin" / "session-anchor"
+
+FAKE_SSH = """#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$FAKE_ROOT/ssh-args"
+sleep "${FAKE_SSH_HOLD:-0}"
+"""
+
+
+class SessionAnchorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.ssh = self.root / "ssh"
+        self.ssh.write_text(FAKE_SSH)
+        self.ssh.chmod(self.ssh.stat().st_mode | stat.S_IXUSR)
+        (self.root / "key").write_text("k")
+        (self.root / "known").write_text("127.0.0.1 ssh-ed25519 AAAA\n")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def env(self, **extra: str) -> dict:
+        return dict(os.environ, FAKE_ROOT=str(self.root), SESSION_ANCHOR_KEY=str(self.root / "key"),
+                    SESSION_ANCHOR_KNOWN_HOSTS=str(self.root / "known"), SESSION_ANCHOR_STATE_DIR=str(self.root / "state"),
+                    SESSION_ANCHOR_SSH_BIN=str(self.ssh), **extra)
+
+    def run_anchor(self, *args: str, **extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run([str(ANCHOR), *args], env=self.env(**extra), text=True, capture_output=True, timeout=30)
+
+    def test_refuses_without_machine_local_setup(self) -> None:
+        (self.root / "key").unlink()
+        result = self.run_anchor("--once")
+        self.assertEqual(result.returncode, 69)
+        self.assertFalse((self.root / "ssh-args").exists())
+
+    def test_connects_loopback_with_pinned_host_key_only(self) -> None:
+        result = self.run_anchor("--once")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = (self.root / "ssh-args").read_text().split("\n")
+        self.assertEqual(args[-2], "127.0.0.1")  # loopback only
+        joined = " ".join(args)
+        for required in ("IdentitiesOnly=yes", "BatchMode=yes", "StrictHostKeyChecking=yes",
+                         "UserKnownHostsFile=%s" % (self.root / "known"), "GlobalKnownHostsFile=/dev/null", "-T"):
+            self.assertIn(required, joined)
+        self.assertNotIn("accept-new", joined)
+        self.assertNotIn("StrictHostKeyChecking=no", joined)
+
+    def test_second_supervisor_stands_down(self) -> None:
+        first = subprocess.Popen([str(ANCHOR), "--once"], env=self.env(FAKE_SSH_HOLD="3"))
+        try:
+            time.sleep(0.5)
+            second = self.run_anchor("--once")
+            self.assertEqual(second.returncode, 0)
+        finally:
+            first.wait(timeout=30)
+        self.assertEqual(first.returncode, 0)
+
+    def test_help_is_side_effect_free(self) -> None:
+        result = subprocess.run([str(ANCHOR), "--help"], text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0)
 
 

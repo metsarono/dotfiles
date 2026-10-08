@@ -38,3 +38,10 @@ kokoro-onnx "" ""
 # which the pvox kitten engine invokes via the env's python directly.
 rofimoji "" ""
 PyOpenGL-accelerate "3.1.9" ""
+# Mistral Vibe CLI (mistral-vibe) — coding agent lane. Installed 2026-10-08 for
+# the Vibe Code budget work (Mistral Pro plan). Provides `vibe` + `vibe-acp`.
+# mistralai is pinned here too because it is a hard dependency of mistral-vibe
+# but is NOT in this manifest on its own — listing it keeps pip-diff from
+# reporting it as an untracked extra on every fresh apply.
+mistral-vibe "2.26.0" ""
+mistralai "2.6.0" ""

@@ -3,21 +3,21 @@
 
 # Captured from T480s 2026-03-15
 npm 11.16.0 "" "global" "registry" "" "" ""
-@anthropic-ai/claude-code 2.1.280 "" "global" "registry" "" "" ""
+@anthropic-ai/claude-code "" "" "global" "registry" "" "" ""
 @github/copilot "" "" "global" "registry" "" "" ""
 @google/gemini-cli "" "" "global" "registry" "" "" ""
-@openai/codex 0.159.2 "" "global" "registry" "" "" ""
+@openai/codex "" "" "global" "registry" "" "" ""
 @siteboon/claude-code-ui "" "" "global" "registry" "" "" "cloudcli-setup"
-opencode-ai 1.18.32 "" "global" "registry" "" "" ""
+opencode-ai "" "" "global" "registry" "" "" ""
 task-master-ai "" "" "global" "registry" "" "" ""
 @emacs-eask/cli "" "" "global" "registry" "" "" ""
 firecrawl-cli "" "" "global" "registry" "" "" ""
 antigravity-kit "" "" "global" "registry" "" "" ""
 antigravity-usage "" "" "global" "registry" "" "" ""
 defuddle "" "" "global" "registry" "" "" ""
-@grinev/opencode-telegram-bot 0.25.2 "" "global" "registry" "" "" ""
+@grinev/opencode-telegram-bot "" "" "global" "registry" "" "" ""
 @earendil-works/pi-coding-agent "" "" "global" "registry" "" "" ""
-@deepseek-ai/dsh 0.1.5-rc.1 "" "global" "registry" "" "" ""
+@deepseek-ai/dsh "" "" "global" "registry" "" "" ""
 pnpm 11.7.0 "" "global" "registry" "" "" ""
 # ACP adapter for Emacs agent-shell (xenodium). Speaks Agent Client Protocol to
 # Claude Code. NOTE: this path does NOT carry Claude Code's hooks, and surfaces

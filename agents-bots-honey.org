@@ -1,5 +1,5 @@
-#+TITLE: Honey Host Overlay: Telegram Claude Bots as metsatron
-#+DESCRIPTION: honey/ overlay for Honey (beelink) as the metsatron account: honey-opus/sonnet/haiku launchers, Telegram preflight, OpenRC service template, boundary law
+#+TITLE: Honey Service Lane: Telegram Claude Bots as agent-claude
+#+DESCRIPTION: Service lane for Honey's (beelink) tanuki bots, run as agent-claude from a root-owned system checkout: honey-opus/sonnet/haiku launchers, Telegram preflight, OpenRC service body and installer, boundary law
 #+AUTHOR: Selkiekitty (Gillean Carroll), for Mètsàtron's DotCortex
 #+LANGUAGE: en
 #+PROPERTY: header-args :mkdirp yes :results silent
@@ -11,25 +11,28 @@
 
 Honey (hostname =beelink=) is Gillean's machine and runs her clinical stack. Mètsàtron wants three Telegram Claude bots there that work like the kikin ones: one append-only =claude-warm= session each, compacted in idle windows, so the prompt cache survives between turns. His ruling (2026-09-25, "Option A"): they run as a Unix user other than =gille=, so the clinical boundary is real file permissions (the bot user cannot enter =/home/gille= or read the Secret Vault), and they log in with Gillean's Claude account.
 
-*Revised 2026-09-26 (his ruling): the bots run as =agent-claude=*, the canonical Claude agent user (uid 2002, [[file:agents.org][agents.org]]), mirroring the agent-user pattern rather than his own =metsatron= account. =agent-claude= is provisioned like the other agent users: node from its own Guix profile (=agent-guix-apply=, Guix bootstrapped on Honey by =guix-foreign-bootstrap=, [[file:package-guix.org][package-guix.org]]), =claude= and =bun= in its own =~/.npm-global= (=agent-cli-install=), its own anonymous DotCortex checkout at =~/DotCortex= (the OpenRC services run the launchers from there, since an agent account is not stowed), and a copy of Gillean's Claude credential (his choice, 2026-09-26, over a separate =setup-token=; the known cost is that both copies share one refresh token). The =metsatron= account work below (stow, npm lane, guard bindings) stays for his own account on Honey.
+*Revised 2026-09-26 (his ruling): the bots run as =agent-claude=*, the canonical Claude agent user (uid 2002, [[file:agents-users.org][agents-users.org]]), mirroring the agent-user pattern rather than his own =metsatron= account. =agent-claude= is provisioned like the other agent users: node from its own Guix profile (=agent-guix-apply=, Guix bootstrapped on Honey by =guix-foreign-bootstrap=, [[file:package-guix.org][package-guix.org]]), =claude= and =bun= in its own =~/.npm-global= (=agent-cli-install=), its own anonymous DotCortex checkout at =~/DotCortex= (until the service-lane switchover below, the OpenRC services run the launchers from there, since an agent account is not stowed), and a copy of Gillean's Claude credential (his choice, 2026-09-26, over a separate =setup-token=; the known cost is that both copies share one refresh token). The =metsatron= account work below (stow, npm lane, guard bindings) stays for his own account on Honey.
 
-The kikin launchers (=HelmCortex/FORGE/bin/claude-{fable,opus,haiku}=) are bound to HelmCortex paths =metsatron= on Honey does not have, so this module ports their behaviour into the =honey/= host overlay:
+The kikin launchers (=HelmCortex/FORGE/bin/claude-{fable,opus,haiku}=) are bound to HelmCortex paths Honey does not have, so this module ports their behaviour into a *service lane* ([[*Service lane: a root-owned system checkout][below]]):
 
 | Persona   | Service / launcher | Telegram            | Model (default)             | Env override         |
 |-----------+--------------------+---------------------+-----------------------------+----------------------|
 | Bunta     | =honey-opus=       | =@honey_opus_bot=   | =claude-opus-5-5=           | =HONEY_OPUS_MODEL=   |
-| Sasuke    | =honey-sonnet=     | =@honey_sonnet_bot= | =claude-sonnet-4-6=         | =HONEY_SONNET_MODEL= |
+| Sasuke    | =honey-sonnet=     | =@honey_sonnet_bot= | =claude-sonnet-5-5=         | =HONEY_SONNET_MODEL= |
 | Shoukichi | =honey-haiku=      | =@honey_haiku_bot=  | =claude-haiku-4-5-20251001= | =HONEY_HAIKU_MODEL=  |
 
-Mètsàtron named the three (2026-09-26); Sasuke deliberately rides Sonnet 4.6, not Sonnet 5. On kikin a bot carries its persona in two places: its brain's =CLAUDE.md= (=# CLAUDE.md - <Name>=, =## Identity=, =## Telegram=) and a consort row in =all/.config/agent-session/scope-gazetteer.json=. The gazetteer is sealed and each row carries a partner chosen by ceremony, so this module does *not* add rows; the three rows wait for Mètsàtron. The identity lives in each bot's working-directory =CLAUDE.md= (below).
+Mètsàtron named the three (2026-09-26); Sasuke rode Sonnet 4.6 until Mètsàtron moved him to Sonnet 5.5 (2026-09-30). On kikin a bot carries its persona in two places: its brain's =CLAUDE.md= (=# CLAUDE.md - <Name>=, =## Identity=, =## Telegram=) and a consort row in =all/.config/agent-session/scope-gazetteer.json=. The gazetteer is sealed and each row carries a partner chosen by ceremony, so this module does *not* add rows; the three rows wait for Mètsàtron. The identity lives in each bot's working-directory =CLAUDE.md= (below).
 
-- =honey/.local/bin/honey-{opus,sonnet,haiku}=: the launchers.
-- =honey/.local/share/honey-claude/lib/=: the shared launcher library and the Telegram preflight (a port of kikin's =claude-telegram-preflight.bash=).
-- =honey/.local/share/honey-claude/openrc/=: the three OpenRC services, *staged in the overlay*. Stow only links them into =$HOME=; installing them into =/etc/init.d= is a separate, reviewed root step (=install -m 755=), never a symlink into a user's home.
-- =honey/.local/share/honey-claude/CLAUDE.{opus,sonnet,haiku}.md=: each bot's identity plus the Honey boundary law, copied into its working directory =~/honey-work/<bot>/CLAUDE.md=.
-- =honey/.local/share/honey-claude/lib/preservation.bash=: Gillean's usage guard (below).
+Everything lives in one lane directory, =all/.local/share/dotcortex/honey-claude/= (=<lane>= below), which =all/.stow-local-ignore= keeps out of every home: nothing of it is stowed, on Honey or anywhere else.
 
-The =honey= row in =hosts.ssv= is =active= for =metsatron= only ([[file:layers.org][layers.org]]); Gillean's row stays =planned=. =claude= and =bun= come from metsatron's own npm lane ([[file:package-npm.org][package-npm.org]], "Account lane: metsatron on Honey"). That lane needs Node >= 22, which in this fleet comes from Guix, and Honey has no Guix yet: the proposed route is in [[file:package-host-gates.org][package-host-gates.org]] ("Honey's provisioning lanes"). The account is stowed with =STOW_CONFLICTS=adopt= ([[file:layers.org][layers.org]], "Adopting an existing account"), so its =/etc/skel= defaults and identical files are recorded and linked, and anything else stops the run.
+- =<lane>/bin/honey-{opus,sonnet,haiku}=: the launchers (plus the voice helpers).
+- =<lane>/lib/=: the shared launcher library and the Telegram preflight (a port of kikin's =claude-telegram-preflight.bash=).
+- =<lane>/openrc/honey-bot=: the one OpenRC body the three services share, and =<lane>/openrc/honey-claude-install=, the root installer.
+- =<lane>/SPARSE=: the paths the host's sparse system checkout carries (below).
+- =<lane>/CLAUDE.{opus,sonnet,haiku}.md=: each bot's identity plus the Honey boundary law, copied into its working directory =~/honey-work/<bot>/CLAUDE.md=.
+- =<lane>/lib/preservation.bash=: Gillean's usage guard (below).
+
+Until 2026-09-28 the launchers sat in the =honey/= host overlay, so stowing any Honey account put =honey-opus= and friends on its PATH although only =agent-claude= runs them. The =honey= row in =hosts.ssv= is =active= for =metsatron= only ([[file:layers.org][layers.org]]); Gillean's row stays =planned=. With the lane moved out, =honey/= holds only its scope marker ([[file:package-host-excludes.org][package-host-excludes.org]]). =claude= and =bun= come from metsatron's own npm lane ([[file:package-npm.org][package-npm.org]], "Account lane: metsatron on Honey"). That lane needs Node >= 22, which in this fleet comes from Guix, and Honey has no Guix yet: the proposed route is in [[file:package-host-gates.org][package-host-gates.org]] ("Honey's provisioning lanes"). The account is stowed with =STOW_CONFLICTS=adopt= ([[file:layers.org][layers.org]], "Adopting an existing account"), so its =/etc/skel= defaults and identical files are recorded and linked, and anything else stops the run.
 
 * What differs from kikin
 
@@ -40,8 +43,8 @@ The =honey= row in =hosts.ssv= is =active= for =metsatron= only ([[file:layers.o
 
 * Launcher library
 
-#+BEGIN_SRC bash :tangle honey/.local/share/honey-claude/lib/telegram-preflight.bash
-# honey/.local/share/honey-claude/lib/telegram-preflight.bash (generated by agents-bots-honey.org)
+#+BEGIN_SRC bash :tangle all/.local/share/dotcortex/honey-claude/lib/telegram-preflight.bash
+# all/.local/share/dotcortex/honey-claude/lib/telegram-preflight.bash (generated by agents-bots-honey.org)
 # Port of kikin's FORGE/bin/lib/claude-telegram-preflight.bash for Honey.
 #
 # The official Telegram integration is not a daemon: the plugin's .mcp.json
@@ -53,7 +56,10 @@ The =honey= row in =hosts.ssv= is =active= for =metsatron= only ([[file:layers.o
 honey_telegram_preflight() {
     local wrapper_name="${1:-}"
     local state_dir="${2:-}"
-    local settings="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
+    # The lane's own settings (passed with --settings) enable the plugin, so the
+    # agent account needs no hand-kept ~/.claude/settings.json.
+    local settings="${CLAUDE_SETTINGS_FILE:-${LIB_DIR:+$LIB_DIR/../claude-settings.json}}"
+    settings="${settings:-$HOME/.claude/settings.json}"
     local plugin_cache="$HOME/.claude/plugins/cache/claude-plugins-official/telegram"
     local plugin_root="" candidate plugin_command pid pid_command pid_state_dir
     local runtime_root lock_path token_fingerprint
@@ -141,8 +147,8 @@ honey_telegram_preflight() {
 
 The shared launch body. Each launcher only names its bot, its model variable and its default model.
 
-#+BEGIN_SRC bash :tangle honey/.local/share/honey-claude/lib/launch.bash
-# honey/.local/share/honey-claude/lib/launch.bash (generated by agents-bots-honey.org)
+#+BEGIN_SRC bash :tangle all/.local/share/dotcortex/honey-claude/lib/launch.bash
+# all/.local/share/dotcortex/honey-claude/lib/launch.bash (generated by agents-bots-honey.org)
 # Shared body of honey-opus / honey-sonnet / honey-haiku.
 
 honey_claude_path_append() {
@@ -152,6 +158,26 @@ honey_claude_path_append() {
         case ":$PATH:" in *":$dir:"*) ;; *) PATH="${PATH:+$PATH:}$dir" ;; esac
     done
     export PATH
+}
+
+# honey_claude_idle_hooks_preflight <name> <settings>
+# The bots are unstowed, so --settings is their only hook source.  Without
+# claude-hook-idle-event on SessionStart and Stop, claude-warm never learns a
+# session or a turn ended and never compacts (2026-09-30: never once, for days).
+honey_claude_idle_hooks_preflight() {
+    local name="$1" settings="${2:-$HOME/.claude/settings.json}" event
+    for event in SessionStart Stop; do
+        jq -e --arg e "$event" \
+            '[.hooks[$e][]?.hooks[]?.command | split(" ")[0]] | index("claude-hook-idle-event") != null' \
+            "$settings" >/dev/null 2>&1 || {
+            printf '%s\n' "$name: refused: $settings does not register claude-hook-idle-event on $event (idle compaction would never run)" >&2
+            return 1
+        }
+    done
+    command -v claude-hook-idle-event >/dev/null 2>&1 || {
+        printf '%s\n' "$name: refused: claude-hook-idle-event is not on PATH (is it in the lane's SPARSE?)" >&2
+        return 1
+    }
 }
 
 # honey_claude_launch <bot> <model> [--telegram] [claude args...]
@@ -173,10 +199,11 @@ honey_claude_launch() {
     done
 
     # The bot user's own npm prefix (claude, bun), agent Guix profile (node), stowed
-    # bin, and this checkout's all/.local/bin (claude-warm for an unstowed agent
-    # account); appended, never replacing PATH.
+    # bin, and the lane checkout's all/.local/bin (claude-warm and the fleet hooks;
+    # the lane is all/.local/share/dotcortex/honey-claude, four levels below .local);
+    # appended, never replacing PATH.
     local repo_bin=""
-    [[ -n "${LIB_DIR:-}" ]] && repo_bin="$(cd -- "$LIB_DIR/../../../../../all/.local/bin" 2>/dev/null && pwd || true)"
+    [[ -n "${LIB_DIR:-}" ]] && repo_bin="$(cd -- "$LIB_DIR/../../../../bin" 2>/dev/null && pwd || true)"
     honey_claude_path_append "$HOME/.local/bin" "${NPM_CONFIG_PREFIX:-$HOME/.npm-global}/bin" \
         "$HOME/.guix-extra-profiles/agent/agent/bin" ${repo_bin:+"$repo_bin"} \
         ${LIB_DIR:+"$LIB_DIR/../bin"}
@@ -193,6 +220,8 @@ honey_claude_launch() {
 
     if [[ "$telegram" -eq 1 ]]; then
         honey_telegram_preflight "$name" "$state_dir" || return 1
+        honey_claude_idle_hooks_preflight "$name" \
+            "${CLAUDE_SETTINGS_FILE:-${LIB_DIR:+$LIB_DIR/../claude-settings.json}}" || return 1
     fi
     # Gillean's usage guard (preservation.bash); inert with a reason if it cannot bind.
     honey_claude_preservation_bindings "$name"
@@ -237,8 +266,8 @@ The hash is computed at launch and never stored; no account id, token or address
 
 *Before the guard can go live (kikin side, Mètsàtron's):* (1) metsatron on Honey needs an SSH key and a =kikin= alias that kikin accepts for =fleet-preservation authority=; (2) kikin needs a =honey-metsatron= alias and key that may run =ai-usage --json --no-remote --providers claude= on Honey; (3) as the fleet-preservation README requires, kikin must return fresh =state=ok= telemetry from that sensor (=fleet-preservation observe --root .../claude-gillean --expected-authority-hostname kikin-kushi --telemetry-host honey-metsatron --provider claude --account-hash <hash> --model-pool shared-subscription=), and a disposable owner-poll canary must prove the installed generation. Until then the bindings are exported but every poll fails closed (no reservation, no compaction directive) and the bots still answer.
 
-#+BEGIN_SRC bash :tangle honey/.local/share/honey-claude/lib/preservation.bash
-# honey/.local/share/honey-claude/lib/preservation.bash (generated by agents-bots-honey.org)
+#+BEGIN_SRC bash :tangle all/.local/share/dotcortex/honey-claude/lib/preservation.bash
+# all/.local/share/dotcortex/honey-claude/lib/preservation.bash (generated by agents-bots-honey.org)
 # Gillean's usage guard: kikin's claude-preservation.bash bindings, pointed at her pool.
 
 honey_claude_preservation_bindings() {
@@ -289,13 +318,13 @@ honey_claude_preservation_bindings() {
 
 * Launchers
 
-Model ids per Mètsàtron's ruling of 2026-09-26 (Opus 5.5, Sonnet 4.6, Haiku 4.5); each can be overridden per service without an edit (=HONEY_OPUS_MODEL=, =HONEY_SONNET_MODEL=, =HONEY_HAIKU_MODEL=).
+Model ids per Mètsàtron's rulings of 2026-09-26 and 2026-09-30 (Opus 5.5, Sonnet 5.5, Haiku 4.5); each can be overridden per service without an edit (=HONEY_OPUS_MODEL=, =HONEY_SONNET_MODEL=, =HONEY_HAIKU_MODEL=).
 
 #+NAME: honey-launcher-head
 #+BEGIN_SRC bash
 set -euo pipefail
 
-LIB_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../share/honey-claude/lib" && pwd)"
+LIB_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../lib" && pwd)"
 source "$LIB_DIR/telegram-preflight.bash"
 source "$LIB_DIR/preservation.bash"
 source "$LIB_DIR/launch.bash"
@@ -310,20 +339,20 @@ case "${1-}" in
 esac
 #+END_SRC
 
-#+BEGIN_SRC bash :tangle honey/.local/bin/honey-opus :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :noweb yes
-# honey/.local/bin/honey-opus (generated by agents-bots-honey.org): Bunta, @honey_opus_bot
+#+BEGIN_SRC bash :tangle all/.local/share/dotcortex/honey-claude/bin/honey-opus :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :noweb yes
+# all/.local/share/dotcortex/honey-claude/bin/honey-opus (generated by agents-bots-honey.org): Bunta, @honey_opus_bot
 <<honey-launcher-head>>
 honey_claude_launch opus "${HONEY_OPUS_MODEL:-claude-opus-5-5}" "$@"
 #+END_SRC
 
-#+BEGIN_SRC bash :tangle honey/.local/bin/honey-sonnet :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :noweb yes
-# honey/.local/bin/honey-sonnet (generated by agents-bots-honey.org): Sasuke, @honey_sonnet_bot
+#+BEGIN_SRC bash :tangle all/.local/share/dotcortex/honey-claude/bin/honey-sonnet :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :noweb yes
+# all/.local/share/dotcortex/honey-claude/bin/honey-sonnet (generated by agents-bots-honey.org): Sasuke, @honey_sonnet_bot
 <<honey-launcher-head>>
-honey_claude_launch sonnet "${HONEY_SONNET_MODEL:-claude-sonnet-4-6}" "$@"
+honey_claude_launch sonnet "${HONEY_SONNET_MODEL:-claude-sonnet-5-5}" "$@"
 #+END_SRC
 
-#+BEGIN_SRC bash :tangle honey/.local/bin/honey-haiku :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :noweb yes
-# honey/.local/bin/honey-haiku (generated by agents-bots-honey.org): Shoukichi, @honey_haiku_bot
+#+BEGIN_SRC bash :tangle all/.local/share/dotcortex/honey-claude/bin/honey-haiku :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :noweb yes
+# all/.local/share/dotcortex/honey-claude/bin/honey-haiku (generated by agents-bots-honey.org): Shoukichi, @honey_haiku_bot
 <<honey-launcher-head>>
 honey_claude_launch haiku "${HONEY_HAIKU_MODEL:-claude-haiku-4-5-20251001}" "$@"
 #+END_SRC
@@ -333,10 +362,10 @@ honey_claude_launch haiku "${HONEY_HAIKU_MODEL:-claude-haiku-4-5-20251001}" "$@"
 Mètsàtron's ask (2026-09-26): the tanuki bots hear his voice notes and answer with voice notes too, in the Kitten seats pvox gives their kikin counterparts: Bunta Jasper (the Opus seat), Sasuke Luna (Fable's), Shoukichi Kiki (Haiku's), each at speed 1.2 on =kitten-tts-nano-0.8-int8=. On kikin pvox plays replies aloud on the speaker host; here each reply is also sent back into the chat as a playable voice note, because Honey has no HelmCortex and no speaker lane.
 
 - *Inbound:* the fleet's own =claude-hook-voice-transcribe= ([[file:agents-hooks.org][agents-hooks.org]]) runs as the =UserPromptSubmit= hook. It honours =$WHISPER_TRANSCRIBE=, which the launcher points at =honey-whisper-transcribe=, the Honey subset of HelmCortex's =whisper-transcribe= (same call shape, model source, cache and SHA-256 pin; no resident daemon, loop detection or escalation). =whisper-cli= comes from agent-claude's Guix profile, =ffmpeg= from the host.
-- *Outbound:* =honey-claude-voice-reply= runs as the =PostToolUse= hook on the reply tool. It detaches at once, renders the text with the agent's =~/kitten-venv= (DotCortex =kitten-apply=), encodes Opus, and posts it with =sendVoice= to the same chat. The token is read from the bot's state dir, never argv or logs; the log (=~/.cache/honey-voice-reply.log=) carries no text. =HONEY_VOICE_OFF=1= silences it, =HONEY_<BOT>_VOICE= overrides a seat.
-- The hooks reach Claude through =--settings=, so an unstowed agent account needs no hand-edited =settings.json=.
+- *Outbound:* =honey-claude-voice-reply= runs as the =PostToolUse= hook on the reply tool. It sends the raw reply and its declared format through the fleet's shared =voice-text-normalize= boundary before the spoken-character cap, detaches at once, renders the clean text with the agent's =~/kitten-venv= (DotCortex =kitten-apply=), encodes Opus, and posts it with =sendVoice= to the same chat. The token is read from the bot's state dir, never argv or logs; the log (=~/.cache/honey-voice-reply.log=) carries no text or synthesizer stderr. =HONEY_VOICE_OFF=1= silences it, =HONEY_<BOT>_VOICE= overrides a seat.
+- The hooks reach Claude through =--settings=, so an unstowed agent account needs no hand-edited =settings.json=. The same file enables the Telegram plugin and names its marketplace (Claude Code honours =enabledPlugins= from =--settings=, checked with =claude plugin list= on 2.1.284), and the preflight checks it there, so agent-claude's own =~/.claude/settings.json= carries nothing the bots depend on.
 
-#+BEGIN_SRC python :tangle honey/.local/share/honey-claude/bin/honey-claude-voice-reply :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/honey-claude/bin/honey-claude-voice-reply :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
 """PostToolUse hook (Telegram reply tool): send the reply back as a voice note.
 
 Renders the reply text with Kitten TTS in this bot's voice, encodes Opus with
@@ -348,6 +377,8 @@ appears in argv or the log.
 """
 import json
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -361,6 +392,11 @@ MODEL = os.environ.get("HONEY_VOICE_MODEL", "KittenML/kitten-tts-nano-0.8-int8")
 VOICE = os.environ.get("HONEY_VOICE", "")
 SPEED = os.environ.get("HONEY_VOICE_SPEED", "1.2")
 MAX_CHARS = int(os.environ.get("HONEY_VOICE_MAX_CHARS", "0") or 0)  # 0 = speak the whole reply (2026-10-07)
+NORMALIZER = (
+    os.environ.get("VOICE_TEXT_NORMALIZER")
+    or shutil.which("voice-text-normalize")
+    or str(Path(__file__).resolve().parents[5] / "all/.local/bin/voice-text-normalize")
+)
 SYNTH = r"""
 import sys
 import numpy as np
@@ -409,6 +445,19 @@ def send_voice(tok, chat_id, ogg, reply_to):
     return json.load(urllib.request.urlopen(req, timeout=60)).get("ok")
 
 
+def normalize_reply(text, format_name):
+    try:
+        result = subprocess.run(
+            [NORMALIZER, "--format", format_name], input=text,
+            text=True, capture_output=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(error.__class__.__name__) from error
+    if result.returncode:
+        raise RuntimeError("exit-%d" % result.returncode)
+    return result.stdout.strip()
+
+
 def render_and_send(text, chat_id, reply_to):
     tok = token()
     if not tok:
@@ -420,7 +469,7 @@ def render_and_send(text, chat_id, reply_to):
         r = subprocess.run([KITTEN_PY, "-c", SYNTH, MODEL, VOICE, SPEED, pcm],
                            input=text.encode(), capture_output=True, timeout=600)
         if r.returncode != 0:
-            log("FAIL synth rc=%d %s" % (r.returncode, r.stderr.decode(errors="replace").strip().splitlines()[-1:]))
+            log("FAIL synth rc=%d" % r.returncode)
             return
         r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "s16le", "-ar", "24000", "-ac", "1",
                             "-i", pcm, "-c:a", "libopus", "-b:a", "32k", ogg], capture_output=True, timeout=120)
@@ -435,7 +484,7 @@ def render_and_send(text, chat_id, reply_to):
         log("OK voice=%s chars=%d secs=%.1f sent=%s" % (VOICE, len(text), time.time() - t0, ok))
 
 
-def main():
+def main(detach=True):
     if os.environ.get("HONEY_VOICE_OFF") or not VOICE or not os.path.exists(KITTEN_PY):
         return
     try:
@@ -443,31 +492,41 @@ def main():
     except ValueError:
         return
     ti = data.get("tool_input") or {}
-    text, chat_id = (ti.get("text") or "").strip(), ti.get("chat_id")
-    if not text or not chat_id:
+    raw, format_name = ti.get("text") or "", ti.get("format") or "markdown"
+    chat_id = ti.get("chat_id")
+    if not isinstance(raw, str) or not isinstance(format_name, str) or not raw.strip() or not chat_id:
+        return
+    try:
+        text = normalize_reply(raw, format_name)
+    except RuntimeError as error:
+        log("SKIP normalize-failed %s" % error)
+        return
+    if not text:
         return
     if MAX_CHARS and len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
     # Detach: the reply has already gone out; the voice note follows it.
-    if os.fork() > 0:
-        return
-    os.setsid()
-    if os.fork() > 0:
-        os._exit(0)
-    devnull = os.open(os.devnull, os.O_RDWR)
-    for fd in (0, 1, 2):
-        os.dup2(devnull, fd)
+    if detach:
+        if os.fork() > 0:
+            return
+        os.setsid()
+        if os.fork() > 0:
+            os._exit(0)
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
     try:
         render_and_send(text, chat_id, ti.get("reply_to"))
     finally:
-        os._exit(0)
+        if detach:
+            os._exit(0)
 
 
 if __name__ == "__main__":
     main()
 #+END_SRC
 
-#+BEGIN_SRC python :tangle honey/.local/share/honey-claude/bin/honey-whisper-transcribe :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/honey-claude/bin/honey-whisper-transcribe :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
 """The Honey subset of HelmCortex's whisper-transcribe, for hosts without HelmCortex.
 
 Same call shape as the canonical FORGE/bin/whisper-transcribe that
@@ -545,21 +604,53 @@ if __name__ == "__main__":
     main()
 #+END_SRC
 
-#+BEGIN_SRC json :tangle honey/.local/share/honey-claude/claude-settings.json
+#+BEGIN_SRC json :tangle all/.local/share/dotcortex/honey-claude/claude-settings.json
 {
+  "extraKnownMarketplaces": {
+    "claude-plugins-official": {"source": {"source": "github", "repo": "anthropics/claude-plugins-official"}}
+  },
+  "enabledPlugins": {"telegram@claude-plugins-official": true},
   "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
+    ],
     "UserPromptSubmit": [
-      {"hooks": [{"type": "command", "command": "claude-hook-voice-transcribe", "timeout": 600}]}
+      {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10},
+                 {"type": "command", "command": "claude-hook-voice-transcribe", "timeout": 600}]}
+    ],
+    "PreCompact": [
+      {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
+    ],
+    "PostCompact": [
+      {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
+    ],
+    "Notification": [
+      {"matcher": "permission_prompt|elicitation_dialog",
+       "hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
+    ],
+    "PreToolUse": [
+      {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
     ],
     "PostToolUse": [
       {"matcher": "mcp__plugin_telegram_telegram__reply",
-       "hooks": [{"type": "command", "command": "honey-claude-voice-reply", "timeout": 10}]}
+       "hooks": [{"type": "command", "command": "honey-claude-voice-reply", "timeout": 10}]},
+      {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "claude-hook-telegram-delivery-guard", "timeout": 10},
+                 {"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
+    ],
+    "StopFailure": [
+      {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
+    ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
     ]
   }
 }
 #+END_SRC
 
-* OpenRC services (staged, installed by root)
+* OpenRC services (one body, installed by root)
 
 Modelled on Honey's =/etc/init.d/claude-warm=, with the lessons it already paid for:
 
@@ -568,8 +659,9 @@ Modelled on Honey's =/etc/init.d/claude-warm=, with the lessons it already paid 
 - The Claude UI must render in the tmux pane, or attaching shows an empty pane and nobody can pair or operate the bot (found 2026-09-26: the launcher's output was redirected into the log). The log is a copy taken with =tmux pipe-pane=.
 - =claude-warm= ignores SIGHUP and survives its tmux pane, so =stop= signals the supervisor itself (by the launcher's pid file), then removes the tmux session.
 - =PATH= is only ever *appended* to (the login shell's PATH plus the bot user's npm prefix, agent Guix profile and bin), never overwritten.
+- The launcher comes from the root-owned system checkout, and =start_pre= refuses to start if anything in the lane or the fleet =bin= it appends is not owned by root or is group/other-writable: the bot must never run code it could have edited itself.
 
-One script body serves all three services: the bot comes from =RC_SVCNAME= (=honey-opus= to =opus=). Install as root, for example =install -m 755 ~agent-claude/DotCortex/honey/.local/share/honey-claude/openrc/honey-opus /etc/init.d/honey-opus=, then =rc-update add honey-opus default= and check the =/etc/runlevels/default= link.
+One script body serves all three services: the bot comes from =RC_SVCNAME= (=honey-opus= to =opus=). =honey-claude-install= (below) installs it as =/etc/init.d/honey-{opus,sonnet,haiku}=. =/etc/conf.d/honey-<bot>= may set =bot_user= or =honey_claude_checkout=.
 
 #+NAME: honey-openrc
 #+BEGIN_SRC bash
@@ -588,8 +680,11 @@ description="Honey ${bot} Telegram Claude bot (claude-warm as ${bot_user})"
 bot_home="$(getent passwd "${bot_user}" | cut -d: -f6)"
 bot_session="${RC_SVCNAME}"
 bot_cwd="${bot_home}/honey-work/${bot}"
-# An agent account is not stowed: run the launcher from its own DotCortex checkout.
-bot_launcher="${bot_home}/DotCortex/honey/.local/bin/${RC_SVCNAME}"
+# The service lane: launchers run from the host's root-owned system checkout, never
+# from a checkout the bot user can write (agents-bots-honey.org, "Service lane").
+: "${honey_claude_checkout:=/usr/local/share/dotcortex/DotCortex}"
+bot_lane="${honey_claude_checkout}/all/.local/share/dotcortex/honey-claude"
+bot_launcher="${bot_lane}/bin/${RC_SVCNAME}"
 bot_log="/var/log/${RC_SVCNAME}.log"
 xdg="/run/${RC_SVCNAME}"
 bot_pidfile="${xdg}/${RC_SVCNAME}.pid"
@@ -605,6 +700,13 @@ start_pre() {
         opus|sonnet|haiku) ;;
         *) eerror "unknown Honey bot service name: ${RC_SVCNAME}"; return 1 ;;
     esac
+    [ -x "${bot_launcher}" ] || { eerror "missing launcher ${bot_launcher} (system checkout)"; return 1; }
+    # Everything the bot executes from the checkout must be root's and unwritable by others.
+    if [ -n "$(find "${bot_lane}" "${honey_claude_checkout}/all/.local/bin" \
+            \( ! -user root -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)" ]; then
+        eerror "${honey_claude_checkout} is not a root-owned, read-only system checkout; refusing"
+        return 1
+    fi
     checkpath -d -m 0700 -o "${bot_user}:${bot_user}" "${xdg}"
     checkpath -f -m 0640 -o "${bot_user}:${bot_user}" "${bot_log}"
 }
@@ -655,21 +757,205 @@ status() {
 }
 #+END_SRC
 
-#+BEGIN_SRC bash :tangle honey/.local/share/honey-claude/openrc/honey-opus :noweb yes :tangle-mode (identity #o644)
+#+BEGIN_SRC bash :tangle all/.local/share/dotcortex/honey-claude/openrc/honey-bot :noweb yes :tangle-mode (identity #o644)
 <<honey-openrc>>
 #+END_SRC
 
-#+BEGIN_SRC bash :tangle honey/.local/share/honey-claude/openrc/honey-sonnet :noweb yes :tangle-mode (identity #o644)
-<<honey-openrc>>
+* Service lane: a root-owned system checkout
+
+The bots are a host service, not part of anyone's dotfiles, so they run from a *service lane*: one root-owned DotCortex checkout per host at =/usr/local/share/dotcortex/DotCortex=, next to the Ductor seams that already live under =/usr/local/share/dotcortex= ([[file:agents-ductor-seams.org][agents-ductor-seams.org]]). Why:
+
+- *Nobody's PATH.* The lane is never stowed, so =metsatron= (or Gillean, later) no longer gets three bot launchers on PATH from the =honey/= overlay.
+- *The bot cannot edit what it runs.* Today the services run launchers from =agent-claude='s own checkout, which =agent-claude= can write; the body now refuses a checkout that is not root's and read-only (=start_pre=).
+- *One checkout per host, and a light one.* It is updated only by root, on Mètsàtron's word, and an update changes nothing running until the service is restarted.
+
+** The checkout is sparse and partial
+A full DotCortex checkout is about 218k files. The lane needs a handful, so the system checkout reuses the HelmCortex skills mirror's shape ([[file:helmcortex-skills-mirror.org][helmcortex-skills-mirror.org]]): a *partial* clone (=--filter=blob:none=: only the blobs of the checked-out paths are fetched) with a *non-cone sparse* checkout of exactly the paths below. No submodules are initialised.
+
+The lane declares its own path list, =<lane>/SPARSE=, traced from what the launchers actually run:
+
+- the lane itself (launchers, library, voice helpers, settings, OpenRC body, identity files);
+- =claude-warm=, which every launcher =exec='s (standard library only);
+- =claude-warmctl=, the control command the OpenRC body's header names (=claude-warm --control=);
+- =claude-hook-voice-transcribe=, the =UserPromptSubmit= hook in =claude-settings.json= (standard library only; it runs =$WHISPER_TRANSCRIBE=, which the launcher points at the lane's own =honey-whisper-transcribe=).
+- =claude-hook-telegram-delivery-guard=, the =Stop= hook in =claude-settings.json= (bash and =python3= only): a bot whose turn ends without calling the Telegram reply tool gets one more turn, so an answer never stays in a transcript nobody reads. Its first gate is =CLAUDE_IDLE_CHANNEL=, which =claude-warm= exports to the session.
+- =claude-hook-idle-event=, the lifecycle adapter every =claude-warm= session needs (bash, =jq= and =python3= only). It is registered on every event where the fleet's own settings register it ([[file:agents-hooks.org][agents-hooks.org]], =all/.claude/settings.shared.json=); without it =claude-warm= never sees a session start or a turn end, so its idle timer never arms and the bots never compact.
+
+*Incident, 2026-09-30.* The lane shipped without this hook: =SPARSE= did not carry it and =claude-settings.json= did not register it. On a stowed host the hook reaches Claude through =~/.claude/settings.json=; the bots are unstowed, their =~/.claude/settings.json= is empty, and =--settings= is their only hook source. All three supervisors sat at =status: starting= from their first launch (2026-09-26) and never compacted once. Three guards now stop a repeat: the tests require every idle-event registration of the fleet's settings in the lane's settings; the launcher refuses to start a Telegram bot whose settings lack the hook or whose =PATH= cannot find it; and =claude-warm= itself records =lifecycle-hooks-missing= when a supervised session sends no lifecycle event after launch ([[file:agents-claude-idle-supervisor.org][agents-claude-idle-supervisor.org]]).
+
+- =codex-warm=, =codex-warmctl= and =codex-hook-idle-event= (standard library, bash, =jq= and =python3= only), added 2026-10-05 for the approved warm switchover (=agents-codex-idle-supervisor.org=, "Switchover to the agent accounts"): =codex-warm.agent-codex= resolves its binary from this checkout, never from one =agent-codex= can write. No bot runs them.
+
+Everything else the bots call comes from the host or =agent-claude='s own profiles, never from DotCortex: =jq=, =sha256sum=, =ffmpeg=, =whisper-cli=, =~/kitten-venv=, =claude= and =bun= (=~/.npm-global=), node (agent Guix profile), and the preservation bridge from the HelmCortex skills mirror. The tests fail if a lane file names an =all/.local/bin= command or an =all/= path that =SPARSE= does not carry, so widening the lane means widening this list.
+
+#+NAME: honey-claude-sparse
+#+BEGIN_SRC text :tangle all/.local/share/dotcortex/honey-claude/SPARSE :padline no
+/all/.local/share/dotcortex/honey-claude/
+/all/.local/bin/claude-warm
+/all/.local/bin/agent-session
+/all/.local/bin/agent-sessiond
+/all/.local/bin/telegram-agent-host
+/all/.local/bin/agent-voice-relay
+/all/.local/bin/claude-hook-voice-reply
+/all/.local/bin/piper
+/all/.local/bin/loom
+/all/.local/bin/nanobot-telegram
+/all/.local/bin/opencode-owner
+/all/.local/bin/telegram-agent-remote-start
+/all/.local/bin/telegram-agent-watchdog
+/all/.local/bin/telegram-agent-boot
+/all/.local/bin/claude-warmctl
+/all/.local/bin/claude-hook-voice-transcribe
+/all/.local/bin/voice-text-normalize
+/all/.local/bin/claude-hook-telegram-delivery-guard
+/all/.local/bin/claude-hook-idle-event
+/all/.local/bin/codex-warm
+/all/.local/bin/codex-warmctl
+/all/.local/bin/codex-hook-idle-event
 #+END_SRC
 
-#+BEGIN_SRC bash :tangle honey/.local/share/honey-claude/openrc/honey-haiku :noweb yes :tangle-mode (identity #o644)
-<<honey-openrc>>
+** Installer
+=honey-claude-install= has two verbs, both with =--dry-run=:
+
+- =sync= clones the system checkout on first run, then updates it: it refuses a checkout with local edits, on another branch, with another remote, or whose history the remote rewrote; it fetches, *re-applies the sparse set from the fetched =SPARSE=* (so a widened list arrives with the change that needs it), and fast-forwards. That is =git pull --ff-only= with the sparse set re-read first. The clone sets =index.version 4=: a non-cone sparse checkout still lists every tracked path in its index (the sparse index needs cone mode, and cone mode would pull in the whole fleet =bin=), and version 4 prefix-compresses those paths, about 40% smaller. It runs with =umask 022=, so the files come out root-owned and unwritable by others even under =sudo= from a =002= shell. The first clone may be run from any checkout (its own =SPARSE= seeds the patterns); after that, run it from the system checkout.
+- =install= (the default) puts the body in place as =/etc/init.d/honey-{opus,sonnet,haiku}= and backs up what it replaces, following the Ductor installer. It refuses any checkout but the root-owned system one.
+
+Neither verb starts, restarts or adds a service to a runlevel (the three are already in =default=). =HONEY_CLAUDE_CHECKOUT=, =HONEY_CLAUDE_REMOTE= and =HONEY_CLAUDE_BRANCH= override the destination, remote and branch of =sync=, for rehearsals in a scratch directory; only the real destination needs root.
+
+#+BEGIN_SRC bash :tangle all/.local/share/dotcortex/honey-claude/openrc/honey-claude-install :tangle-mode (identity #o755)
+#!/usr/bin/env bash
+# honey-claude-install (generated by agents-bots-honey.org): keep the host's root-owned
+# sparse system checkout current, and install Honey's tanuki bot services from it.
+set -euo pipefail
+umask 022
+
+SYSTEM_CHECKOUT=/usr/local/share/dotcortex/DotCortex
+LANE_REL=all/.local/share/dotcortex/honey-claude
+BOTS=(opus sonnet haiku)
+
+usage() {
+    cat <<'USAGE'
+Usage: honey-claude-install [--dry-run] [install]
+       honey-claude-install [--dry-run] sync
+       honey-claude-install -h|--help
+
+sync     clone or update the sparse, blobless system checkout
+         (/usr/local/share/dotcortex/DotCortex) from <lane>/SPARSE; refuses local
+         edits, another branch or remote, and non-fast-forward history
+install  install the shared OpenRC body as /etc/init.d/honey-{opus,sonnet,haiku}
+         from the root-owned system checkout (default verb); existing scripts
+         are backed up as <file>.bak-<timestamp>
+
+Run as root. Nothing is started, restarted or added to a runlevel.
+  --dry-run   print what would change; change nothing (any user, any checkout)
+Env (sync rehearsals): HONEY_CLAUDE_CHECKOUT, HONEY_CLAUDE_REMOTE, HONEY_CLAUDE_BRANCH
+USAGE
+}
+
+DRY=0 VERB=install
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) usage; exit 0 ;;
+        --dry-run) DRY=1 ;;
+        sync|install) VERB="$arg" ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+
+lane="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)"
+checkout="$(cd -- "$lane/../../../../.." && pwd)"
+run() { if [ "$DRY" -eq 1 ]; then echo "would: $*"; else "$@"; fi; }
+fail() { echo "honey-claude-install: $*" >&2; exit 1; }
+
+do_sync() {
+    local dir="${HONEY_CLAUDE_CHECKOUT:-$SYSTEM_CHECKOUT}"
+    local remote="${HONEY_CLAUDE_REMOTE:-https://gitlab.com/metsatron/dotfiles.git}"
+    local branch="${HONEY_CLAUDE_BRANCH:-master}"
+    command -v git >/dev/null 2>&1 || fail "git is not installed"
+    if [ "$dir" = "$SYSTEM_CHECKOUT" ] && [ "$DRY" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
+        fail "run as root to sync $SYSTEM_CHECKOUT"
+    fi
+    if [ ! -d "$dir/.git" ]; then
+        [ ! -e "$dir" ] || [ -z "$(ls -A "$dir" 2>/dev/null)" ] || fail "refusing: $dir exists, is not empty and is not a checkout"
+        [ -r "$lane/SPARSE" ] || fail "missing $lane/SPARSE"
+        local tmp="$dir.partial.$$"
+        run git clone --quiet --filter=blob:none --no-checkout --branch "$branch" "$remote" "$tmp"
+        run git -C "$tmp" sparse-checkout init --no-cone
+        # Non-cone mode keeps every path in the index (no sparse index); v4 prefix-compresses it.
+        run git -C "$tmp" config index.version 4
+        if [ "$DRY" -eq 1 ]; then
+            echo "would: set the sparse patterns from $lane/SPARSE:"; sed 's/^/  /' "$lane/SPARSE"
+        else
+            git -C "$tmp" sparse-checkout set --no-cone --stdin < "$lane/SPARSE"
+        fi
+        run git -C "$tmp" checkout --quiet "$branch"
+        run mv "$tmp" "$dir"
+        [ "$DRY" -eq 1 ] || echo "cloned $(git -C "$dir" rev-parse --short HEAD) into $dir (sparse, blobless)"
+        return 0
+    fi
+    [ "$(git -C "$dir" remote get-url origin)" = "$remote" ] || fail "refusing: $dir origin is not $remote"
+    [ "$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || true)" = "$branch" ] || fail "refusing: $dir is not on $branch"
+    [ -z "$(git -C "$dir" status --porcelain --untracked-files=no)" ] || fail "refusing: $dir has local edits; it is read-only by contract"
+    run git -C "$dir" fetch --quiet --filter=blob:none origin "$branch"
+    if [ "$DRY" -eq 1 ]; then
+        echo "would: re-apply the sparse set from FETCH_HEAD:$LANE_REL/SPARSE, then merge --ff-only FETCH_HEAD"
+        return 0
+    fi
+    local before after
+    before="$(git -C "$dir" rev-parse HEAD)"
+    git -C "$dir" show "FETCH_HEAD:$LANE_REL/SPARSE" | git -C "$dir" sparse-checkout set --no-cone --stdin
+    git -C "$dir" merge --quiet --ff-only FETCH_HEAD || fail "refusing: $branch is not a fast-forward of $dir; re-clone deliberately"
+    after="$(git -C "$dir" rev-parse HEAD)"
+    [ "$before" = "$after" ] && echo "current ${after:0:10}" || echo "updated ${before:0:10}..${after:0:10} (restart the bots to use it)"
+}
+
+do_install() {
+    local body="$lane/openrc/honey-bot" ts problems=() unsafe bot dst
+    ts="$(date +%Y%m%d-%H%M%S)"
+    [ "$checkout" = "$SYSTEM_CHECKOUT" ] || problems+=("not the system checkout: $checkout (expected $SYSTEM_CHECKOUT)")
+    unsafe="$(find "$lane" "$checkout/all/.local/bin" \( ! -user root -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null || true)"
+    [ -z "$unsafe" ] || problems+=("not root-owned and read-only: $unsafe (and maybe more)")
+    for bot in "${BOTS[@]}"; do
+        [ -x "$lane/bin/honey-$bot" ] || problems+=("missing launcher $lane/bin/honey-$bot")
+    done
+    [ -r "$body" ] || problems+=("missing body $body")
+    if [ "${#problems[@]}" -gt 0 ]; then
+        printf 'honey-claude-install: %s\n' "${problems[@]}" >&2
+        [ "$DRY" -eq 1 ] || exit 1
+        echo "honey-claude-install: dry-run continues; a real run would refuse" >&2
+    fi
+    [ "$DRY" -eq 1 ] || [ "$(id -u)" -eq 0 ] || fail "run as root"
+    for bot in "${BOTS[@]}"; do
+        dst="/etc/init.d/honey-$bot"
+        if [ -e "$dst" ] && cmp -s "$body" "$dst"; then echo "unchanged $dst"; continue; fi
+        [ -e "$dst" ] && run cp -p "$dst" "$dst.bak-$ts"
+        run install -m 0755 -o root -g root "$body" "$dst"
+        [ "$DRY" -eq 1 ] || echo "installed $dst"
+    done
+    echo "launchers: $lane/bin/honey-{opus,sonnet,haiku} (restart each bot to switch)"
+}
+
+case "$VERB" in
+    sync) do_sync ;;
+    install) do_install ;;
+esac
 #+END_SRC
+
+** Switchover (not applied; each step is Mètsàtron's word, on Honey as =gille=)
+
+Nothing in this module has changed Honey. Until the switchover the installed =/etc/init.d/honey-*= scripts run =~agent-claude/DotCortex/honey/.local/bin/honey-<bot>=, so *do not pull =agent-claude='s checkout before step 5*: a pull deletes those launchers (the running bots survive, but their next start fails). Rollback at any step: copy the =.bak-<timestamp>= script back over =/etc/init.d/honey-<bot>= and restart that bot.
+
+1. *Dry-run the clone* from any up-to-date checkout (for example =~/DotCortex= after it has pulled the merge): =~/DotCortex/all/.local/share/dotcortex/honey-claude/openrc/honey-claude-install --dry-run sync=.
+2. *Clone* (root, once): the same with =sudo= and without =--dry-run=. =/usr/local/share/dotcortex= already exists (the Ductor seams). Check: =sudo find /usr/local/share/dotcortex/DotCortex/all \( ! -user root -o -perm /022 \) ! -type l -print -quit= prints nothing.
+3. *Dry-run the install* from the system checkout: =/usr/local/share/dotcortex/DotCortex/all/.local/share/dotcortex/honey-claude/openrc/honey-claude-install --dry-run= must report no problems and three =would: install= lines.
+4. *Install*: the same with =sudo= and without =--dry-run=. The old scripts are backed up; nothing restarts.
+5. *Bounce one bot at a time* in a quiet window, Shoukichi first: =sudo rc-service honey-haiku restart=, then =rc-service honey-haiku status=, =su -l agent-claude -c 'tmux attach -t honey-haiku'= (UI renders; =Ctrl-b d=) and a Telegram round trip. Then Sasuke, then Bunta.
+6. *Working directories*: the boundary =CLAUDE.md= copies in =~agent-claude/honey-work/<bot>/= are unchanged by the move; compare with =cmp= against the lane's =CLAUDE.<bot>.md= and copy only on a difference.
+7. *Afterwards*: =agent-claude='s own checkout no longer runs the bots. It still feeds =agent-guix-apply= and =agent-cli-install=, so it stays, and it may be pulled again.
+8. *Updates from then on*: =sudo /usr/local/share/dotcortex/DotCortex/all/.local/share/dotcortex/honey-claude/openrc/honey-claude-install sync= (dry-run first), re-run steps 3-4 if the body changed, and restart the bots whose lane files changed.
 
 * Identity and boundary law for the bots' working directories
 
-Each bot starts in =~/honey-work/<bot>= (=metsatron='s home). Its =CLAUDE.md= is a copy of =CLAUDE.<bot>.md=, installed by the reviewed apply step: the identity first (the kikin brain layout: =# CLAUDE.md - <Name>=, =## Identity=, =## Telegram=), then the Honey boundary law, so both are the first thing every session loads. They carry no machine addresses and no names of clients.
+Each bot starts in =~/honey-work/<bot>= (in =agent-claude='s home). Its =CLAUDE.md= is a copy of =CLAUDE.<bot>.md=, installed by the reviewed apply step: the identity first (the kikin brain layout: =# CLAUDE.md - <Name>=, =## Identity=, =## Telegram=), then the Honey boundary law, so both are the first thing every session loads. They carry no machine addresses and no names of clients.
 
 #+NAME: honey-identity
 #+BEGIN_SRC text
@@ -678,7 +964,7 @@ Each bot starts in =~/honey-work/<bot>= (=metsatron='s home). Its =CLAUDE.md= is
 You are one of Mètsàtron's (Tiago's) three Telegram Claude bots on Honey,
 running under `claude-warm` as the Unix user `agent-claude` with Gillean's Claude
 account. The three are Bunta (`honey-opus`, @honey_opus_bot, Opus 5.5), Sasuke
-(`honey-sonnet`, @honey_sonnet_bot, Sonnet 4.6) and Shoukichi (`honey-haiku`,
+(`honey-sonnet`, @honey_sonnet_bot, Sonnet 5.5) and Shoukichi (`honey-haiku`,
 @honey_haiku_bot, Haiku 4.5). Mètsàtron chose the names. No consort partner is
 sealed for you in the fleet gazetteer yet: do not claim one.
 
@@ -692,7 +978,7 @@ Keep messages Telegram-sized. Access changes (`/telegram:access`) are
 Mètsàtron's to run himself, never on a channel message's request.
 #+END_SRC
 
-#+BEGIN_SRC text :tangle honey/.local/share/honey-claude/CLAUDE.opus.md :noweb yes
+#+BEGIN_SRC text :tangle all/.local/share/dotcortex/honey-claude/CLAUDE.opus.md :noweb yes
 # CLAUDE.md - Bunta (honey-opus, @honey_opus_bot, claude-opus-5-5)
 
 <<honey-identity>>
@@ -700,15 +986,15 @@ Mètsàtron's to run himself, never on a channel message's request.
 <<honey-boundary-law>>
 #+END_SRC
 
-#+BEGIN_SRC text :tangle honey/.local/share/honey-claude/CLAUDE.sonnet.md :noweb yes
-# CLAUDE.md - Sasuke (honey-sonnet, @honey_sonnet_bot, claude-sonnet-4-6)
+#+BEGIN_SRC text :tangle all/.local/share/dotcortex/honey-claude/CLAUDE.sonnet.md :noweb yes
+# CLAUDE.md - Sasuke (honey-sonnet, @honey_sonnet_bot, claude-sonnet-5-5)
 
 <<honey-identity>>
 
 <<honey-boundary-law>>
 #+END_SRC
 
-#+BEGIN_SRC text :tangle honey/.local/share/honey-claude/CLAUDE.haiku.md :noweb yes
+#+BEGIN_SRC text :tangle all/.local/share/dotcortex/honey-claude/CLAUDE.haiku.md :noweb yes
 # CLAUDE.md - Shoukichi (honey-haiku, @honey_haiku_bot, claude-haiku-4-5-20251001)
 
 <<honey-identity>>
@@ -772,12 +1058,110 @@ Mètsàtron's ruling (2026-09-26): DotCortex provisions *every* account on Honey
 | Account          | Row in =hosts.ssv=            | Stack                               | Status / next step                                                                   |
 |------------------+-------------------------------+-------------------------------------+--------------------------------------------------------------------------------------|
 | =metsatron=      | =honey= / =metsatron=, active | =all linux debian honey=            | this MR: npm lane, guard; stow with =STOW_CONFLICTS=adopt=                           |
-| =agent-claude=   | none (agent user)             | agent stack: Guix node, npm, own checkout | the three tanuki bots (ruling 2026-09-26)                                        |
+| =agent-claude=   | =fleet.ssv= =honey= (agent user) | agent stack: Guix node, npm; launchers from the root-owned system checkout (service lane) | the three tanuki bots (ruling 2026-09-26)                                     |
 | =gille=          | =honey= / =gille=, planned    | =all linux debian honey [user-gille]= | LATER: adoption of her live desktop (Phase D =user-gille/= content first); adopt policy only, never the legacy backup |
-| =agent-codex=    | none yet                      | agent stack (=agents.org= agent-user bootstrap) | LATER: Flying Fox's toolchain and Ductor home through lanes instead of the hand copies of 2026-09-25 |
-| =agent-opencode= | none yet                      | agent stack                         | LATER: Possum likewise                                                               |
+| =agent-codex=    | =fleet.ssv= =honey= (agent user) | agent stack (=agents-users.org= agent-user bootstrap) | Flying Fox: fleet lane (latest) below; cutover not applied                         |
+| =agent-opencode= | =fleet.ssv= =honey= (agent user) | agent stack                         | Possum: fleet lane (latest) below; cutover not applied                                         |
 
-Agent accounts get rows (or an agent-user registry) only once the agent-user wall's =fleet.ssv= row for Honey lands (2026-09-25-06). Until then nothing here resolves for them.
+Agent accounts are not stowed and get no =hosts.ssv= row: Honey's =fleet.ssv= row (=agents= column, [[file:agents-users.org][agents-users.org]]) declares which agent users the host carries, and =agent-fleet-check --host honey= audits them.
+
+
+
+** Flying Fox and Possum lanes
+
+Both agent users were created by hand on 2026-09-25 (=agent-users-bootstrap --only codex,opencode=) and are declared in Honey's =fleet.ssv= row ([[file:agents-users.org][agents-users.org]]), so =agent-fleet-check --host honey=, run on Honey as =gille=, audits their uids and groups. Their *toolchains* are still the hand copies. Read-only check, 2026-09-26:
+
+| Account          | Service                                  | Today                                                                                                   |
+|------------------+------------------------------------------+---------------------------------------------------------------------------------------------------------|
+| =agent-codex=    | Flying Fox, =honey-codex= (Ductor body)  | node copied into =~/.local/bin=; =@openai/codex= 0.154.0 in the =~/.local= npm prefix; =ductor= 0.20.1 by =pip --user=; no Guix profile |
+| =agent-opencode= | Possum, =honey-opencode-serve= / =-bot=  | node copied; =opencode-ai= 1.18.30 and =@grinev/opencode-telegram-bot= 0.25.2 in =~/.local=; no Guix profile; init scripts hand-written (DotCortex bodies now in [[file:agents-bots-opencode-openrc.org][agents-bots-opencode-openrc.org]], not installed) |
+
+They move to the lane =agent-claude= already uses: node from the agent's own Guix profile (=agent-guix-apply=, manifests =agents/codex.scm= and =agents/opencode.scm=, both =node=), the CLIs in the agent's own =~/.npm-global= (=agent-cli-install=). No version is pinned (ruling 2026-10-05, [[file:agents-users.org][agents-users.org]] "Per-agent CLI manifests"): Honey's agents get the fleet lanes and so the registry's =latest=. Until that ruling Honey carried host lanes pinning its working versions (codex 0.154.0, opencode-ai 1.18.30, the Telegram bot 0.25.2); they are gone. So step 2 below upgrades as well as moves: it installs today's =latest=, and on Possum it adds =agent-browser= and floats the Telegram bot past 0.25.2. Since 2026-10-05 Possum's bot runs HelmCortex's =opencode-telegram-patch-apply= before every start, from a root-owned copy ([[file:agents-bots-opencode-openrc.org][agents-bots-opencode-openrc.org]] "Honey instances"), so that guard's version list (0.25.2 and 0.26.3 since HelmCortex =08d165f1=) gates its float exactly as on kikin: refresh the copy before the float.
+
+Ductor is a Python bot framework, not an agent CLI, so it keeps =package-pip.org='s pin (0.20.1). That pin carries the HelmCortex voice seams, and Honey's Flying Fox copy also carries Honey's 3 local patches, which a Ductor upgrade wipes. =agent-cli-install= has no pip manager and gets none (ruling 2026-10-05, no pipx), so Flying Fox keeps its =pip --user= install, and the Ductor OpenRC body re-applies the fleet seams before every start ([[file:agents-ductor-seams.org][agents-ductor-seams.org]]).
+
+*Cutover, not applied; each step is Mètsàtron's word, dry-run first, run on Honey as =gille=* (until this lands on master, point =agent-cli-install= at this branch's manifests with =AGENT_CLI_MANIFESTS=; =agent-guix-apply= reads =~/DotCortex=, whose manifests are already on master):
+
+1. =agent-guix-apply --only codex,opencode=: builds =~/.guix-extra-profiles/agent/agent= (node) for each and sources it from =~/.profile=. Nothing running changes.
+2. =agent-cli-install --only codex,opencode=: installs the fleet lanes' =latest= into =~/.npm-global= and puts its =bin= on =~/.profile='s PATH. The old =~/.local= copies stay and still come first on the services' PATH, so nothing running changes yet.
+3. Service swap, one at a time, in a quiet window. =honey-codex=: re-install the Ductor body and conf (=ductor-openrc-install=, [[file:agents-ductor-seams.org][agents-ductor-seams.org]]); the conf's =ductor_path_add= appends the agent's Guix node =bin=, after =~/.local/bin= and =~/.npm-global/bin=. =honey-opencode-serve= / =-bot=: replace the hand-written scripts with the DotCortex bodies (=opencode-openrc-install=, [[file:agents-bots-opencode-openrc.org][agents-bots-opencode-openrc.org]]). Their Honey confs reproduce today's scripts and add the Guix node the same way, so the install alone changes nothing; the swap is pointing =opencode_bin= / =opencode_telegram_bin= at =~/.npm-global/bin= and restarting.
+4. After a verified bounce: remove the copied node and the old =~/.local/lib/node_modules= packages. Removals are an operator step; no lane script removes anything.
+
+#+BEGIN_SRC python :tangle linux/.local/share/dotcortex/tests/test-agent-cli-lanes.py :shebang "#!/usr/bin/env python3" :comments no :noweb no
+"""agent-cli-install lanes: no agent CLI pinned (ruling 2026-10-05), host lanes still replace the fleet lane. Dry-run only, no root."""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+INSTALL = ROOT / "all/.local/bin/agent-cli-install"
+MANIFESTS = ROOT / "all/.config/agent-cli"
+# Runtimes an agent lane may still pin; everything else in a lane is an agent CLI.
+RUNTIMES = {"bun"}
+
+
+def lane_lines(path: Path) -> list[list[str]]:
+    return [l.split() for l in path.read_text().splitlines() if l.strip() and not l.lstrip().startswith("#")]
+
+
+class AgentCliLaneTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        stub = Path(self.tmp.name) / "bin"
+        stub.mkdir()
+        (stub / "id").write_text("#!/bin/sh\nexit 0\n")  # every agent user "exists"
+        (stub / "id").chmod(0o755)
+        self.env = dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def dry(self, host: str, only: str, manifests: Path = MANIFESTS) -> str:
+        out = subprocess.run(["bash", str(INSTALL), "--only", only],
+                             env=dict(self.env, AGENT_CLI_HOST=host, AGENT_CLI_MANIFESTS=str(manifests)),
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("+ ", out.stdout, "dry-run must not run anything")
+        return out.stdout
+
+    def test_no_agent_cli_is_pinned(self) -> None:
+        for lane in [*MANIFESTS.glob("*.ssv"), *MANIFESTS.glob("hosts/*@agent-*.ssv")]:
+            for fields in lane_lines(lane):
+                if fields[0] == "npm" and fields[1] not in RUNTIMES:
+                    self.assertEqual(len(fields), 2, f"{lane.name} pins {' '.join(fields[1:])}")
+
+    def test_honey_installs_latest(self) -> None:
+        out = self.dry("beelink", "codex,opencode")
+        self.assertNotIn("host lane", out)
+        for pkg in ("@openai/codex", "opencode-ai", "@grinev/opencode-telegram-bot", "agent-browser"):
+            self.assertIn(f"npm install -g '{pkg}'", out)
+        self.assertNotRegex(out, r"npm install -g '(@openai/codex|opencode-ai|@grinev/opencode-telegram-bot)@")
+
+    def test_a_host_lane_replaces_the_fleet_lane(self) -> None:
+        fixture = Path(self.tmp.name) / "agent-cli"
+        shutil.copytree(MANIFESTS, fixture)
+        (fixture / "hosts").mkdir(exist_ok=True)
+        (fixture / "hosts/testhost@agent-opencode.ssv").write_text("# MANAGER PACKAGE [VERSION]\nnpm opencode-ai\n")
+        out = self.dry("testhost", "opencode", fixture)
+        self.assertIn("hosts/testhost@agent-opencode.ssv", out)
+        self.assertNotIn("agent-browser", out)
+        self.assertIn("agent-browser", self.dry("otherhost", "opencode", fixture))
+
+    def test_host_lanes_only_name_provisioned_agents(self) -> None:
+        tools = {l[0] for l in lane_lines(MANIFESTS / "uids.ssv") if l[2] == "yes"}
+        for lane in (MANIFESTS / "hosts").glob("*@agent-*.ssv"):
+            self.assertIn(lane.stem.split("@agent-", 1)[1], tools, lane.name)
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
 
 * Notes and TODOs (fleet direction, not implemented here)
 
@@ -793,8 +1177,11 @@ Agent accounts get rows (or an agent-user registry) only once the agent-user wal
 Run with =python3 all/.local/share/dotcortex/tests/test-honey-claude-bots.py -v= from the repo root. No root, no network, no stow into =$HOME=: each launcher runs against a scratch home with a fake =claude-warm= that records its arguments and environment, and a dummy token file.
 
 - The three launchers pass the right model, =--permission-mode acceptEdits=, a standing allow for the Telegram plugin's tools (Haiku has no auto mode, so without it every reply waited for a human approval; 2026-09-26), the official Telegram channel, =TELEGRAM_STATE_DIR= and a distinct herdr agent name, start in =~/honey-work/<bot>=, and write their pid file.
-- They refuse without the boundary =CLAUDE.md=, and without an enabled Telegram plugin.
-- The three OpenRC scripts are identical, parse under =sh -n=, never =need net=, and never assign =PATH= outright.
+- They refuse without the boundary =CLAUDE.md=, without an enabled Telegram plugin, and without =claude-hook-idle-event= registered on =SessionStart= and =Stop=.
+- =claude-settings.json= registers =claude-hook-idle-event= on every event (and matcher) where the fleet's =all/.claude/settings.shared.json= ([[file:agents-hooks.org][agents-hooks.org]]) does, so the bots' idle compaction can never again be silently unwired (2026-09-30).
+- One OpenRC body serves the three services; it parses under =sh -n=, never =need net=, never assigns =PATH= outright, runs the launcher from the system checkout and refuses one the bot could edit. The installer's dry-run changes nothing, and a real run refuses a user's checkout.
+- =SPARSE= carries every =all/.local/bin= command and =all/= path a carried file names (so a launcher can never reach outside the sparse checkout), the launcher's fleet =bin= is the sparse one, the settings hooks resolve inside it, and =sync --dry-run= plans a blobless, non-cone sparse clone and creates nothing.
+- The lane is never stowed: no =honey/= launchers remain, =all/.stow-local-ignore= names the lane, and no active host's resolved stack plans a link into it (or a folded parent that would expose it).
 
 #+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-honey-claude-bots.py :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
 """Tests for the Honey Telegram Claude bot launchers and services (agents-bots-honey.org)."""
@@ -802,6 +1189,7 @@ Run with =python3 all/.local/share/dotcortex/tests/test-honey-claude-bots.py -v=
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -810,15 +1198,17 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[5]
-BIN = ROOT / "honey/.local/bin"
-OPENRC = ROOT / "honey/.local/share/honey-claude/openrc"
-SHARE = ROOT / "honey/.local/share/honey-claude"
-BOTS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-4-6", "haiku": "claude-haiku-4-5-20251001"}
+SHARE = ROOT / "all/.local/share/dotcortex/honey-claude"
+BIN = SHARE / "bin"
+OPENRC = SHARE / "openrc"
+BOTS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-4-5-20251001"}
 PERSONAS = {"opus": "Bunta", "sonnet": "Sasuke", "haiku": "Shoukichi"}
 
 
 class Home:
-    def __init__(self, plugin_enabled=True, boundary=True, account=True):
+    def __init__(self, plugin_enabled=True, boundary=True, account=True, idle_hooks=True):
+        self.plugin_enabled = plugin_enabled
+        self.idle_hooks = idle_hooks
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name) / "home"
         self.bin = Path(self.tmp.name) / "bin"
@@ -829,8 +1219,11 @@ class Home:
         (self.home / ".claude").mkdir()
         if account:
             (self.home / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "test-account"}}))
-        (self.home / ".claude/settings.json").write_text(
-            json.dumps({"enabledPlugins": {"telegram@claude-plugins-official": plugin_enabled}}))
+        # No ~/.claude/settings.json: the lane's claude-settings.json enables the plugin.
+        # A disabled plugin, or settings without the idle hooks, is simulated by pointing the
+        # preflights at a settings file that says so.
+        self.settings = Path(self.tmp.name) / "settings.json"
+        self.settings.write_text(json.dumps({"enabledPlugins": {"telegram@claude-plugins-official": plugin_enabled}}))
         plugin = self.home / ".claude/plugins/cache/claude-plugins-official/telegram/0.0.6"
         plugin.mkdir(parents=True)
         (plugin / ".mcp.json").write_text(json.dumps({"mcpServers": {"telegram": {"command": "bun"}}}))
@@ -862,6 +1255,8 @@ class Home:
     def run(self, bot, *args):
         env = {"HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin",
                "XDG_RUNTIME_DIR": str(self.xdg)}
+        if not self.plugin_enabled or not self.idle_hooks:
+            env["CLAUDE_SETTINGS_FILE"] = str(self.settings)
         return subprocess.run([str(BIN / f"honey-{bot}"), *args], capture_output=True,
                               text=True, env=env)
 
@@ -889,6 +1284,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(rec["state"], str(box.home / f".claude/channels/telegram-{bot}"))
                 self.assertEqual(rec["agent"], f"honey-{bot}-bot")
                 self.assertIn(str(box.home / ".npm-global/bin"), rec["path"].split(":"))
+                self.assertIn(str(ROOT / "all/.local/bin"), rec["path"].split(":"), "fleet bin of the lane checkout")
                 self.assertTrue(rec["path"].startswith(str(box.bin)), "PATH must be appended to")
                 pidfile = box.xdg / f"honey-{bot}.pid"
                 self.assertEqual(pidfile.read_text().strip(), str(rec["pid"]))
@@ -975,32 +1371,198 @@ class LauncherTests(unittest.TestCase):
         finally:
             box.close()
 
+    def test_refuses_without_idle_hooks(self):
+        # 2026-09-30: a bot that cannot tell claude-warm its turns ended never compacts.
+        box = Home(idle_hooks=False)
+        try:
+            result = box.run("sonnet", "--telegram")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("claude-hook-idle-event", result.stderr)
+            self.assertFalse(box.record.exists())
+        finally:
+            box.close()
+
 
 class ServiceTests(unittest.TestCase):
-    def scripts(self):
-        return {bot: (OPENRC / f"honey-{bot}").read_text() for bot in BOTS}
-
-    def test_three_identical_scripts(self):
-        texts = set(self.scripts().values())
-        self.assertEqual(len(texts), 1)
+    def test_one_body_for_the_three_services(self):
+        self.assertEqual(sorted(p.name for p in OPENRC.iterdir()), ["honey-bot", "honey-claude-install"])
 
     def test_script_rules(self):
-        text = next(iter(self.scripts().values()))
+        text = (OPENRC / "honey-bot").read_text()
         self.assertTrue(text.startswith("#!/sbin/openrc-run\n"))
         self.assertNotRegex(text, r"\bneed\s+net\b")
         self.assertIn("use net dns", text)
         self.assertNotRegex(text, r"(^|[\s;'\"])PATH=['\"]?/", "PATH must only be appended to")
         self.assertIn('PATH=\\"\\${PATH}:', text)
         self.assertIn(': "${bot_user:=agent-claude}"', text)
-        self.assertIn("/DotCortex/honey/.local/bin/", text)
+        self.assertIn(': "${honey_claude_checkout:=/usr/local/share/dotcortex/DotCortex}"', text)
+        self.assertIn('bot_launcher="${bot_lane}/bin/${RC_SVCNAME}"', text)
+        self.assertIn("-perm /022", text, "must refuse a checkout the bot could edit")
+        self.assertNotIn("${bot_home}/DotCortex", text, "never the bot's own checkout")
         self.assertNotIn("/home/gille", text)
-        result = subprocess.run(["sh", "-n", str(OPENRC / "honey-opus")], capture_output=True, text=True)
+        result = subprocess.run(["sh", "-n", str(OPENRC / "honey-bot")], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_installer_dry_run_changes_nothing_and_refuses_a_user_checkout(self):
+        result = subprocess.run([str(OPENRC / "honey-claude-install"), "--dry-run"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("a real run would refuse", result.stderr)
+        for bot in BOTS:
+            self.assertRegex(result.stdout, rf"(would: install -m 0755 -o root -g root \S+/openrc/honey-bot /etc/init.d/honey-{bot}|unchanged /etc/init.d/honey-{bot})")
+        if os.getuid() != 0:
+            real = subprocess.run([str(OPENRC / "honey-claude-install")], capture_output=True, text=True)
+            self.assertNotEqual(real.returncode, 0)
+
+
+class LaneTests(unittest.TestCase):
+    """The lane is a host service: never stowed, never on anyone's PATH."""
+
+    def test_no_honey_overlay_launchers(self):
+        self.assertFalse((ROOT / "honey/.local/bin").exists())
+        self.assertFalse((ROOT / "honey/.local/share/honey-claude").exists())
+
+    def test_lane_is_stow_ignored(self):
+        self.assertIn("^/\\.local/share/dotcortex/honey-claude(/|$)",
+                      (ROOT / "all/.stow-local-ignore").read_text().splitlines())
+
+    @unittest.skipUnless(shutil.which("stow"), "GNU Stow is not installed")
+    def test_no_active_stack_links_the_lane(self):
+        layers = ROOT / "all/.local/bin/dotcortex-layers"
+        for host in ("beelink", "x230", "t480s", "t480", "kikin-kushi"):
+            pkgs = subprocess.run([str(layers), "resolve", "--host", host, "--user", "metsatron"],
+                                  capture_output=True, text=True, check=True).stdout.split()
+            with tempfile.TemporaryDirectory() as target:
+                out = subprocess.run(["stow", "-n", "-v", f"--target={target}", "--ignore=\\.bak\\.", *pkgs],
+                                     cwd=ROOT, capture_output=True, text=True)
+            planned = out.stdout + out.stderr
+            self.assertNotIn("All operations aborted", planned, host)
+            links = {}  # replay the plan: stow reverts a fold with UNLINK when it must unfold
+            for line in planned.splitlines():
+                if m := re.match(r"UNLINK: (\S+)", line):
+                    links.pop(m.group(1), None)
+                elif m := re.match(r"LINK: (\S+) => (\S+)", line):
+                    links[m.group(1)] = m.group(2)
+            for rel, dest in links.items():
+                self.assertNotIn("/dotcortex/honey-claude", dest, (host, rel))
+                self.assertNotIn(rel, (".local", ".local/share", ".local/share/dotcortex"),
+                                 (host, "a folded parent would expose the lane", dest))
 
     def test_boundary_law_names_the_vault_and_no_addresses(self):
         text = "".join((SHARE / f"CLAUDE.{bot}.md").read_text() for bot in BOTS)
         self.assertIn("Secret Vault", text)
         self.assertIsNone(re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", text))
+
+
+class SparseTests(unittest.TestCase):
+    """The sparse system checkout carries everything the lane runs from DotCortex."""
+
+    PROSE_WORDS = {"agent", "launch"}  # all/.local/bin names that occur here only as English
+
+    def patterns(self):
+        return [l.strip() for l in (SHARE / "SPARSE").read_text().splitlines() if l.strip()]
+
+    def covered(self, rel):
+        for pat in self.patterns():
+            pat = pat.lstrip("/")
+            if rel == pat.rstrip("/") or (pat.endswith("/") and rel.startswith(pat)):
+                return True
+        return False
+
+    def carried_files(self):
+        files = [p for p in SHARE.rglob("*") if p.is_file()]
+        for pat in self.patterns():
+            path = ROOT / pat.strip("/")
+            if path.is_file():
+                files.append(path)
+        return files
+
+    def test_every_pattern_exists(self):
+        for pat in self.patterns():
+            self.assertTrue(pat.startswith("/"), pat)
+            self.assertTrue((ROOT / pat.strip("/")).exists(), pat)
+        self.assertIn("/all/.local/share/dotcortex/honey-claude/", self.patterns())
+
+    def test_no_fleet_command_outside_the_sparse_set(self):
+        fleet = {p.name for p in (ROOT / "all/.local/bin").iterdir()}
+        for path in self.carried_files():
+            tokens = set(re.findall(r"[A-Za-z0-9][A-Za-z0-9._+-]*", path.read_text(errors="replace")))
+            for name in sorted((tokens & fleet) - self.PROSE_WORDS):
+                self.assertTrue(self.covered(f"all/.local/bin/{name}"),
+                                f"{path.relative_to(ROOT)} names all/.local/bin/{name}, which SPARSE does not carry")
+
+    def test_no_repo_path_outside_the_sparse_set(self):
+        for path in self.carried_files():
+            for ref in re.findall(r"\ball/\.local/[A-Za-z0-9._/-]+", path.read_text(errors="replace")):
+                ref = ref.rstrip("/.")
+                if (ROOT / ref).is_dir():
+                    ok = any(p.lstrip("/").startswith(ref + "/") for p in self.patterns()) or self.covered(ref + "/")
+                else:
+                    ok = self.covered(ref)
+                self.assertTrue(ok, f"{path.relative_to(ROOT)} names {ref}, which SPARSE does not carry")
+
+    def test_launcher_fleet_bin_is_the_sparse_bin(self):
+        text = (SHARE / "lib/launch.bash").read_text()
+        rel = re.search(r'repo_bin="\$\(cd -- "\$LIB_DIR/([./]+bin)"', text).group(1)
+        self.assertEqual((SHARE / "lib" / rel).resolve(), (ROOT / "all/.local/bin").resolve())
+
+    def test_settings_hooks_resolve_inside_the_set(self):
+        settings = json.loads((SHARE / "claude-settings.json").read_text())
+        for groups in settings["hooks"].values():
+            for group in groups:
+                for hook in group["hooks"]:
+                    name = hook["command"].split()[0]
+                    self.assertTrue((BIN / name).is_file() or self.covered(f"all/.local/bin/{name}"), name)
+
+    def test_settings_carry_the_telegram_delivery_guard(self):
+        # The bots are unstowed: --settings is their only hook source, so the guard must live here.
+        settings = json.loads((SHARE / "claude-settings.json").read_text())
+        stop = [h["command"] for g in settings["hooks"].get("Stop", []) for h in g["hooks"]]
+        self.assertIn("claude-hook-telegram-delivery-guard", stop)
+
+    def test_settings_register_the_idle_hook_wherever_the_fleet_does(self):
+        # 2026-09-30: the lane shipped without it and no bot ever compacted.  The bots are
+        # unstowed, so the fleet's ~/.claude/settings.json never reaches them: mirror it here.
+        # The fleet's settings are a gitignored tangle output: read their org source block.
+        org = (ROOT / "agents-hooks.org").read_text()
+        block = re.search(r"#\+BEGIN_SRC json :tangle all/\.claude/settings\.shared\.json[^\n]*\n(.*?)\n#\+END_SRC",
+                          org, re.S)
+        fleet = json.loads(block.group(1))
+        lane = json.loads((SHARE / "claude-settings.json").read_text())
+
+        def idle_matchers(settings, event):
+            return {g.get("matcher") for g in settings["hooks"].get(event, [])
+                    if any(h["command"].split()[0] == "claude-hook-idle-event" for h in g["hooks"])}
+
+        events = [e for e in fleet["hooks"] if idle_matchers(fleet, e)]
+        self.assertTrue({"SessionStart", "Stop", "PostCompact"} <= set(events), events)
+        for event in events:
+            lane_matchers = idle_matchers(lane, event)
+            if None in lane_matchers:
+                continue  # an unmatched group sees every occurrence of the event
+            self.assertTrue(idle_matchers(fleet, event) <= lane_matchers,
+                            f"{event}: the lane does not register claude-hook-idle-event where the fleet does")
+
+    def test_settings_enable_the_telegram_plugin(self):
+        # The preflight reads this file, not the agent account's ~/.claude/settings.json.
+        settings = json.loads((SHARE / "claude-settings.json").read_text())
+        self.assertIs(settings["enabledPlugins"]["telegram@claude-plugins-official"], True)
+        self.assertEqual(settings["extraKnownMarketplaces"]["claude-plugins-official"]["source"],
+                         {"source": "github", "repo": "anthropics/claude-plugins-official"})
+
+    def test_sync_dry_run_is_sparse_blobless_and_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "DotCortex"
+            out = subprocess.run([str(OPENRC / "honey-claude-install"), "--dry-run", "sync"], capture_output=True,
+                                 text=True, env=dict(os.environ, HONEY_CLAUDE_CHECKOUT=str(dest)))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("--filter=blob:none --no-checkout", out.stdout)
+            self.assertIn("sparse-checkout init --no-cone", out.stdout)
+            self.assertIn("config index.version 4", out.stdout)
+            for pat in self.patterns():
+                self.assertIn(pat, out.stdout)
+            self.assertFalse(dest.exists())
+            self.assertEqual(os.listdir(tmp), [])
 
 
 if __name__ == "__main__":

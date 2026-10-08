@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# session-anchor: hold one permanent loopback SSH login so the user never drops to zero live elogind sessions.
+set -uo pipefail
+
+TAG="session-anchor"
+KEY="${SESSION_ANCHOR_KEY:-$HOME/.ssh/session-anchor}"
+KNOWN_HOSTS="${SESSION_ANCHOR_KNOWN_HOSTS:-$HOME/.config/session-anchor/known_hosts}"
+STATE_DIR="${SESSION_ANCHOR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/session-anchor}"
+SSH_BIN="${SESSION_ANCHOR_SSH_BIN:-ssh}"
+BACKOFF="${SESSION_ANCHOR_BACKOFF:-10}"
+ONCE=0
+
+usage() { echo "Usage: $TAG [--once] [--check]  (holds a loopback SSH session; see agents-watchdog.org)"; }
+
+CHECK=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --once) ONCE=1 ;;
+    --check) CHECK=1 ;;
+    -h|--help|help) usage; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -r "$KEY" ] || { echo "$TAG: missing key $KEY (machine-local setup not done)" >&2; exit 69; }
+[ -s "$KNOWN_HOSTS" ] || { echo "$TAG: missing pinned known_hosts $KNOWN_HOSTS" >&2; exit 69; }
+[ "$CHECK" = 0 ] || { echo "$TAG: setup present"; exit 0; }
+
+mkdir -p "$STATE_DIR"
+exec 9>"$STATE_DIR/anchor.lock"
+if ! flock -n 9; then
+  exit 0  # another supervisor already holds the anchor
+fi
+
+while :; do
+  date +%s > "$STATE_DIR/last-connect"
+  "$SSH_BIN" -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ControlMaster=no -o ControlPath=none \
+    -T 127.0.0.1 9>&- </dev/null >>"$STATE_DIR/anchor.log" 2>&1
+  echo "$(date -Is) $TAG: session ended (rc=$?); reconnecting in ${BACKOFF}s" >>"$STATE_DIR/anchor.log"
+  [ "$ONCE" = 0 ] || exit 0
+  sleep "$BACKOFF"
+done

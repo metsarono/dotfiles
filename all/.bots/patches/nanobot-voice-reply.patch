@@ -1,0 +1,133 @@
+--- a/nanobot/channels/telegram/runtime.py
++++ b/nanobot/channels/telegram/runtime.py
+@@ -3,6 +3,8 @@
+ from __future__ import annotations
+
+ import asyncio
++import json
++import os
+ import re
+ import time
+ import unicodedata
+@@ -561,6 +563,7 @@
+         self._compaction_notices: dict[tuple[str, str], int] = {}  # (chat_id, compaction_id) -> message_id
+         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
+         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
++        self._voice_reply_tasks: set[asyncio.Task[None]] = set()
+         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
+         self._last_poll_ok: float = 0.0  # monotonic time of last getUpdates round trip
+         self._app_ready = asyncio.Event()  # cleared while the app is being rebuilt
+@@ -851,6 +854,13 @@
+         self._inbound_workers.clear()
+         self._inbound_buffers.clear()
+
++        voice_tasks = tuple(self._voice_reply_tasks)
++        for task in voice_tasks:
++            task.cancel()
++        if voice_tasks:
++            await asyncio.gather(*voice_tasks, return_exceptions=True)
++        self._voice_reply_tasks.clear()
++
+         if self._app:
+             self.logger.info("Stopping bot...")
+         # Join an in-flight supervisor teardown before ChannelManager cancels
+@@ -1056,6 +1066,57 @@
+         buf.message_id = sent.message_id
+         buf.draft_id = None
+
++    def _queue_voice_reply(self, text: str) -> None:
++        """Speak one delivered terminal reply without delaying Telegram."""
++        if not text.strip() or os.environ.get("PVOX_REPLY_OFF"):
++            return
++        task = asyncio.create_task(self._run_voice_reply(text))
++        self._voice_reply_tasks.add(task)
++        task.add_done_callback(self._voice_reply_tasks.discard)
++
++    async def _run_voice_reply(self, text: str) -> None:
++        """Feed the shared DotCortex relay its established hook payload."""
++        command = Path(os.environ.get(
++            "NANOBOT_VOICE_REPLY_COMMAND",
++            "~/.local/bin/claude-hook-voice-reply",
++        )).expanduser()
++        if not command.is_file() or not os.access(command, os.X_OK):
++            self.logger.warning("voice reply relay unavailable: {}", command)
++            return
++
++        payload = json.dumps(
++            {"tool_input": {"text": text}}, ensure_ascii=False,
++        ).encode("utf-8")
++        env = os.environ.copy()
++        env["CLAUDE_WARM_HERDR_AGENT"] = "Nanobot"
++        process: asyncio.subprocess.Process | None = None
++        try:
++            process = await asyncio.create_subprocess_exec(
++                str(command),
++                stdin=asyncio.subprocess.PIPE,
++                stdout=asyncio.subprocess.DEVNULL,
++                stderr=asyncio.subprocess.DEVNULL,
++                env=env,
++                start_new_session=os.name != "nt",
++            )
++            await asyncio.wait_for(process.communicate(payload), timeout=5.0)
++            if process.returncode != 0:
++                self.logger.warning(
++                    "voice reply relay exited with status {}", process.returncode,
++                )
++        except asyncio.CancelledError:
++            if process is not None and process.returncode is None:
++                process.kill()
++                await process.wait()
++            raise
++        except asyncio.TimeoutError:
++            if process is not None and process.returncode is None:
++                process.kill()
++                await process.wait()
++            self.logger.warning("voice reply relay timed out")
++        except OSError as exc:
++            self.logger.warning("voice reply relay failed: {}", exc)
++
+     async def send(self, msg: OutboundMessage) -> None:
+         """Send a message through Telegram."""
+         app = await self._wait_for_app()
+@@ -1181,6 +1242,8 @@
+                     chat_id, text, reply_params, thread_kwargs, reply_markup,
+                 )
+                 if rich_ok:
++                    if progress_event is None:
++                        self._queue_voice_reply(text)
+                     return
+
+             chunks = _split_telegram_markdown(text, TELEGRAM_MAX_MESSAGE_LEN)
+@@ -1191,6 +1254,8 @@
+                     render_as_blockquote=render_as_blockquote,
+                     reply_markup=reply_markup if is_last else None,
+                 )
++            if progress_event is None:
++                self._queue_voice_reply(text)
+
+     async def _call_with_retry(
+         self,
+@@ -1370,6 +1435,7 @@
+                         buf.text = "\n".join(legacy_chunks[legacy_index + 1:])
+                     break
+                 self._stream_bufs.pop(chat_id, None)
++                self._queue_voice_reply(raw_text)
+                 return
+
+             # Group chats and streams that rejected drafts keep the established
+@@ -1387,6 +1453,7 @@
+                 if self._is_not_modified_error(e):
+                     self.logger.debug("Final stream edit already applied for {}", chat_id)
+                     self._stream_bufs.pop(chat_id, None)
++                    self._queue_voice_reply(raw_text)
+                     return
+                 self.logger.debug("Final stream edit failed (HTML), trying plain: {}", e)
+                 primary_plain = (
+@@ -1421,6 +1488,7 @@
+                         thread_kwargs=thread_kwargs,
+                     )
+             self._stream_bufs.pop(chat_id, None)
++            self._queue_voice_reply(raw_text)
+             return
+
+         buf = self._stream_bufs.get(chat_id)

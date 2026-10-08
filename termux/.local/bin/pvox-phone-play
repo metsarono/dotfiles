@@ -2,8 +2,10 @@
 # Detached S24 WAV player with truthful receipts
 
 # SSH success means the complete WAV was received and a detached child was
-# launched. The child alone emits player-start and player-exit receipts while
-# holding the same persistent queue lock as termux-kitten-say.
+# launched. The child holds the same persistent queue lock as
+# =termux-kitten-say= and routes resampled 24 kHz PCM through the same start/RMS
+# gate, so shipped WAV and on-device Kitten playback share one truthful envelope
+# path. The child alone emits the terminal receipt.
 
 
 # [[file:../../../package-termux.org::*Detached S24 WAV player with truthful receipts][Detached S24 WAV player with truthful receipts:1]]
@@ -27,8 +29,17 @@ nohup bash -c '
   command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
   exec 9>"$HOME/.pvox-reply-play.lock"
   flock -w "${PVOX_REPLY_LOCK_WAIT:-14400}" 9 || exit 0
-  pvox-speech-receipt player_started "$SPEAKER" "$PLAYBACK" >/dev/null 2>&1 || true
-  if command -v sox >/dev/null 2>&1; then sox -q "$F" -d
-  else exit 9; fi
+  if command -v sox >/dev/null 2>&1 && command -v pvox-pcm-start-gate >/dev/null 2>&1; then
+    export PVOX_SPEAKER_ID="$SPEAKER" PVOX_PLAYBACK_ID="$PLAYBACK"
+    set -o pipefail
+    sox -q "$F" -t raw -r 24000 -e signed-integer -b 16 -c 1 - \
+      | pvox-pcm-start-gate \
+      | sox -q -t raw -r 24000 -e signed-integer -b 16 -c 1 - -d
+  elif command -v sox >/dev/null 2>&1; then
+    pvox-speech-receipt player_started "$SPEAKER" "$PLAYBACK" >/dev/null 2>&1 || true
+    sox -q "$F" -d
+  else
+    exit 9
+  fi
 ' _ "$F" "$SPEAKER" "$PLAYBACK" </dev/null >/dev/null 2>&1 &
 # Detached S24 WAV player with truthful receipts:1 ends here

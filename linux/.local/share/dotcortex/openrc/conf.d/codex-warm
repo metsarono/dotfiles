@@ -1,0 +1,9 @@
+# /etc/conf.d/codex-warm: compat for the bare (pre-instance) service.
+warm_user="gille"
+warm_socket=""
+warm_session="codex"
+xdg="/run/warm"
+warm_log_mode="0644"
+warm_cwd="/home/gille/metsatron-peer"
+warm_args="--dangerously-bypass-hook-trust"
+warm_path="/home/gille/.local/bin:/usr/local/bin:/usr/bin:/bin"

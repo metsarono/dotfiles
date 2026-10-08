@@ -239,6 +239,12 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         "opencode_go",
         note="Direct OpenCode Go usage probe (OPENCODE_API_KEY, else OpenCode's auth.json); /zen/go/v1/usage.",
     ),
+    ProviderSpec(
+        "mistral",
+        "Mistral",
+        "mistral",
+        note="Mistral Vibe monthly plan % via /api/vibe/whoami (MISTRAL_API_KEY); Admin API usage needs a separate admin key.",
+    ),
 )
 
 # Providers shown by default (no --providers flag). antigravity/openrouter were dropped
@@ -246,7 +252,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 # was unhidden and opencode-go added 2026-09-25 (Go's rolling/weekly/monthly windows
 # belong beside the other fuel gauges). antigravity stays on demand via
 # `--providers antigravity`.
-DEFAULT_PROVIDER_KEYS: tuple[str, ...] = ("codex", "claude", "openrouter", "opencode-go")
+DEFAULT_PROVIDER_KEYS: tuple[str, ...] = ("codex", "claude", "openrouter", "opencode-go", "mistral")
 
 
 def eprint(*args: Any, **kwargs: Any) -> None:
@@ -2428,6 +2434,184 @@ def apply_opencode_go_observation(result: dict[str, Any], collected_at: datetime
     return {**result, "summary": opencode_go_summary(observation), "observation": observation}
 
 
+# --- Mistral usage probe ----------------------------------------------------
+#
+# Mistral's Vibe monthly-plan percentage is NOT on the public API. The tRPC
+# endpoint `console.mistral.ai/api-ui/trpc/billing.vibeUsage` requires a browser
+# session (ory_session + csrftoken cookies) and is Cloudflare-gated — an API key
+# gets HTTP 401/403 there. What DOES accept the plain MISTRAL_API_KEY is:
+#   GET https://console.mistral.ai/api/vibe/whoami
+# which returns plan_type/plan_name plus `prompt_switching_to_pro_plan`.
+# The whoami payload carries no usage percentage, so this probe reports the
+# plan identity and a truthful "usage % unavailable via API key" hint pointing
+# at the console UI (Code > CLI > View organization usage) and at the Admin API
+# (/v1/admin/usage, needs a separate admin API key from the Backoffice).
+# It never fabricates a percentage.
+MISTRAL_WHOAMI_URL = os.environ.get(
+    "MISTRAL_WHOAMI_URL", "https://console.mistral.ai/api/vibe/whoami"
+)
+
+# Admin console tRPC endpoints (admin.mistral.ai) accept the browser session
+# cookie jar exported from the signed-in browser (Netscape cookie-jar format,
+# carrying the ory_session + csrf cookies for .mistral.ai). billing.budget
+# returns the REAL api_budget and vibe_budget usage percentages plus reset
+# date — the numbers the console subscription page renders. Discovered
+# 2026-10-08. The jar path is private host state: it comes ONLY from the
+# MISTRAL_COOKIE_JAR environment variable (e.g. from a private, untracked
+# ai-usage env file) — no default path, no username, no host paths in tracked
+# source. Unset => the budget probe is skipped and the probe falls back to
+# whoami, saying so in its output.
+MISTRAL_ADMIN_TRPC = os.environ.get(
+    "MISTRAL_ADMIN_TRPC", "https://admin.mistral.ai/api/local-trpc"
+)
+MISTRAL_COOKIE_JAR = os.path.expanduser(os.environ.get("MISTRAL_COOKIE_JAR", ""))
+_MISTRAL_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+)
+
+
+def _mistral_cookie_header() -> str:
+    if not os.path.exists(MISTRAL_COOKIE_JAR):
+        return ""
+    pairs = []
+    try:
+        with open(MISTRAL_COOKIE_JAR) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 7:
+                    pairs.append(f"{parts[5]}={parts[6]}")
+    except OSError:
+        return ""
+    return "; ".join(pairs)
+
+
+def _mistral_trpc(endpoint: str, params: dict[str, Any], timeout_seconds: float):
+    """GET an admin.mistral.ai tRPC query with session cookies. None on failure."""
+    cookie = _mistral_cookie_header()
+    if not cookie:
+        return None
+    url = f"{MISTRAL_ADMIN_TRPC}/{endpoint}?input={urllib.parse.quote(json.dumps(params))}"
+    request = urllib.request.Request(url, headers={
+        "Cookie": cookie,
+        "Accept": "application/json",
+        "User-Agent": _MISTRAL_UA,
+        "Referer": "https://admin.mistral.ai/subscription",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(body, dict) or body.get("error"):
+        return None
+    return nested_get(body, "result", "data", "json")
+
+
+def fetch_mistral(timeout_seconds: float) -> dict[str, Any]:
+    result = {
+        "provider": "mistral",
+        "label": "Mistral",
+        "state": "missing",
+        "source": "admin-trpc",
+        "summary": "",
+        "raw": None,
+    }
+    # Preferred path: real budget numbers from the admin console session.
+    budget = _mistral_trpc(
+        "billing.budget",
+        {"json": None, "meta": {"values": ["undefined"], "v": 1}},
+        timeout_seconds,
+    )
+    if isinstance(budget, dict) and budget.get("initial_budget"):
+        api_budget = budget.get("api_budget") or budget
+        vibe_budget = budget.get("vibe_budget") or {}
+        result["state"] = "ok"
+        result["raw"] = budget
+        result["identity"] = {"plan_name": "Pro", "plan_type": "chat"}
+        result["usage"] = {
+            "secondary": {
+                "usedPercent": api_budget.get("usage_percentage"),
+                "resetsAt": api_budget.get("reset_at"),
+                "label": "API",
+            },
+            "vibe": {
+                "usedPercent": vibe_budget.get("usage_percentage"),
+                "resetsAt": vibe_budget.get("reset_at"),
+                "label": "Vibe",
+            },
+        }
+        result["summary"] = _mistral_budget_summary(api_budget, vibe_budget)
+        return result
+    # Fallback: whoami identity only. The budget probe was skipped either because
+    # MISTRAL_COOKIE_JAR is unset (say so) or the session failed (whoami still
+    # gives the plan identity; the summary keeps pointing at the console).
+    token, token_source = _env_token("MISTRAL_API_KEY")
+    budget_skipped = (
+        "budget probe skipped: MISTRAL_COOKIE_JAR not set; "
+        if not MISTRAL_COOKIE_JAR else
+        "budget probe unavailable (cookie session failed); "
+    )
+    if not token:
+        return {
+            "provider": "mistral",
+            "label": "Mistral",
+            "state": "missing",
+            "source": token_source,
+            "summary": budget_skipped
+                       + "no Mistral API key found (set MISTRAL_COOKIE_JAR or MISTRAL_API_KEY).",
+            "raw": None,
+        }
+    result = _bearer_json_probe(
+        "mistral", "Mistral", MISTRAL_WHOAMI_URL, token, timeout_seconds,
+        summarize=_mistral_summary,
+    )
+    if result.get("state") == "ok" and isinstance(result.get("raw"), dict):
+        result["identity"] = _mistral_identity(result["raw"])
+        result["summary"] = budget_skipped + result.get("summary", "")
+    return result
+
+
+def _mistral_budget_summary(api_budget: dict[str, Any], vibe_budget: dict[str, Any]) -> str:
+    def fmt(b: dict[str, Any]) -> str:
+        try:
+            budget = float(b.get("initial_budget", 0))
+            used = float(b.get("usage_percentage", 0)) / 100.0 * budget
+            return f"${used:.2f}/${budget:.0f} ({float(b.get('usage_percentage', 0)):.1f}%)"
+        except (TypeError, ValueError):
+            return "n/a"
+    reset = (api_budget or {}).get("reset_at") or "?"
+    return (
+        f"API {fmt(api_budget)} · Vibe {fmt(vibe_budget)} · resets {reset[:10]}"
+    )
+
+
+def _mistral_identity(data: dict[str, Any]) -> dict[str, Any]:
+    identity: dict[str, Any] = {}
+    for field in ("plan_type", "plan_name", "organization_kind", "customer_id"):
+        value = data.get(field)
+        if isinstance(value, str) and value:
+            identity[field] = value
+    return identity
+
+
+def _mistral_summary(data: dict[str, Any]) -> str:
+    plan = data.get("plan_name")
+    plan_type = data.get("plan_type")
+    parts: list[str] = []
+    if isinstance(plan, str) and plan:
+        parts.append(f"plan={plan}")
+    if isinstance(plan_type, str) and plan_type:
+        parts.append(f"type={plan_type}")
+    if data.get("prompt_switching_to_pro_plan") is True:
+        parts.append("pro upgrade prompted")
+    parts.append("usage % needs console session or Admin API key")
+    return "; ".join(parts) if parts else "Mistral whoami ok"
+
+
 # --- Shared result cache + rate-limit backoff -------------------------------
 #
 # Every provider probe funnels through fetch_provider, so the cache lives here
@@ -2600,6 +2784,9 @@ def _fetch_provider_uncached(spec: ProviderSpec, timeout_seconds: float) -> dict
 
     if spec.kind == "opencode_go":
         return fetch_opencode_go(timeout_seconds)
+
+    if spec.kind == "mistral":
+        return fetch_mistral(timeout_seconds)
 
     if spec.kind == "antigravity_kit":
         result = fetch_antigravity_quota(spec, timeout_seconds)
@@ -2900,6 +3087,20 @@ def render_text(results: list[dict[str, Any]]) -> None:
             else:
                 print_fitted_text(item["summary"], indent="  ", width=width)
 
+        elif item["provider"] == "mistral" and isinstance(raw, dict):
+            identity = item.get("identity") if isinstance(item.get("identity"), dict) else {}
+            if identity:
+                parts: list[str] = []
+                plan = identity.get("plan_name")
+                if isinstance(plan, str) and plan:
+                    parts.append(f"Plan: {plan}")
+                org = identity.get("organization_kind")
+                if isinstance(org, str) and org:
+                    parts.append(f"Org: {org}")
+                if parts:
+                    print(f"  {FGY}{' · '.join(parts)}{R}")
+            print_fitted_text(item["summary"], indent="  ", width=width)
+
         else:
             print_fitted_text(item["summary"], indent="  ", width=width)
 
@@ -3009,7 +3210,7 @@ def fetch_remote_results(remotes_file: Path, default_timeout: float) -> list[dic
 # then remote, so Codex (mine, then Gillean's) reads as one block, then Claude,
 # then the direct probes. Remote panels keep their remotes-file order; providers
 # outside the list keep their existing relative order after these.
-PROVIDER_DISPLAY_ORDER = ("codex", "claude", "opencode-go", "openrouter")
+PROVIDER_DISPLAY_ORDER = ("codex", "claude", "opencode-go", "openrouter", "mistral")
 
 
 def order_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3553,13 +3754,14 @@ class ResultOrderTests(unittest.TestCase):
             {"provider": "claude", "label": "Claude Code"},
             {"provider": "opencode-go", "label": "OpenCode Go"},
             {"provider": "openrouter", "label": "OpenRouter"},
+            {"provider": "mistral", "label": "Mistral"},
             {"provider": "codex", "label": "Gillean · Codex", "remote": "Gillean"},
             {"provider": "claude", "label": "Gillean · Claude Code", "remote": "Gillean"},
         ]
         self.assertEqual(
             [item["label"] for item in self.ai_usage.order_results(items)],
             ["Codex", "Gillean · Codex", "Claude Code", "Gillean · Claude Code",
-             "OpenCode Go", "OpenRouter"],
+             "OpenCode Go", "OpenRouter", "Mistral"],
         )
 
     def test_remote_panels_keep_file_order_and_unknowns_go_last(self):
@@ -3573,6 +3775,194 @@ class ResultOrderTests(unittest.TestCase):
             [item["label"] for item in self.ai_usage.order_results(items)],
             ["Codex", "Gillean · Codex", "X230 · Codex", "NeuralWatt"],
         )
+
+
+MISTRAL_WHOAMI_FIXTURE = {
+    "plan_type": "API",
+    "plan_name": "FREE",
+    "prompt_switching_to_pro_plan": True,
+    "organization_kind": "S",
+    "customer_id": "25587b01-3447-483d-b6ac-7bc2caf053f3",
+    "api_base": "https://api.mistral.ai",
+    "vibe_base": "https://chat.mistral.ai",
+    "primitive_access_scope": "personal_and_shared",
+}
+
+MISTRAL_BUDGET_FIXTURE = {
+    "usage_percentage": 61.051076,
+    "initial_budget": 30,
+    "currency": "USD",
+    "reset_at": "2026-11-01T00:00:00Z",
+    "api_budget": {
+        "usage_percentage": 61.051076,
+        "initial_budget": 30,
+        "currency": "USD",
+        "reset_at": "2026-11-01T00:00:00Z",
+    },
+    "vibe_budget": {
+        "usage_percentage": 0.53698893,
+        "initial_budget": 300,
+        "currency": "USD",
+        "reset_at": "2026-11-01T00:00:00Z",
+    },
+}
+
+
+def _no_cookie_jar(ai_usage):
+    """Patch helper: disable the admin-trpc cookie path for whoami-era tests."""
+    return patch.object(ai_usage, "_mistral_cookie_header", return_value="")
+
+
+class MistralProbeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ai_usage = load_ai_usage()
+
+    def test_no_credential_reports_missing(self):
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": ""}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             _no_cookie_jar(self.ai_usage):
+            result = self.ai_usage.fetch_mistral(1.0)
+        self.assertEqual(result["state"], "missing")
+        self.assertEqual(result["provider"], "mistral")
+        self.assertIn("MISTRAL_API_KEY", result["summary"])
+
+    def test_whoami_success_reports_plan_and_never_fabricates_percentage(self):
+        captured = {}
+
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            captured["token"] = token
+            captured["url"] = url
+            payload = json.loads(json.dumps(MISTRAL_WHOAMI_FIXTURE))
+            summary = summarize(payload) if summarize else ""
+            return {"provider": provider, "label": label, "state": "ok", "source": "api",
+                    "summary": summary, "raw": payload}
+
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key"}), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
+             _no_cookie_jar(self.ai_usage):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(captured["token"], "test-key")
+        self.assertEqual(result["state"], "ok")
+        self.assertEqual(result["identity"]["plan_name"], "FREE")
+        self.assertEqual(result["identity"]["customer_id"], "25587b01-3447-483d-b6ac-7bc2caf053f3")
+        # The fallback summary must stay truthful: no percentage number, explicit
+        # pointer to the console/Admin API for the actual usage figure.
+        self.assertIn("plan=FREE", result["summary"])
+        self.assertIn("usage % needs console session or Admin API key", result["summary"])
+        self.assertNotRegex(result["summary"], r"\d+(\.\d+)?%")
+
+    def test_budget_from_cookie_jar_reports_real_percentages(self):
+        """The admin-trpc path reports the console's real budget numbers."""
+        captured = {}
+
+        def fake_trpc(endpoint, params, timeout_seconds):
+            captured["endpoint"] = endpoint
+            return json.loads(json.dumps(MISTRAL_BUDGET_FIXTURE))
+
+        with patch.object(self.ai_usage, "_mistral_trpc", side_effect=fake_trpc):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(captured["endpoint"], "billing.budget")
+        self.assertEqual(result["state"], "ok")
+        self.assertEqual(result["source"], "admin-trpc")
+        self.assertEqual(result["identity"]["plan_name"], "Pro")
+        # Both budgets surface as real percentages with reset dates.
+        self.assertAlmostEqual(result["usage"]["secondary"]["usedPercent"], 61.051076)
+        self.assertAlmostEqual(result["usage"]["vibe"]["usedPercent"], 0.53698893)
+        self.assertEqual(result["usage"]["secondary"]["resetsAt"], "2026-11-01T00:00:00Z")
+        self.assertIn("$18.32/$30", result["summary"])
+        self.assertIn("61.1%", result["summary"])
+        self.assertIn("Vibe", result["summary"])
+        self.assertIn("resets 2026-11-01", result["summary"])
+
+    def test_budget_trpc_failure_falls_back_to_whoami(self):
+        """No cookie session -> whoami identity only, never a fabricated number."""
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            payload = json.loads(json.dumps(MISTRAL_WHOAMI_FIXTURE))
+            summary = summarize(payload) if summarize else ""
+            return {"provider": provider, "label": label, "state": "ok", "source": "api",
+                    "summary": summary, "raw": payload}
+
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key"}), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
+             _no_cookie_jar(self.ai_usage):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(result["state"], "ok")
+        self.assertEqual(result["identity"]["plan_name"], "FREE")
+        self.assertNotIn("usage", result)
+
+    def test_no_jar_configured_skips_budget_probe_and_says_so(self):
+        """MISTRAL_COOKIE_JAR unset => budget probe skipped, output says why,
+        and the fallback never fabricates a budget number."""
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            payload = json.loads(json.dumps(MISTRAL_WHOAMI_FIXTURE))
+            summary = summarize(payload) if summarize else ""
+            return {"provider": provider, "label": label, "state": "ok", "source": "api",
+                    "summary": summary, "raw": payload}
+
+        def fail_http(*args, **kwargs):
+            raise AssertionError("budget probe must not touch the network when the jar is unset")
+
+        # Empty cookie header => real _mistral_trpc returns None before any HTTP,
+        # so urlopen staying untouched proves the probe was skipped.
+        with patch.dict(os.environ, {"MISTRAL_COOKIE_JAR": "", "MISTRAL_API_KEY": "test-key"}), \
+             patch.object(self.ai_usage, "_mistral_cookie_header", return_value=""), \
+             patch.object(self.ai_usage.urllib.request, "urlopen", side_effect=fail_http), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(result["state"], "ok")
+        self.assertIn("MISTRAL_COOKIE_JAR not set", result["summary"])
+        # Plan identity still surfaces; no budget percentage is invented.
+        self.assertEqual(result["identity"]["plan_name"], "FREE")
+        self.assertNotIn("usage", result)
+
+    def test_tangled_script_has_no_home_paths(self):
+        """DotCortex is public: no username/host path may leak into the tangled
+        script. Fails if any '/home/' literal appears in ai-usage source."""
+        script = Path(self.ai_usage.__file__).read_text()
+        self.assertNotIn("/home/", script)
+
+    def test_http_error_surfaces_status_without_crashing(self):
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            return {"provider": provider, "label": label, "state": "error", "source": "api",
+                    "summary": f"{url} returned HTTP 401", "raw": None}
+
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "bad-key"}), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
+             _no_cookie_jar(self.ai_usage):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(result["state"], "error")
+        self.assertIn("HTTP 401", result["summary"])
+        self.assertNotIn("identity", result)
+
+    def test_mistral_is_registered_and_default_visible(self):
+        keys = [spec.key for spec in self.ai_usage.PROVIDERS]
+        self.assertIn("mistral", keys)
+        self.assertIn("mistral", self.ai_usage.DEFAULT_PROVIDER_KEYS)
+        self.assertIn("mistral", self.ai_usage.PROVIDER_DISPLAY_ORDER)
+
+    def test_renderer_shows_mistral_plan_line(self):
+        result = {
+            "provider": "mistral",
+            "label": "Mistral",
+            "state": "ok",
+            "source": "api",
+            "summary": "plan=FREE; type=API; usage % needs console session or Admin API key",
+            "raw": dict(MISTRAL_WHOAMI_FIXTURE),
+            "identity": {"plan_name": "FREE", "organization_kind": "S"},
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.ai_usage.render_text([result])
+        plain = self.ai_usage.ANSI_ESCAPE_RE.sub("", output.getvalue())
+        self.assertIn("Mistral", plain)
+        self.assertIn("Plan: FREE", plain)
+        self.assertIn("usage % needs console session or Admin API key", plain)
 
 
 if __name__ == "__main__":

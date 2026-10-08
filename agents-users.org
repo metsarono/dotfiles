@@ -1,0 +1,1610 @@
+#+TITLE: Agent Users
+#+DESCRIPTION: Per-agent Unix users (rule 22, Category B/C): law, uid map, seal, bootstrap scripts, CLI lanes, fleet check and provisioning
+#+AUTHOR: Mètsàtron
+#+LANGUAGE: en
+#+PROPERTY: header-args :mkdirp yes :results silent :comments both :noweb yes
+
+* Agent User Bootstrap
+
+Category B/C implementation layer for doctrine rule 22 (Agent Capability Categories).
+Defines per-agent Unix users, homes, SSH identities, and minimal tool bootstraps.
+Debian/Devuan-first. All bootstrap scripts are *dry-run by default* — mutation
+requires the explicit =--apply= flag, and =--apply= itself requires prior approval
+from the human operator per the staged rollout law. Fleet state is not recorded
+here — it is measured: =agent-fleet-check= (below) probes every fleet host against
+the canonical map. As of 2026-09-25 the X230, T480s and T480 carry the five
+provisioned agent users; kikin-kushi carries none yet.
+
+** Law
+
+*** Naming scheme
+- Personal-mesh agent users: =agent-<tool>= — =agent-codex=, =agent-claude=,
+  =agent-gemini=, =agent-antigravity=, =agent-opencode=, =agent-hermes=, =agent-pi=,
+  =agent-deepseek=.
+- Client-environment service users: =agent-client-<slug>= — created only on that
+  client's machines, never on the personal mesh.
+- One tool, one user. No shared =agent= account: a shared account destroys the audit
+  trail and couples revocations.
+
+*** Canonical uid/gid map — FLEET LAW
+NFS access decisions are numeric; uids/gids MUST match on every machine. Never let
+=useradd= auto-assign an agent uid (the first rollout landed on 1001, which collides
+with the =fuse= group on X230 — corrected same day).
+
+| principal | uid/gid |
+|-----------|---------|
+| group =cortex= (shared repo work) | 2000 |
+| =agent-codex= | 2001 |
+| =agent-claude= | 2002 |
+| =agent-gemini= | 2003 |
+| =agent-antigravity= | 2004 |
+| =agent-opencode= | 2005 |
+| =agent-hermes= | 2010 |
+| =agent-pi= | 2011 |
+| =agent-deepseek= | 2012 |
+
+Each agent's primary group is its own (same number as uid); =cortex= is
+supplementary. The human operator is also a =cortex= member.
+
+The machine-readable copy of this map is the single source every script reads
+(=agent-users-bootstrap=, =agent-fleet-check=). The =provision= column says
+whether the agent gets a Unix user on the personal mesh today: =antigravity= is a
+host Electron app and =hermes= lives on its own substrate, so their uids stay
+reserved but unprovisioned — a checker must not report them as gaps.
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/uids.ssv :mkdirp yes :comments no :noweb no
+# tool         uid    provision
+codex          2001   yes
+claude         2002   yes
+gemini         2003   yes
+antigravity    2004   no
+opencode       2005   yes
+hermes         2010   no
+pi             2011   yes
+deepseek       2012   yes
+#+END_SRC
+
+*** Clearance groups — who may read what (FLEET LAW)
+=cortex= opens the shared repos to every agent. Some material inside them is
+not for every vendor: a clearance group closes a path to everyone outside it.
+Members are the operator plus the listed tools' agent users; every other agent
+user must NOT be a member, and =agent-fleet-check= reports one that is.
+
+=palm= (2020) — PalmCortex and client material (clients, invoices, client
+session logs and chats). Cleared: Claude and Hermes with NeuralWatt. Not
+cleared: Codex/ChatGPT (OpenAI), OpenCode global models, Gemini, Pi. Ruling,
+Mètsàtron 2026-09-25: client business data goes only to vendors he and his
+clients have chosen to trust with it. Which paths carry the group is private
+data kept beside the private repo (HelmCortex =ROOTS/JSON/agent-boundaries/=),
+applied by =agent-restrict=.
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/groups.ssv :mkdirp yes :comments no :noweb no
+# group        gid    cleared tools (comma list)
+palm           2020   claude,hermes
+#+END_SRC
+
+*** Fleet membership — which hosts must carry the agent users
+Every host listed here must carry every =provision yes= agent at its canonical
+uid, the =cortex= group at 2000, and the human operator in =cortex=. Aliases are
+SSH aliases; =local= marks the row matched by =hostname=.
+
+Excluded on purpose: =s24= (Termux, no multi-user Unix). Add a host here only
+when it joins the personal mesh. =honey= (Gillean's Beelink, 2026-09-25) is her
+box, so it carries only the agents it runs: =agent-codex=, =agent-opencode=,
+and =agent-claude= (2026-09-26, the tanuki bots, =agents-bots-honey.org=; with
+=palm=). Its =warm= entries are the two compat services, still as =gille=.
+
+Optional columns after =seal-reach= (missing reads as the default):
+=agents=, the =provision yes= tools the host carries (comma list, default
+=all=; =agent-fleet-check= expects exactly these, and a clearance group only
+where a cleared tool is carried); =warm=, the OpenRC warm consort instances
+=<kind>-warm.<account>= its boot owner runs (=-=: none), see
+=agents-codex-idle-supervisor.org= "Multi-account boot owner on OpenRC hosts".
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/fleet.ssv :mkdirp yes :comments no :noweb no
+# alias        hostname          seal-reach (top-level home entries agents may walk into; - = not yet decided)  agents                 warm
+kikin          kikin-kushi       DotCortex,mnt,.guix-extra-profiles                                               all                    -
+x230           ThinkPad-X230     -                                                                                all                    -
+t480s          ThinkPad-T480s    -                                                                                all                    -
+t480           ThinkPad-T480     -                                                                                all                    -
+honey          beelink           DotCortex                                                                        claude,codex,opencode  claude-warm,codex-warm
+#+END_SRC
+
+The third column feeds =agent-home-seal= on that host. =mnt= on kikin holds the
+autofs NFS mounts of the other homes; opening it only defers to each serving
+host's own seal. A host whose reach is =-= cannot be sealed until the operator
+decides its list.
+
+*** Shared repo access — the cortex group pattern (proven 2026-06-11)
+Agents work in the SAME worktrees as the human — no per-agent clones (ruled out:
+disk cost, and it never solved the big private repo). Mechanism:
+1. *Traverse-only ACL on the human home*: =setfacl -m g:cortex:--x /home/<human>= —
+   agents path-walk to known repo paths but cannot list or read the home. (ZFS
+   needs =acltype=posixacl=; X230's rpool already had it.)
+2. *Group-share each repo*: =chgrp -R cortex REPO && chmod -R g+rwX REPO=, setgid on
+   all dirs (=find REPO -type d -exec chmod g+s {} +=), =git config
+   core.sharedRepository group=, =umask 002= for all writers.
+3. *Lock the vaults AFTER the pass*: secrets subtrees get =chmod -R o-rwx,g-rwx=
+   (HelmCortex/NEXUS is metsatron-only again). Untracked secret files (=.env=,
+   =*.pass=) keep 600 and are untouched by =g+rwX= (X never adds x to plain files,
+   and 600 files gain only group bits if they had none — verify the vault list
+   after every pass).
+4. *Per-agent git config* (belongs in tool bootstrap): identity
+   (=agent-<tool>= / =agent-<tool>@<host>.local=) and
+   =git config --global --add safe.directory <repo>= — git refuses cross-owner
+   repos without it (CVE-2022-24765 guard).
+
+*Caveat stated plainly*: group access to =.git= exposes all tracked history. Secrets
+must therefore never be tracked — which is already standing law.
+
+*** Home-sealing is a SEPARATE per-host step (not done by provisioning)
+=agent-provision= creates identities + toolchains; it does NOT seal the human home.
+That is a distinct per-machine hardening pass, and it has TWO parts that must BOTH
+hold (discovered the hard way 2026-06-11: the fleet replication exposed a real API
+key because only X230's dir was partially sealed and `.env` was world-readable
+everywhere):
+
+1. *Directory*: traverse-only ACL so agents path-walk to repos but cannot list/read
+   the home. NOTE the mask trap — =chmod o-rwx,g-rwx= resets the ACL mask to =---=,
+   silencing the cortex entry. Always re-assert the mask:
+   #+BEGIN_EXAMPLE
+   sudo setfacl -m g:cortex:--x -m mask::--x /home/<human>
+   sudo chmod o-rwx,g-rwx /home/<human>
+   sudo setfacl -m g:cortex:--x -m mask::--x /home/<human>   # re-assert after chmod
+   #+END_EXAMPLE
+2. *Files*: a traversable home does NOT protect a world/group-readable file inside it
+   — Unix only needs =--x= on the dir + read on the file. Every secret file must be
+   =600= regardless of dir perms. =~/.env= especially: it tends to ship =664=.
+   #+BEGIN_EXAMPLE
+   chmod 600 ~/.env   # and any ~/.netrc, ~/.pgpass, token files, *.env
+   #+END_EXAMPLE
+   The deeper fix is §11 env-law (shrink =~/.env= toward empty); 600 is the floor.
+
+Verify the seal with the agent itself, testing a *known world-readable path*, not
+just =ls= (which dir perms already block):
+=sudo -u agent-<tool> -H cat /home/<human>/.env=  → must be Permission denied.
+
+*** Script: agent-home-seal (dry-run by default)
+
+The recipe above has a third trap it did not name (found on kikin 2026-09-25):
+the traverse ACL opens the home to path-walking, and every top-level directory
+that is =o+rx= (=.config=, =.local=, =.claude=, =.codex=, …) then becomes
+walkable too, with every world-readable file inside it readable by its
+well-known name. So the seal strips =o= from every top-level entry *before* the
+ACL goes on. On a home that was =700= this changes nothing for any existing
+consumer — nothing outside the owner could enter it.
+
+What agents may reach is an explicit per-host list: the =seal-reach= column of
+=fleet.ssv= (=AGENT_SEAL_REACH= overrides it, for tests). On kikin that is
+=DotCortex,mnt,.guix-extra-profiles=. The Guix profiles are store symlinks with
+nothing secret in them, and the rootless sanctuary containers bind-mount that
+directory directly — their mapped guest users are "other" on the host, so
+closing it would break the guests. Reach entries keep their mode here; write access to a repo comes from
+=agent-repo-share= (below), not from the seal. Agents work in DotCortex
+read-write — ruling, Mètsàtron 2026-09-25: the wall guards secrets, not the code.
+Symlinks are never chmod-ed (chmod follows them to their target).
+
+Every =--apply= first writes a restore script (the exact prior mode of each
+entry it touches, plus the home's ACL) to =~/.local/state/agent-home-seal/=.
+=--check= proves the seal from the agent's side with a positive control: the
+agent must reach each reach entry AND be refused the home listing, =~/.env=,
+=~/.ssh=, and the known auth files.
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-home-seal :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-home-seal
+# Seal the operator's home against agent users. DRY-RUN unless --apply.
+set -euo pipefail
+
+HOME_DIR="${AGENT_SEAL_HOME:-$HOME}"
+FLEET="${AGENT_CLI_CONF:-$HOME/.config/agent-cli}/fleet.ssv"
+if [ -n "${AGENT_SEAL_REACH:-}" ]; then
+  REACH="$AGENT_SEAL_REACH"
+else
+  REACH="$(awk -v h="$(hostname)" '$1 !~ /^#/ && $2 == h {print $3}' "$FLEET" 2>/dev/null | tr ',' ' ')"
+  case "$REACH" in
+    ""|-) echo "FATAL: no seal-reach decided for $(hostname) in $FLEET" >&2; exit 1 ;;
+  esac
+fi
+STATE="${AGENT_SEAL_STATE:-$HOME/.local/state/agent-home-seal}"
+SECRETS=".env .netrc .pgpass .git-credentials"
+DENY=".env .ssh/id_ed25519 .codex/auth.json .claude/.credentials.json .local/share/opencode/auth.json"
+MODE=dry-run
+
+usage() {
+  cat <<'EOF'
+Usage: agent-home-seal [--apply|--check|--help]
+  (no flag)  print the seal plan; change nothing
+  --apply    write a restore script, strip other-access from every top-level
+             entry except AGENT_SEAL_REACH, set secret files 600, then give
+             group cortex traverse-only (--x) on the home
+  --check    verify as each existing agent user: reach entries reachable,
+             home listing / .env / .ssh / auth files refused
+EOF
+}
+
+case "${1:-}" in
+  "") ;;
+  --apply) MODE=apply ;;
+  --check) MODE=check ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+in_reach() { case " $REACH " in *" $1 "*) return 0 ;; esac; return 1; }
+
+if [ "$MODE" = check ]; then
+  agents="$(getent group cortex | cut -d: -f4 | tr ',' '\n' | grep '^agent-' || true)"
+  [ -n "$agents" ] || { echo "no agent users in cortex on $(hostname)"; exit 1; }
+  fail=0
+  for u in $agents; do
+    as() { sudo -n -u "$u" -H "$@" >/dev/null 2>&1; }
+    for r in $REACH; do
+      if as test -r "$HOME_DIR/$r" -a -x "$HOME_DIR/$r"; then echo "OK   $u reaches ~/$r"
+      else echo "FAIL $u cannot reach ~/$r"; fail=1; fi
+    done
+    if as ls "$HOME_DIR"; then echo "FAIL $u can list the home"; fail=1
+    else echo "OK   $u cannot list the home"; fi
+    for d in $DENY; do
+      [ -e "$HOME_DIR/$d" ] || continue
+      if as cat "$HOME_DIR/$d"; then echo "FAIL $u can read ~/$d"; fail=1
+      else echo "OK   $u refused ~/$d"; fi
+    done
+  done
+  exit "$fail"
+fi
+
+run() {
+  if [ "$MODE" = apply ]; then echo "+ $*"; "$@"; else echo "DRY-RUN: $*"; fi
+}
+
+getent group cortex >/dev/null || { echo "FATAL: no cortex group (agent-users-bootstrap first)" >&2; exit 1; }
+for r in $REACH; do
+  [ -e "$HOME_DIR/$r" ] || { echo "FATAL: reach entry ~/$r does not exist" >&2; exit 1; }
+done
+
+# Entries to close: real (non-symlink) top-level entries with any other-bit.
+mapfile -t close < <(find "$HOME_DIR" -mindepth 1 -maxdepth 1 ! -type l -perm /o=rwx -printf '%f\n' | sort)
+todo=()
+for e in "${close[@]}"; do in_reach "$e" || todo+=("$e"); done
+
+if [ "$MODE" = apply ]; then
+  mkdir -p "$STATE"; chmod 700 "$STATE"
+  restore="$STATE/restore-$(date +%Y%m%d-%H%M%S).sh"
+  {
+    echo "#!/usr/bin/env bash"
+    echo "# agent-home-seal restore for $HOME_DIR, written $(date -Is)"
+    echo "set -euo pipefail"
+    for e in "${todo[@]}"; do printf 'chmod %s %q\n' "$(stat -c %a "$HOME_DIR/$e")" "$HOME_DIR/$e"; done
+    for s in $SECRETS; do [ -f "$HOME_DIR/$s" ] && printf 'chmod %s %q\n' "$(stat -c %a "$HOME_DIR/$s")" "$HOME_DIR/$s"; done
+    printf 'chmod %s %q\n' "$(stat -c %a "$HOME_DIR")" "$HOME_DIR"
+    printf 'setfacl --set-file=- %q <<'"'"'ACL'"'"'\n' "$HOME_DIR"
+    getfacl -cp "$HOME_DIR"
+    echo "ACL"
+  } > "$restore"
+  chmod 700 "$restore"
+  echo "restore script: $restore"
+fi
+
+echo "--- 1/3 close other-access on ${#todo[@]} top-level entries (reach kept: $REACH)"
+for e in "${todo[@]}"; do run chmod o-rwx "$HOME_DIR/$e"; done
+echo "--- 2/3 secret files to 600"
+for s in $SECRETS; do
+  f="$HOME_DIR/$s"
+  [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c %a "$f")" != 600 ] && run chmod 600 "$f"
+done
+echo "--- 3/3 home: owner only, plus cortex traverse (mask re-asserted after chmod)"
+run chmod o-rwx,g-rwx "$HOME_DIR"
+run setfacl -m g:cortex:--x -m mask::--x "$HOME_DIR"
+
+if [ "$MODE" = apply ]; then
+  echo "sealed. verify: agent-home-seal --check"
+  echo "NFS note: if this host exports the home, flush: sudo exportfs -f && echo 1 | sudo tee /proc/net/rpc/auth.unix.gid/flush"
+else
+  echo "(dry-run complete — re-run with --apply after approval)"
+fi
+#+END_SRC
+
+The test seals a scratch "home" (it needs only the =cortex= group, no sudo): the
+dry-run must change nothing, apply must close every non-reach entry and leave
+reach entries and symlink targets alone, and the restore script must put every
+mode back exactly.
+
+#+BEGIN_SRC python :tangle linux/.local/share/dotcortex/tests/test-agent-home-seal.py :shebang "#!/usr/bin/env python3" :comments no :noweb no
+from __future__ import annotations
+
+import grp
+import os
+import stat
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+SEAL = ROOT / "all/.local/bin/agent-home-seal"
+
+
+def mode(p: Path) -> int:
+    return stat.S_IMODE(p.lstat().st_mode)
+
+
+@unittest.skipUnless(any(g.gr_name == "cortex" for g in grp.getgrall()), "needs the cortex group")
+class AgentHomeSealTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.home = base / "home"
+        self.outside = base / "outside"
+        self.home.mkdir(mode=0o700)
+        self.outside.mkdir()
+        self.outside.chmod(0o755)  # explicit: mkdir modes are masked by umask
+        for name, m in ((".config", 0o775), ("DotCortex", 0o775), ("notes.log", 0o664)):
+            p = self.home / name
+            p.mkdir() if name != "notes.log" else p.write_text("x")
+            p.chmod(m)
+        env = self.home / ".env"
+        env.write_text("A=1\n")
+        env.chmod(0o664)
+        (self.home / "link").symlink_to(self.outside)
+        self.env = dict(
+            os.environ,
+            AGENT_SEAL_HOME=str(self.home),
+            AGENT_SEAL_STATE=str(base / "state"),
+            AGENT_SEAL_REACH="DotCortex",
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def seal(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(SEAL), *args], env=self.env, text=True, capture_output=True, check=False)
+
+    def test_dry_run_apply_restore(self) -> None:
+        before = {p.name: mode(p) for p in self.home.iterdir()}
+        dry = self.seal()
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertEqual({p.name: mode(p) for p in self.home.iterdir()}, before, "dry-run must not change modes")
+
+        done = self.seal("--apply")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(mode(self.home / ".config") & 0o007, 0)
+        self.assertEqual(mode(self.home / "notes.log") & 0o007, 0)
+        self.assertEqual(mode(self.home / ".env"), 0o600)
+        self.assertEqual(mode(self.home / "DotCortex"), 0o775, "reach entries keep their mode")
+        self.assertEqual(mode(self.outside), 0o755, "symlink targets are never touched")
+        acl = subprocess.run(["getfacl", "-cp", str(self.home)], text=True, capture_output=True).stdout
+        self.assertIn("group:cortex:--x", acl)
+
+        restore = sorted((Path(self.env["AGENT_SEAL_STATE"])).glob("restore-*.sh"))
+        self.assertEqual(len(restore), 1)
+        subprocess.run(["bash", str(restore[0])], check=True, capture_output=True)
+        self.assertEqual({p.name: mode(p) for p in self.home.iterdir()}, before, "restore puts every mode back")
+
+    def test_missing_reach_entry_is_fatal(self) -> None:
+        self.env["AGENT_SEAL_REACH"] = "NoSuchRepo"
+        self.assertEqual(self.seal().returncode, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+*** Script: agent-repo-share (dry-run by default)
+
+Step 2 of the cortex pattern as a reproducible command: group-share one repo
+with =cortex= so agents work in the same worktree read-write. It touches only
+what git tracks (plus =.git= itself): the tracked files get group =cortex= and
+=g+rw=, their directories =g+rwxs= (setgid, so new files inherit the group), and
+=core.sharedRepository= becomes =group=. Untracked and ignored paths are left
+alone — in DotCortex those are the operator's installed runtimes (=all/.cargo/bin=,
+=all/.bun=, npm caches, =.codex/=), not source. Symlinks are never touched.
+
+Before =--apply= changes anything it writes the prior group and mode of every
+path it will touch to =~/.local/state/agent-repo-share/=, with a restore script
+beside it. =--check= exits 1 while any tracked path is outside the share.
+
+Writers must run with =umask 002= or the files they create stay closed to the
+group; the script warns when the invoking shell's umask is stricter.
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-repo-share :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-repo-share
+# Group-share a git repo with cortex for agent users. DRY-RUN unless --apply.
+set -euo pipefail
+
+GROUP="${AGENT_SHARE_GROUP:-cortex}"
+STATE="${AGENT_SHARE_STATE:-$HOME/.local/state/agent-repo-share}"
+MODE=dry-run
+REPO=""
+
+usage() {
+  cat <<'EOF'
+Usage: agent-repo-share REPO [--apply|--check|--help]
+  (no flag)  report what would change; change nothing
+  --apply    record prior group/mode + restore script, then give every tracked
+             path (and .git) group cortex, g+rw, setgid dirs, and set
+             core.sharedRepository=group
+  --check    exit 0 only if every tracked path is already shared
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) MODE=apply ;;
+    --check) MODE=check ;;
+    -h|--help) usage; exit 0 ;;
+    -*) usage >&2; exit 2 ;;
+    *) [ -z "$REPO" ] || { usage >&2; exit 2; }; REPO="$1" ;;
+  esac
+  shift
+done
+[ -n "$REPO" ] || { usage >&2; exit 2; }
+REPO="$(cd "$REPO" && pwd -P)"
+git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "FATAL: not a git worktree: $REPO" >&2; exit 1; }
+[ "$(git -C "$REPO" rev-parse --show-toplevel)" = "$REPO" ] || { echo "FATAL: $REPO is not the repo root" >&2; exit 1; }
+getent group "$GROUP" >/dev/null || { echo "FATAL: no group $GROUP" >&2; exit 1; }
+
+list="$(mktemp)"; dirs="$(mktemp)"; tsv="$(mktemp)"
+trap 'rm -f "$list" "$dirs" "$tsv"' EXIT
+# One Python pass (a shell loop forks per path; DotCortex tracks ~200k):
+# every tracked non-symlink path that exists, its parent dirs, the root and
+# .git. Writes NUL lists (all paths, dirs) and a mode/group/path TSV, then
+# prints "total pending".
+read -r total pending < <(cd "$REPO" && python3 - "$GROUP" "$list" "$dirs" "$tsv" <<'PY'
+import grp, os, stat, subprocess, sys
+group, list_path, dirs_path, tsv_path = sys.argv[1:5]
+gid = grp.getgrnam(group).gr_gid
+out = subprocess.run(["git", "ls-files", "-s", "-z"], check=True, capture_output=True).stdout
+paths = {"."}
+for rec in out.split(b"\0"):
+    if not rec:
+        continue
+    meta, raw = rec.split(b"\t", 1)
+    path = os.fsdecode(raw)
+    if meta.split()[0] != b"120000" and os.path.lexists(path):
+        paths.add(path)
+    d = os.path.dirname(path)
+    while d and d not in paths:
+        paths.add(d)
+        d = os.path.dirname(d)
+for root, subdirs, files in os.walk(".git"):
+    paths.add(root)
+    for n in subdirs + files:
+        paths.add(os.path.join(root, n))
+total = pending = 0
+with open(list_path, "wb") as lst, open(dirs_path, "wb") as dl, open(tsv_path, "w") as tsv:
+    for p in sorted(paths):
+        st = os.lstat(p)
+        if stat.S_ISLNK(st.st_mode):
+            continue
+        total += 1
+        lst.write(os.fsencode(p) + b"\0")
+        tsv.write(f"{stat.S_IMODE(st.st_mode):o}\t{grp.getgrgid(st.st_gid).gr_name}\t{p}\n")
+        need = stat.S_IRGRP | stat.S_IWGRP
+        if stat.S_ISDIR(st.st_mode):
+            dl.write(os.fsencode(p) + b"\0")
+            need |= stat.S_IXGRP | stat.S_ISGID
+        if st.st_gid != gid or (st.st_mode & need) != need:
+            pending += 1
+print(total, pending)
+PY
+)
+[ -n "${total:-}" ] || { echo "FATAL: path enumeration failed" >&2; exit 1; }
+shared="$(git -C "$REPO" config core.sharedRepository || echo unset)"
+echo "$REPO: $total tracked paths, $pending not shared with $GROUP; core.sharedRepository=$shared"
+[ "$(umask)" = 0002 ] || echo "note: this shell's umask is $(umask); writers need 002 or new files stay closed to $GROUP"
+
+if [ "$MODE" = check ]; then
+  [ "$pending" -eq 0 ] && [ "$shared" = group ] && exit 0 || exit 1
+fi
+if [ "$MODE" = dry-run ]; then
+  echo "DRY-RUN: chgrp $GROUP + chmod g+rw on $total paths; chmod g+rwxs on their directories"
+  echo "DRY-RUN: git -C $REPO config core.sharedRepository group"
+  echo "(dry-run complete — re-run with --apply after approval)"
+  exit 0
+fi
+
+mkdir -p "$STATE"; chmod 700 "$STATE"
+stamp="$(basename "$REPO")-$(date +%Y%m%d-%H%M%S)"
+cp "$tsv" "$STATE/$stamp.tsv"
+cat > "$STATE/restore-$stamp.sh" <<EOF
+#!/usr/bin/env bash
+# agent-repo-share restore for $REPO (core.sharedRepository was: $shared)
+set -euo pipefail
+cd $(printf '%q' "$REPO")
+while IFS=\$'\t' read -r mode grp path; do
+  # five digits: GNU chmod keeps a directory's setgid unless the mode says so
+  chgrp -h "\$grp" -- "\$path"; chmod "\$(printf '%05d' "\$mode")" -- "\$path"
+done < $(printf '%q' "$STATE/$stamp.tsv")
+$( [ "$shared" = unset ] && echo "git config --unset core.sharedRepository || true" || printf 'git config core.sharedRepository %q\n' "$shared" )
+EOF
+chmod 700 "$STATE/restore-$stamp.sh"
+echo "restore script: $STATE/restore-$stamp.sh"
+
+cd "$REPO"
+# First, so git rewrites .git/config before the modes below are applied.
+git config core.sharedRepository group
+xargs -0 -r chgrp "$GROUP" -- < "$list"
+xargs -0 -r chmod g+rw -- < "$list"
+xargs -0 -r chmod g+xs -- < "$dirs"
+echo "shared. verify: agent-repo-share $REPO --check"
+#+END_SRC
+
+The test shares a scratch repo (needs only the =cortex= group): dry-run and
+=--check= change nothing, apply shares every tracked path but leaves ignored
+paths and symlinks alone, and the restore script returns every mode and group
+exactly, setgid bits and =.git= included.
+
+#+BEGIN_SRC python :tangle linux/.local/share/dotcortex/tests/test-agent-repo-share.py :shebang "#!/usr/bin/env python3" :comments no :noweb no
+from __future__ import annotations
+
+import grp
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+SHARE = ROOT / "all/.local/bin/agent-repo-share"
+
+
+def snapshot(repo: Path) -> list[tuple[str, int, int]]:
+    rows = []
+    for p in sorted(repo.rglob("*")) + [repo]:
+        st = p.lstat()
+        rows.append((str(p.relative_to(repo)), st.st_mode, st.st_gid))
+    return rows
+
+
+@unittest.skipUnless(any(g.gr_name == "cortex" for g in grp.getgrall()), "needs the cortex group")
+class AgentRepoShareTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.repo = base / "repo"
+        (self.repo / "sub").mkdir(parents=True)
+        (self.repo / "sub/a").write_text("a")
+        (self.repo / "b").write_text("b")
+        (self.repo / "ign").mkdir()
+        (self.repo / "ign/x").write_text("x")
+        (self.repo / ".gitignore").write_text("ign/\n")
+        (self.repo / "lnk").symlink_to("/etc/hostname")
+        git = ["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-qm", "init"], check=True)
+        os.chmod(self.repo / "b", 0o600)
+        self.env = dict(os.environ, AGENT_SHARE_STATE=str(base / "state"))
+        self.cortex = grp.getgrnam("cortex").gr_gid
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def share(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(SHARE), str(self.repo), *args], env=self.env, text=True, capture_output=True, check=False)
+
+    def test_share_check_restore(self) -> None:
+        before = snapshot(self.repo)
+        self.assertEqual(self.share().returncode, 0)
+        self.assertEqual(self.share("--check").returncode, 1)
+        self.assertEqual(snapshot(self.repo), before, "dry-run and --check change nothing")
+
+        self.assertEqual(self.share("--apply").returncode, 0)
+        self.assertEqual(self.share("--check").returncode, 0)
+        b = (self.repo / "b").stat()
+        self.assertEqual((b.st_gid, b.st_mode & 0o060), (self.cortex, 0o060))
+        self.assertTrue((self.repo / "sub").stat().st_mode & 0o2000, "dirs get setgid")
+        self.assertNotEqual((self.repo / "ign/x").stat().st_gid, self.cortex, "ignored paths untouched")
+
+        restore = sorted(Path(self.env["AGENT_SHARE_STATE"]).glob("restore-*.sh"))
+        self.assertEqual(len(restore), 1)
+        subprocess.run(["bash", str(restore[0])], check=True, capture_output=True)
+        self.assertEqual(snapshot(self.repo), before, "restore is exact")
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+*** Script: agent-restrict (dry-run by default)
+
+Applies a clearance group (=groups.ssv=) to a private list of paths inside a
+shared repo: each listed directory becomes =GROUP=-owned =2770= (owner and
+group only, setgid), each listed file =GROUP=-owned with no other-access. Only
+the listed entry changes — closing a directory's own mode shuts everything
+beneath it to non-members, so inner files keep their =cortex= modes untouched.
+Paths carrying named ACL entries are refused (an ACL could re-open what the
+mode closes). Every =--apply= first writes the prior group/mode of each entry
+and a restore script to =~/.local/state/agent-restrict/=.
+
+=--check= proves it from both sides when agent users exist: every cleared
+agent must reach each path, every uncleared one must be refused.
+
+Known limit, stated plainly: file modes cannot guard git history. An agent that
+can run git in the repo can still =git show= an old version of a restricted
+file. The durable fix is a separate private repo for the restricted material;
+until then, the wall is the working tree only.
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-restrict :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-restrict
+# Close listed repo paths to a clearance group. DRY-RUN unless --apply.
+set -euo pipefail
+
+CONF="${AGENT_CLI_CONF:-$HOME/.config/agent-cli}"
+STATE="${AGENT_RESTRICT_STATE:-$HOME/.local/state/agent-restrict}"
+MODE=dry-run
+GROUP=""
+ROOT=""
+LIST=""
+
+usage() {
+  cat <<'EOF'
+Usage: agent-restrict GROUP --root DIR --paths FILE [--apply|--check|--help]
+  GROUP       a clearance group from groups.ssv (e.g. palm)
+  --root      the repo the listed paths are relative to
+  --paths     file of repo-relative paths, one per line (# comments)
+  (no flag)   show what would change; change nothing
+  --apply     record prior group/mode + restore script, then restrict
+  --check     verify modes, and (with sudo) cleared agents in / others out
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) shift; ROOT="${1:-}" ;;
+    --paths) shift; LIST="${1:-}" ;;
+    --apply) MODE=apply ;;
+    --check) MODE=check ;;
+    -h|--help) usage; exit 0 ;;
+    -*) usage >&2; exit 2 ;;
+    *) [ -z "$GROUP" ] || { usage >&2; exit 2; }; GROUP="$1" ;;
+  esac
+  shift
+done
+[ -n "$GROUP" ] && [ -n "$ROOT" ] && [ -n "$LIST" ] || { usage >&2; exit 2; }
+[ -r "$LIST" ] || { echo "FATAL: path list not readable: $LIST" >&2; exit 1; }
+ROOT="$(cd "$ROOT" && pwd -P)"
+spec="$(awk -v g="$GROUP" '$1 == g {print $2, $3}' "$CONF/groups.ssv" 2>/dev/null)"
+[ -n "$spec" ] || { echo "FATAL: $GROUP is not a clearance group in $CONF/groups.ssv" >&2; exit 1; }
+read -r gid cleared <<<"$spec"
+ent="$(getent group "$GROUP" || true)"
+[ -n "$ent" ] && [ "$(printf '%s' "$ent" | cut -d: -f3)" = "$gid" ] \
+  || { echo "FATAL: group $GROUP missing or not gid $gid here (agent-users-bootstrap first)" >&2; exit 1; }
+
+paths=()
+while IFS= read -r line; do
+  line="${line%%#*}"; line="$(printf '%s' "$line" | sed 's/[[:space:]]*$//')"
+  [ -n "$line" ] || continue
+  if [ ! -e "$ROOT/$line" ]; then echo "skip (absent): $line"; continue; fi
+  if [ -L "$ROOT/$line" ]; then echo "skip (symlink): $line"; continue; fi
+  paths+=("$line")
+done < "$LIST"
+
+acl_named() { getfacl -cp "$1" 2>/dev/null | grep -qE '^(user|group):[^:]+:'; }
+target_mode() { if [ -d "$1" ]; then echo 2770; else printf '%o' $(( ($(stat -c '0%a' "$1") & 0770) | 0060 )); fi; }
+
+fail=0
+for p in "${paths[@]}"; do
+  f="$ROOT/$p"
+  if acl_named "$f"; then echo "REFUSE (named ACL entries): $p"; fail=1; continue; fi
+  have="$(stat -c '%G %a' "$f")"
+  want="$GROUP $(target_mode "$f")"
+  if [ "$have" = "$want" ]; then
+    [ "$MODE" = check ] && echo "OK   $p"
+  elif [ "$MODE" = check ]; then
+    echo "FAIL $p is '$have', want '$want'"; fail=1
+  else
+    echo "$([ "$MODE" = apply ] && echo '+' || echo 'DRY-RUN:') $p: $have -> $want"
+  fi
+done
+
+if [ "$MODE" = check ]; then
+  if sudo -n true 2>/dev/null; then
+    for u in $(getent passwd | cut -d: -f1 | grep '^agent-' || true); do
+      t="${u#agent-}"
+      case ",$cleared," in *",$t,"*) want=reach ;; *) want=refused ;; esac
+      for p in "${paths[@]}"; do
+        if sudo -n -u "$u" -H test -r "$ROOT/$p" 2>/dev/null && { [ ! -d "$ROOT/$p" ] || sudo -n -u "$u" -H ls "$ROOT/$p" >/dev/null 2>&1; }; then got=reach; else got=refused; fi
+        if [ "$got" = "$want" ]; then echo "OK   $u $got $p"; else echo "FAIL $u $got $p (want $want)"; fail=1; fi
+      done
+    done
+  else
+    echo "note: no sudo — agent-side verification skipped (UNVERIFIED)"
+  fi
+  exit "$fail"
+fi
+
+[ "$fail" -eq 0 ] || { echo "FATAL: refused paths above; nothing changed" >&2; exit 1; }
+if [ "$MODE" = dry-run ]; then
+  echo "(dry-run complete — re-run with --apply after approval)"
+  exit 0
+fi
+
+mkdir -p "$STATE"; chmod 700 "$STATE"
+stamp="$GROUP-$(basename "$ROOT")-$(date +%Y%m%d-%H%M%S)"
+: > "$STATE/$stamp.tsv"
+for p in "${paths[@]}"; do printf '%s\t%s\t%s\n' "$(stat -c %a "$ROOT/$p")" "$(stat -c %G "$ROOT/$p")" "$p" >> "$STATE/$stamp.tsv"; done
+cat > "$STATE/restore-$stamp.sh" <<EOF
+#!/usr/bin/env bash
+# agent-restrict restore: $GROUP on $ROOT
+set -euo pipefail
+cd $(printf '%q' "$ROOT")
+while IFS=\$'\t' read -r mode grp path; do
+  chgrp "\$grp" -- "\$path"; chmod "\$(printf '%05d' "\$mode")" -- "\$path"
+done < $(printf '%q' "$STATE/$stamp.tsv")
+EOF
+chmod 700 "$STATE/restore-$stamp.sh"
+echo "restore script: $STATE/restore-$stamp.sh"
+for p in "${paths[@]}"; do
+  f="$ROOT/$p"
+  chgrp "$GROUP" -- "$f"
+  chmod "$(target_mode "$f")" -- "$f"
+done
+echo "restricted. verify: agent-restrict $GROUP --root $ROOT --paths $LIST --check"
+#+END_SRC
+
+*** NFS gotchas for agent users (cost an hour; do not rediscover)
+- With =manage-gids=y= (mountd), the server IGNORES the client's AUTH_SYS group list
+  and looks up groups *server-side by numeric uid*. The agent user (with matching
+  uid AND =cortex= membership) must exist on the NFS *server* before access works.
+- The server caches uid→group lookups: after creating/changing a server-side agent
+  user, flush with =exportfs -f= and
+  =echo 1 > /proc/net/rpc/auth.unix.gid/flush=, or the old denial persists.
+- NFS clients also cache ACCESS denials briefly — test with a fresh path when in
+  doubt.
+
+*** Home directory layout
+Standard =useradd -m= homes under =/home/agent-<tool>/=, mode 750:
+- =.ssh/= (700) — the agent's own identity, generated in place, never imported
+- =.npm-global/= — per-agent npm prefix for npm-distributed CLIs
+- =.local/bin/= — agent-local executables
+- =.local/pipx/= — per-agent pipx home where Python tools are needed
+- =.config/= — the agent CLI's own auth/config (its tokens live here, not the human's)
+- =repos/= — controlled checkouts where repo access is granted (see open question)
+
+*** SSH key layout
+- One ed25519 keypair per agent user per host: =~/.ssh/id_ed25519=, comment
+  =agent-<tool>@<hostname>= so every authorized_keys line is attributable and
+  individually revocable.
+- Generated *as the agent user, in the agent's home*. Private keys never leave the
+  generating home — not into repos, not into NEXUS, not across hosts.
+- Passphraseless (filesystem permissions and user separation are the wall; a
+  passphrase an agent can read adds nothing). Compensating controls live on the
+  *installation* side: =from== source pinning, =no-agent-forwarding=,
+  =no-X11-forwarding=, =no-port-forwarding=.
+- Public keys are *exported for review* to a local state dir; installing them into
+  any =authorized_keys= is a separate, explicitly-approved step (Stage 4) — never
+  automated by the bootstrap scripts.
+- Client-machine keys are a separate ring: =agent-client-<slug>= keys are generated
+  per engagement, trusted only on that client's machines, revocable with one
+  =authorized_keys= line deletion, and never present on personal-mesh hosts.
+
+*** Toolchain bootstrap
+The hard problem: agent users cannot see the human's toolchain, by design. Every
+tool an agent needs arrives through one of two routes:
+- *Root/system tools* (shared, installed once per host through the system lane):
+  interpreters (=python3=, =node= where system-packaged), =git=, =openssh-client=,
+  =bash/zsh=, =coreutils=, build basics. Guix is naturally multi-user — the store is
+  shared, profiles are per-user — so agent users may build their own Guix profiles
+  against the host daemon without touching the human's profile.
+- *Per-agent user tools* (installed under the agent's own home, per manifest):
+  npm-distributed agent CLIs (=codex=, =claude=, =gemini=, =opencode=) under
+  =~/.npm-global=, pipx/venv tools under =~/.local/pipx=, plus the agent's own
+  config and auth.
+
+*Never inherited from /home/metsatron*: =~/.ssh= and the ssh-agent socket, =~/.env=
+and any login-environment secrets, =~/.npm-global=, conda environments, browser
+profiles, NEXUS-stowed trees (=.hermes=, =.pi=, app configs), git credentials.
+If an agent user appears to need one of these, that is a design smell — route the
+need through its category's pattern instead.
+
+*** Guix as a fresh agent user (2026-09-26)
+The first =guix package -m= run as a brand-new agent user crashed while
+downloading substitutes (segfault, then =%null-pointer: unbound variable= in
+=guix/ui.scm=), although =guix build --dry-run= worked. Fetching the same store
+items as the operator first (=guix build node=) let the agent's profile build
+complete. Until the cause is known, pre-fetch as the operator before
+=agent-guix-apply --apply=.
+
+*** Interactive vs persistent
+- *Interactive agents* (codex, claude, gemini, antigravity, opencode): L1 default —
+  user-level repo work, no sudo. Temporary supervised escalation (L3) only during
+  live human sessions.
+- *Persistent agents* (hermes, pi): L2 ceiling — enumerated root-owned wrappers
+  only, no arbitrary sudo ever, no personal-mesh SSH by default, no backup
+  destruction capability. Their keys, where they must exist, carry =command==
+  forced-command restrictions.
+
+*** Open question (blocks first toolchain rollout, not user creation)
+Repo access mechanics for agent users: group-readable shared worktree vs per-agent
+clone of DotCortex/HelmCortex. Decide at first real migration; record here.
+
+** Inventory template
+
+The =agent-inventory-report= script emits this table per host. Paste dated snapshots
+into the private topography document, not here.
+
+| host | agent user | tool | mode | home | ssh key | pubkey installed where | sudo | toolchain | repo access | client access | notes | next action |
+
+** Script: agent-inventory-report (read-only)
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-inventory-report :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-inventory-report
+# Read-only. Reports per-agent Unix user state on this host as a markdown table.
+set -euo pipefail
+
+AGENTS_INTERACTIVE="codex claude gemini antigravity opencode"
+AGENTS_PERSISTENT="hermes pi"
+HOSTN="$(hostname)"
+
+mode_of() {
+  case " $AGENTS_PERSISTENT " in
+    *" $1 "*) echo "persistent" ;;
+    *) echo "interactive" ;;
+  esac
+}
+
+echo "## Agent user inventory — $HOSTN — $(date +%F)"
+echo ""
+echo "| host | agent user | tool | mode | home | ssh key | pubkey installed where | sudo | toolchain | repo access | client access | notes | next action |"
+echo "|------|-----------|------|------|------|---------|------------------------|------|-----------|-------------|---------------|-------|-------------|"
+
+for tool in $AGENTS_INTERACTIVE $AGENTS_PERSISTENT; do
+  user="agent-$tool"
+  if ! id "$user" >/dev/null 2>&1; then
+    echo "| $HOSTN | $user | $tool | $(mode_of "$tool") | — | — | — | — | — | — | — | user does not exist | create via agent-users-bootstrap |"
+    continue
+  fi
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  # Agent homes are 750 and agent-owned: an unprivileged stat reads "absent"
+  # for keys and prefixes that exist. Look through sudo -n or say unknown.
+  if sudo -n true 2>/dev/null; then
+    peek() { sudo -n test "$@"; }
+    key="absent"
+  else
+    peek() { return 1; }
+    key="unknown (no sudo)"
+  fi
+  peek -f "$home/.ssh/id_ed25519" && key="$home/.ssh/id_ed25519"
+  sudo_state="unknown"
+  if sudo -n true 2>/dev/null; then
+    if sudo -n grep -rl "$user" /etc/sudoers /etc/sudoers.d/ >/dev/null 2>&1; then
+      sudo_state="HAS sudoers entry"
+    else
+      sudo_state="none"
+    fi
+  fi
+  tc=""
+  peek -e "$home/.guix-extra-profiles/agent/agent/bin/node" && tc="guix-node"
+  peek -d "$home/.npm-global/bin" && tc="${tc:+$tc+}npm"
+  peek -d "$home/.local/pipx" && tc="${tc:+$tc+}pipx"
+  [ -z "$tc" ] && { sudo -n true 2>/dev/null && tc="none" || tc="unknown (no sudo)"; }
+  echo "| $HOSTN | $user | $tool | $(mode_of "$tool") | $home | $key | TBC | $sudo_state | $tc | TBC | none | | |"
+done
+
+echo ""
+echo "### Current-reality exposure (human account)"
+for tool in $AGENTS_INTERACTIVE $AGENTS_PERSISTENT ductor; do
+  bin="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$bin" ] && echo "- \`$tool\` runs as $(whoami): $bin"
+done
+#+END_SRC
+
+** Script: agent-users-bootstrap (dry-run by default)
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-users-bootstrap :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-users-bootstrap
+# Creates locked per-agent Unix users. DRY-RUN unless --apply.
+# --apply requires prior human approval per the staged rollout law.
+# Debian/Devuan-first (useradd/passwd from shadow-utils).
+set -euo pipefail
+
+UIDS="${AGENT_UIDS_FILE:-$HOME/.config/agent-cli/uids.ssv}"
+CORTEX_GID=2000
+OPERATOR="$(id -un)"
+APPLY=0
+ONLY=""
+
+usage() { echo "usage: agent-users-bootstrap [--apply] [--only TOOL[,TOOL...]]"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1 ;;
+    --only) shift; ONLY="${1:-}" ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 1 ;;
+  esac
+  shift
+done
+
+# Canonical fleet uid/gid map — NFS is numeric; never auto-assign.
+[ -r "$UIDS" ] || { echo "FATAL: canonical uid map not found: $UIDS (loom stow first)" >&2; exit 1; }
+uid_of() { awk -v t="$1" '$1 == t && $1 !~ /^#/ {print $2}' "$UIDS"; }
+AGENTS="$(awk '$1 !~ /^#/ && $3 == "yes" {print $1}' "$UIDS")"
+if [ -n "$ONLY" ]; then
+  for t in ${ONLY//,/ }; do
+    [ -n "$(uid_of "$t")" ] || { echo "FATAL: --only $t has no canonical uid in $UIDS" >&2; exit 1; }
+  done
+  AGENTS="${ONLY//,/ }"
+fi
+
+run() {
+  if [ "$APPLY" -eq 1 ]; then
+    echo "+ $*"
+    "$@"
+  else
+    echo "DRY-RUN: $*"
+  fi
+}
+
+if ! getent group cortex >/dev/null 2>&1; then
+  if getent group "$CORTEX_GID" >/dev/null 2>&1; then
+    echo "FATAL: gid $CORTEX_GID is taken by '$(getent group "$CORTEX_GID" | cut -d: -f1)' — reconcile manually" >&2
+    exit 1
+  fi
+  run sudo groupadd -g "$CORTEX_GID" cortex
+elif [ "$(getent group cortex | cut -d: -f3)" != "$CORTEX_GID" ]; then
+  echo "FATAL: group cortex is not gid $CORTEX_GID — reconcile manually" >&2
+  exit 1
+fi
+# The operator shares the repos with the agents, so the operator is a cortex member too.
+if ! id -nG "$OPERATOR" | tr ' ' '\n' | grep -qx cortex; then
+  run sudo usermod -aG cortex "$OPERATOR"
+fi
+
+for tool in $AGENTS; do
+  user="agent-$tool"
+  uid="$(uid_of "$tool")"
+  if id "$user" >/dev/null 2>&1; then
+    have_uid="$(id -u "$user")"
+    [ "$have_uid" != "$uid" ] && echo "WARNING: $user has uid $have_uid, canon is $uid — reconcile manually"
+    echo "exists: $user (skip create)"
+  elif getent passwd "$uid" >/dev/null 2>&1 || getent group "$uid" >/dev/null 2>&1; then
+    # useradd would fail half-way, or (without --uid) drift off the canon.
+    echo "COLLISION: uid/gid $uid already used by '$(getent passwd "$uid" | cut -d: -f1)$(getent group "$uid" | cut -d: -f1 | sed 's/^/ group /')' — $user not created; reconcile manually"
+    continue
+  else
+    # GECOS field: no colons (passwd delimiter), keep it plain
+    run sudo groupadd -g "$uid" "$user"
+    run sudo useradd --uid "$uid" --gid "$uid" --create-home --shell /bin/bash \
+      --comment "Agent user $tool - rule 22 Category B-C" "$user"
+    run sudo passwd -l "$user"
+    run sudo chmod 750 "/home/$user"
+  fi
+  run sudo usermod -aG cortex "$user"
+done
+
+# Clearance groups: create at the canonical gid, add the operator and the
+# cleared agents that exist here. Removing an uncleared member is never
+# automatic — agent-fleet-check reports it for a human decision.
+GROUPS_FILE="${AGENT_GROUPS_FILE:-$(dirname "$UIDS")/groups.ssv}"
+if [ -r "$GROUPS_FILE" ]; then
+  while read -r grp gid cleared _rest; do
+    case "$grp" in ""|\#*) continue ;; esac
+    if ! getent group "$grp" >/dev/null 2>&1; then
+      if getent group "$gid" >/dev/null 2>&1; then
+        echo "COLLISION: gid $gid (for $grp) held by group '$(getent group "$gid" | cut -d: -f1)' — reconcile manually"
+        continue
+      fi
+      run sudo groupadd -g "$gid" "$grp"
+    elif [ "$(getent group "$grp" | cut -d: -f3)" != "$gid" ]; then
+      echo "WARNING: group $grp is not gid $gid — reconcile manually"
+      continue
+    fi
+    id -nG "$OPERATOR" | tr ' ' '\n' | grep -qx "$grp" || run sudo usermod -aG "$grp" "$OPERATOR"
+    for t in ${cleared//,/ }; do
+      u="agent-$t"
+      id "$u" >/dev/null 2>&1 || continue
+      id -nG "$u" | tr ' ' '\n' | grep -qx "$grp" || run sudo usermod -aG "$grp" "$u"
+    done
+  done < "$GROUPS_FILE"
+fi
+
+echo "NFS note: if this host serves NFS with manage-gids, flush after changes:"
+echo "  sudo exportfs -f && echo 1 | sudo tee /proc/net/rpc/auth.unix.gid/flush"
+
+[ "$APPLY" -eq 0 ] && echo "(dry-run complete — re-run with --apply after approval)"
+exit 0
+#+END_SRC
+
+** Script: agent-key-bootstrap (dry-run by default)
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-key-bootstrap :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-key-bootstrap
+# Generates per-agent ed25519 keypairs inside each agent home and exports the
+# PUBLIC halves for review. Never touches authorized_keys anywhere.
+# DRY-RUN unless --apply.
+set -euo pipefail
+
+AGENTS="codex claude gemini antigravity opencode hermes pi"
+EXPORT_DIR="${AGENT_PUBKEY_EXPORT:-$HOME/.local/state/agent-pubkeys}"
+HOSTN="$(hostname)"
+APPLY=0
+ONLY=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1 ;;
+    --only) shift; ONLY="${1:-}" ;;
+    *) echo "usage: agent-key-bootstrap [--apply] [--only TOOL[,TOOL...]]"; exit 1 ;;
+  esac
+  shift
+done
+
+run() {
+  if [ "$APPLY" -eq 1 ]; then
+    echo "+ $*"
+    "$@"
+  else
+    echo "DRY-RUN: $*"
+  fi
+}
+
+mkdir -p "$EXPORT_DIR"
+
+for tool in $AGENTS; do
+  [ -n "$ONLY" ] && case ",$ONLY," in *",$tool,"*) ;; *) continue ;; esac
+  user="agent-$tool"
+  if ! id "$user" >/dev/null 2>&1; then
+    echo "no user: $user (run agent-users-bootstrap first; skip)"
+    continue
+  fi
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  if sudo -n test -f "$home/.ssh/id_ed25519" 2>/dev/null; then
+    echo "key exists: $user (skip)"
+    continue
+  fi
+  run sudo -u "$user" -H mkdir -p "$home/.ssh"
+  run sudo -u "$user" -H chmod 700 "$home/.ssh"
+  run sudo -u "$user" -H ssh-keygen -t ed25519 -N "" \
+    -C "$user@$HOSTN" -f "$home/.ssh/id_ed25519"
+  run sudo sh -c "cat '$home/.ssh/id_ed25519.pub' > '$EXPORT_DIR/$user@$HOSTN.pub'"
+done
+
+echo "Public keys export dir (review before any installation): $EXPORT_DIR"
+[ "$APPLY" -eq 0 ] && echo "(dry-run complete — re-run with --apply after approval)"
+exit 0
+#+END_SRC
+
+** Script: agent-tool-bootstrap (dry-run by default)
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-tool-bootstrap :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-tool-bootstrap
+# Prepares per-agent toolchain layout: npm prefix, pipx home, local bin, PATH.
+# Installs NO packages — package installation goes through manifests later.
+# DRY-RUN unless --apply.
+set -euo pipefail
+
+AGENTS="codex claude gemini antigravity opencode hermes pi"
+APPLY=0
+ONLY=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1 ;;
+    --only) shift; ONLY="${1:-}" ;;
+    *) echo "usage: agent-tool-bootstrap [--apply] [--only TOOL[,TOOL...]]"; exit 1 ;;
+  esac
+  shift
+done
+
+run() {
+  if [ "$APPLY" -eq 1 ]; then
+    echo "+ $*"
+    "$@"
+  else
+    echo "DRY-RUN: $*"
+  fi
+}
+
+for tool in $AGENTS; do
+  [ -n "$ONLY" ] && case ",$ONLY," in *",$tool,"*) ;; *) continue ;; esac
+  user="agent-$tool"
+  if ! id "$user" >/dev/null 2>&1; then
+    echo "no user: $user (skip)"
+    continue
+  fi
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  run sudo -u "$user" -H mkdir -p \
+    "$home/.npm-global" "$home/.local/bin" "$home/.local/pipx" "$home/.config"
+  run sudo -u "$user" -H sh -c "grep -q npm-global '$home/.npmrc' 2>/dev/null || printf 'prefix=%s/.npm-global\n' '$home' >> '$home/.npmrc'"
+  run sudo -u "$user" -H sh -c "grep -q npm-global/bin '$home/.profile' 2>/dev/null || printf 'export PATH=\"\$HOME/.npm-global/bin:\$HOME/.local/bin:\$PATH\"\numask 002\n' >> '$home/.profile'"
+  run sudo -u "$user" -H git config --global user.name "$user"
+  run sudo -u "$user" -H git config --global user.email "$user@$(hostname | tr 'A-Z' 'a-z').local"
+  run sudo -u "$user" -H git config --global --add safe.directory "/home/metsatron/DotCortex"
+  run sudo -u "$user" -H git config --global --add safe.directory "/home/metsatron/HelmCortex"
+  run sudo -u "$user" -H git config --global --add safe.directory "/home/metsatron/mnt/x230/HelmCortex"
+done
+
+[ "$APPLY" -eq 0 ] && echo "(dry-run complete — re-run with --apply after approval)"
+exit 0
+#+END_SRC
+
+** Per-agent CLI manifests — latest, never pinned (ruling 2026-10-05)
+
+*Mètsàtron's ruling, 2026-10-05: no agent CLI is pinned anywhere in DotCortex.* Each Category-B agent's lane names its packages without a version, and =agent-cli-install --apply= installs the registry's =latest= for that agent (it uninstalls first, so an older install is replaced). Format: =MANAGER PACKAGE [VERSION]=, one line per package; an empty VERSION means =latest=. The one versioned line left is =bun=, a JavaScript runtime rather than an agent CLI. A host whose agent needs a different package set can still declare its own lane =hosts/<host>@agent-<tool>.ssv=, which replaces the fleet lane on that host only. No host has one today.
+
+*Superseded rationale, kept on record.* From 2026-06-11 (=45320ec360=) until this ruling, the lanes were pinned under "rule 22 + supply-chain law": unpinned =latest= is how a poisoned release reaches a host on its next apply. The governing precedent is the LiteLLM PyPI compromise of March 2026 (=agent-access-topography= §2 item 2, HelmCortex =FORGE/docs=), which the fleet missed by one release. Pins were captured from the operator's working installs and raised by deliberate edits. Floating gives that guard up. Running every agent as its own unprivileged, home-sealed user is now the main containment: a malicious postinstall runs as =agent-<tool>= and cannot read the operator's keys.
+
+Version couplings the pins used to hold, which a float can break:
+- =@grinev/opencode-telegram-bot= was pinned at 0.25.2 (=c3fc785f5d=, 2026-09-21) because HelmCortex's whisper patch guard, then locked to one =TARGET_VERSION=, refused every OpenCode start on any other bot version. Since HelmCortex =08d165f1= (2026-10-05) =opencode-telegram-patch-apply= carries one verified seam set per version (=SUPPORTED_VERSIONS=, today 0.25.2 and 0.26.3) and still refuses any other. Floating stays safe only while the seam set for a new upstream release is re-cut and listed before a host floats to it: an unlisted version refuses the start on every host whose launcher runs the guard.
+- =@deepseek-ai/dsh='s =latest= dist-tag points at a release candidate. The =dsh-telegram= compatibility patch ([[file:package-bun.org][package-bun.org]]) targets the 0.1.5 seam, and a fresh install of 0.1.5-rc.1 once pulled rc.3 sub-packages that no longer resolved ([[file:agents-bots.org][agents-bots.org]]).
+- =opencode-ai= 1.18 writes the session store the bots read (a floor, not a ceiling). =@earendil-works/pi-coding-agent= needs node >= 22.19 from 0.80 on.
+
+Non-npm agents are out of this lane: =antigravity= is a host Electron app (not per-user), =hermes= is a Python venv (Stage 7 / its own substrate), and =ductor= wraps codex/claude/gemini and installs nothing of its own. Ductor itself is a Python bot framework, not an agent CLI, and keeps =package-pip.org='s pin.
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/codex.ssv :mkdirp yes :comments no :noweb no
+# MANAGER PACKAGE [VERSION]
+npm @openai/codex
+#+END_SRC
+
+=bun= runs the official Telegram plugin's MCP server for the agent's Telegram bots (the Honey tanuki bots). It is a runtime, not an agent CLI, so it keeps its pin.
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/claude.ssv :mkdirp yes :comments no :noweb no
+# MANAGER PACKAGE [VERSION]
+npm @anthropic-ai/claude-code
+npm bun 1.3.14
+#+END_SRC
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/gemini.ssv :mkdirp yes :comments no :noweb no
+# MANAGER PACKAGE [VERSION]
+npm @google/gemini-cli
+#+END_SRC
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/opencode.ssv :mkdirp yes :comments no :noweb no
+# MANAGER PACKAGE [VERSION]
+npm opencode-ai
+npm @grinev/opencode-telegram-bot
+npm agent-browser
+#+END_SRC
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/pi.ssv :mkdirp yes :comments no :noweb no
+# MANAGER PACKAGE [VERSION]
+npm @earendil-works/pi-coding-agent
+#+END_SRC
+
+DeepSeek Harness (=dsh=) runs the DeepSeek Telegram bot as =agent-deepseek=
+(uid 2012, the persistent-agent range after hermes and pi; added 2026-09-26 for
+Agent Boundaries phase 8). Its =latest= tag is a release candidate (see above).
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/deepseek.ssv :mkdirp yes :comments no :noweb no
+# MANAGER PACKAGE [VERSION]
+npm @deepseek-ai/dsh
+#+END_SRC
+
+** Script: agent-cli-install (dry-run by default)
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-cli-install :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-cli-install
+# Installs each agent's CLI (latest; no pins, ruling 2026-10-05) from all/.config/agent-cli/<tool>.ssv into the
+# agent user's own npm prefix (needs the agent Guix profile / node first).
+# DRY-RUN unless --apply. npm only for now; extend MANAGER cases as needed.
+set -euo pipefail
+
+MANIFEST_DIR="${AGENT_CLI_MANIFESTS:-$HOME/DotCortex/all/.config/agent-cli}"
+HOST="${AGENT_CLI_HOST:-$(hostname -s 2>/dev/null || hostname)}"
+APPLY=0
+ONLY=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1 ;;
+    --only) shift; ONLY="${1:-}" ;;
+    *) echo "usage: agent-cli-install [--apply] [--only TOOL[,TOOL...]]"; exit 1 ;;
+  esac
+  shift
+done
+
+run() {
+  if [ "$APPLY" -eq 1 ]; then echo "+ $*"; "$@"; else echo "DRY-RUN: $*"; fi
+}
+
+for manifest in "$MANIFEST_DIR"/*.ssv; do
+  [ -e "$manifest" ] || continue
+  tool="$(basename "$manifest" .ssv)"
+  [ -n "$ONLY" ] && case ",$ONLY," in *",$tool,"*) ;; *) continue ;; esac
+  user="agent-$tool"
+  if ! id "$user" >/dev/null 2>&1; then
+    echo "no user: $user (skip)"; continue
+  fi
+  # A host whose agent needs another package set declares its own lane,
+  # hosts/<host>@<user>.ssv (the provision-gate idiom); it replaces the
+  # fleet lane for that agent on that host only. No VERSION = latest.
+  lane="$MANIFEST_DIR/hosts/$HOST@$user.ssv"
+  [ -f "$lane" ] && { echo "$user: host lane $lane"; manifest="$lane"; }
+  while read -r manager pkg version _rest; do
+    case "$manager" in ""|\#*) continue ;; esac
+    [ -z "$pkg" ] && continue
+    case "$manager" in
+      npm)
+        spec="$pkg"
+        [ -n "${version:-}" ] && spec="$pkg@$version"
+        # node/npm come from the agent's own Guix profile (agent-guix-apply),
+        # loaded by its ~/.profile — never from the human home (ruling
+        # 2026-06-11; a sealed home would refuse it anyway). Fail loud if the
+        # profile is not built yet. Uninstall first to avoid EEXIST on renames.
+        # The Guix node's default npm prefix is its read-only store path, so
+        # global installs go to the agent's own ~/.npm-global (home layout),
+        # and ~/.profile puts its bin on PATH. cwd is /tmp: sudo keeps the
+        # caller's cwd, which a sealed operator home refuses to the agent.
+        run sudo -u "$user" -H sh -c 'grep -q "npm-global/bin" ~/.profile 2>/dev/null || printf "export NPM_CONFIG_PREFIX=\"\$HOME/.npm-global\"\nexport PATH=\"\$HOME/.npm-global/bin:\$PATH\"\n" >> ~/.profile'
+        run sudo -u "$user" -H sh -lc "cd /tmp && command -v npm >/dev/null || { echo '$user: no npm on the agent profile (run agent-guix-apply)' >&2; exit 1; }; mkdir -p \"\$HOME/.npm-global\"; npm uninstall -g '$pkg' 2>/dev/null; npm install -g '$spec'"
+        ;;
+      *)
+        echo "$user: unknown manager '$manager' for $pkg (skip)"
+        ;;
+    esac
+  done < "$manifest"
+done
+
+[ "$APPLY" -eq 0 ] && echo "(dry-run complete — re-run with --apply after approval)"
+exit 0
+#+END_SRC
+
+** Script: agent-provision (orchestrator, dry-run by default)
+
+The single reproducible command. Runs the full chain for one agent (or all) on the
+current host: user+group → tool layout (git/npm/safe.directory) → guix profile →
+agent CLI (latest). SSH keys are NOT included by default (=--with-keys= opts in) — an agent
+works via group permissions, not SSH, so the safe default provisions a fully
+functional agent that has never held a key.
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-provision :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-provision
+# Reproducible per-host agent provisioning. DRY-RUN unless --apply.
+set -euo pipefail
+
+BIN="$HOME/.local/bin"
+APPLY=0
+ONLY=""
+WITH_KEYS=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1 ;;
+    --only) shift; ONLY="${1:-}" ;;
+    --with-keys) WITH_KEYS=1 ;;
+    *) echo "usage: agent-provision [--apply] [--only TOOL[,TOOL...]] [--with-keys]"; exit 1 ;;
+  esac
+  shift
+done
+
+flag() { [ "$APPLY" -eq 1 ] && echo "--apply" || true; }
+only_args() { [ -n "$ONLY" ] && printf '%s %s' "--only" "$ONLY" || true; }
+
+echo "=== agent-provision on $(hostname) (apply=$APPLY only=${ONLY:-all} keys=$WITH_KEYS) ==="
+echo "--- 1/5 users + cortex group ---"
+"$BIN/agent-users-bootstrap" $(flag) $(only_args)
+echo "--- 2/5 tool layout (git/npm/safe.directory) ---"
+"$BIN/agent-tool-bootstrap" $(flag) $(only_args)
+echo "--- 3/5 guix profile (node/npm) ---"
+"$BIN/agent-guix-apply" $(flag) $(only_args)
+echo "--- 4/5 agent CLI (latest) ---"
+"$BIN/agent-cli-install" $(flag) $(only_args)
+if [ "$WITH_KEYS" -eq 1 ]; then
+  echo "--- 5/5 ssh keypair (pubkey export only) ---"
+  "$BIN/agent-key-bootstrap" $(flag) $(only_args)
+else
+  echo "--- 5/5 ssh keys SKIPPED (use --with-keys) ---"
+fi
+
+echo "=== provision pass complete (apply=$APPLY) ==="
+echo "NFS note: if this host SERVES NFS, flush after user/group changes:"
+echo "  sudo exportfs -f && echo 1 | sudo tee /proc/net/rpc/auth.unix.gid/flush"
+if [ "$APPLY" -eq 0 ]; then echo "(dry-run — re-run with --apply after review)"; fi
+exit 0
+#+END_SRC
+
+** Script: agent-fleet-check (read-only unless --provision --apply)
+
+The fleet-wide answer to "does every machine carry the same agent users at the
+same uids?". It reads the two ssv files above, probes each fleet host from its
+own vantage (locally for this host, over public-key-only SSH for the rest), and
+reports per host: the =cortex= gid, the operator's =cortex= membership, and every
+=provision yes= agent's uid, primary gid and =cortex= membership. A uid held by a
+different name is a COLLISION and is never auto-fixed.
+
+=--provision= turns the drift into the fix: on each drifting host it runs that
+host's own =agent-users-bootstrap --only <missing>= — dry-run, unless
+=--apply= is also given (which, per the rollout law, needs the operator's word).
+Collisions and unreachable hosts are reported, never provisioned. Toolchains,
+keys, logins and home sealing stay per-host steps (=agent-provision=, sealing
+recipe above).
+
+Exit: 0 all hosts conform, 1 drift or collision, 2 a host was unreachable.
+
+#+BEGIN_SRC bash :tangle all/.local/bin/agent-fleet-check :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/agent-fleet-check
+# Probe every fleet host for canonical agent users. Read-only by default.
+set -euo pipefail
+
+CONF="${AGENT_CLI_CONF:-$HOME/.config/agent-cli}"
+UIDS="$CONF/uids.ssv"
+FLEET="$CONF/fleet.ssv"
+GROUPS_FILE="$CONF/groups.ssv"
+CORTEX_GID=2000
+OPERATOR="$(id -un)"
+PROVISION=0
+APPLY=0
+HOSTS_ONLY=""
+
+usage() {
+  cat <<'EOF'
+Usage: agent-fleet-check [--host ALIAS[,ALIAS...]] [--provision [--apply]]
+  (no flag)    report agent-user conformance on every fleet host; change nothing
+  --host       limit to these fleet aliases
+  --provision  on drifting hosts, run that host's agent-users-bootstrap for the
+               missing agents (dry-run)
+  --apply      with --provision: create them (needs the operator's word)
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --host) shift; HOSTS_ONLY="${1:-}" ;;
+    --provision) PROVISION=1 ;;
+    --apply) APPLY=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+[ "$APPLY" -eq 1 ] && [ "$PROVISION" -eq 0 ] && { echo "--apply needs --provision" >&2; exit 2; }
+for f in "$UIDS" "$FLEET"; do
+  [ -r "$f" ] || { echo "FATAL: missing $f (loom stow first)" >&2; exit 2; }
+done
+
+# "tool:uid" pairs for every agent provisioned on the mesh.
+ALL_EXPECT="$(awk '$1 !~ /^#/ && $3 == "yes" {printf "%s:%s ", $1, $2}' "$UIDS")"
+# "@group:gid:tool+tool" per clearance group (optional file).
+if [ -r "$GROUPS_FILE" ]; then
+  ALL_EXPECT="$ALL_EXPECT$(awk '$1 !~ /^#/ && NF >= 3 {gsub(",", "+", $3); printf "@%s:%s:%s ", $1, $2, $3}' "$GROUPS_FILE")"
+fi
+
+# The expectations for one host: fleet.ssv's agents column (=all= or a comma
+# list) narrows the agents, and a clearance group applies only where one of
+# its cleared tools is carried.
+host_expect() {
+  local carried="$1" pair tool cleared t out=""
+  case "$carried" in all|-|"") printf '%s' "$ALL_EXPECT"; return ;; esac
+  for pair in $ALL_EXPECT; do
+    case "$pair" in
+      @*)
+        cleared="${pair##*:}"
+        for t in ${cleared//+/ }; do
+          case ",$carried," in *",$t,"*) out="$out$pair "; break ;; esac
+        done ;;
+      *)
+        tool="${pair%%:*}"
+        case ",$carried," in *",$tool,"*) out="$out$pair " ;; esac ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Runs on the target host. Args: operator cortex_gid tool:uid...
+# Prints one verdict line per check: OK|DRIFT|MISSING|COLLISION <subject> <detail>.
+read -r -d '' PROBE <<'EOF' || true
+op="$1"; cg="$2"; shift 2
+g="$(getent group cortex || true)"
+if [ -z "$g" ]; then
+  owner="$(getent group "$cg" | cut -d: -f1)"
+  if [ -n "$owner" ]; then echo "COLLISION cortex gid $cg held by group $owner"
+  else echo "MISSING cortex group"; fi
+else
+  have="$(printf '%s' "$g" | cut -d: -f3)"
+  [ "$have" = "$cg" ] && echo "OK cortex gid $cg" || echo "DRIFT cortex gid $have (canon $cg)"
+fi
+if id -nG "$op" 2>/dev/null | tr ' ' '\n' | grep -qx cortex; then echo "OK $op in cortex"
+else echo "DRIFT $op not in cortex"; fi
+for pair in "$@"; do
+  case "$pair" in
+    @*)
+      spec="${pair#@}"; grp="${spec%%:*}"; rest="${spec#*:}"; gid="${rest%%:*}"; cleared="+${rest#*:}+"
+      ent="$(getent group "$grp" || true)"
+      if [ -z "$ent" ]; then
+        owner="$(getent group "$gid" | cut -d: -f1)"
+        [ -n "$owner" ] && echo "COLLISION $grp gid $gid held by group $owner" || echo "MISSING $grp group"
+        continue
+      fi
+      [ "$(printf '%s' "$ent" | cut -d: -f3)" = "$gid" ] || { echo "DRIFT $grp gid $(printf '%s' "$ent" | cut -d: -f3) (canon $gid)"; continue; }
+      id -nG "$op" | tr ' ' '\n' | grep -qx "$grp" && echo "OK $op in $grp" || echo "DRIFT $op not in $grp"
+      for u in $(getent passwd | cut -d: -f1 | grep '^agent-'); do
+        t="${u#agent-}"; inside=no
+        id -nG "$u" | tr ' ' '\n' | grep -qx "$grp" && inside=yes
+        case "$cleared" in
+          *"+$t+"*) [ "$inside" = yes ] && echo "OK $u in $grp" || echo "DRIFT $u not in $grp" ;;
+          *) [ "$inside" = yes ] && echo "BREACH $u in $grp (not cleared)" || echo "OK $u kept out of $grp" ;;
+        esac
+      done
+      continue ;;
+  esac
+  tool="${pair%%:*}"; uid="${pair##*:}"; u="agent-$tool"
+  if ent="$(getent passwd "$u")"; then
+    hu="$(printf '%s' "$ent" | cut -d: -f3)"; hg="$(printf '%s' "$ent" | cut -d: -f4)"
+    bad=""
+    [ "$hu" = "$uid" ] || bad="$bad uid=$hu(canon $uid)"
+    [ "$hg" = "$uid" ] || bad="$bad gid=$hg(canon $uid)"
+    id -nG "$u" | tr ' ' '\n' | grep -qx cortex || bad="$bad not-in-cortex"
+    [ -z "$bad" ] && echo "OK $u uid $uid" || echo "DRIFT $u$bad"
+  else
+    pu="$(getent passwd "$uid" | cut -d: -f1)"; pg="$(getent group "$uid" | cut -d: -f1)"
+    if [ -n "$pu$pg" ]; then echo "COLLISION $u uid/gid $uid held by ${pu:-?}/${pg:-?}"
+    else echo "MISSING $u"; fi
+  fi
+done
+EOF
+
+SSH=(/usr/bin/ssh -o BatchMode=yes -o PasswordAuthentication=no
+     -o KbdInteractiveAuthentication=no -o PreferredAuthentications=publickey
+     -o ConnectTimeout=10 -o ConnectionAttempts=1)
+LOCAL="$(hostname)"
+
+rc=0
+# The fleet list rides on fd 3: ssh inherits stdin and would swallow it.
+while read -r alias hn _reach carried _rest <&3; do
+  case "$alias" in ""|\#*) continue ;; esac
+  if [ -n "$HOSTS_ONLY" ]; then
+    case ",$HOSTS_ONLY," in *",$alias,"*) ;; *) continue ;; esac
+  fi
+  echo "== $alias ($hn)"
+  EXPECT="$(host_expect "${carried:-all}")"
+  if [ "$hn" = "$LOCAL" ]; then
+    out="$(bash -c "$PROBE" probe "$OPERATOR" "$CORTEX_GID" $EXPECT)" || true
+  else
+    got="$("${SSH[@]}" "$alias" hostname </dev/null 2>/dev/null)" || {
+      echo "UNREACHABLE $alias"; [ "$rc" -lt 2 ] && rc=2; continue; }
+    if [ "$got" != "$hn" ]; then
+      echo "UNREACHABLE $alias answers as '$got', fleet map says '$hn'"; [ "$rc" -lt 2 ] && rc=2; continue
+    fi
+    out="$("${SSH[@]}" "$alias" bash -s -- "$OPERATOR" "$CORTEX_GID" $EXPECT <<<"$PROBE" 2>/dev/null)" || true
+  fi
+  if [ -z "$out" ]; then
+    echo "UNREACHABLE $alias: probe returned nothing"; [ "$rc" -lt 2 ] && rc=2; continue
+  fi
+  printf '%s\n' "$out" | sed 's/^/  /'
+  if printf '%s\n' "$out" | grep -qv '^OK '; then
+    [ "$rc" -lt 1 ] && rc=1
+    missing="$(printf '%s\n' "$out" | awk '$1 == "MISSING" && $2 ~ /^agent-/ {sub(/^agent-/, "", $2); printf "%s%s", sep, $2; sep=","}')"
+    fixable="$(printf '%s\n' "$out" | grep -E '^MISSING [a-z]+ group$|^DRIFT [^ ]+ not in [a-z]+$|^DRIFT agent-[^ ]+ not-in-cortex$' || true)"
+    if [ "$PROVISION" -eq 1 ] && { [ -n "$missing" ] || [ -n "$fixable" ]; }; then
+      cmd=('$HOME/.local/bin/agent-users-bootstrap')
+      [ -n "$missing" ] && cmd+=(--only "$missing")
+      [ "$APPLY" -eq 1 ] && cmd+=(--apply)
+      echo "  -> provision on $alias: agent-users-bootstrap ${cmd[*]:1}"
+      if [ "$hn" = "$LOCAL" ]; then
+        bash -c "${cmd[*]}" | sed 's/^/     /'
+      else
+        "${SSH[@]}" "$alias" "${cmd[*]}" </dev/null 2>&1 | grep -v 'ssh-agent' | sed 's/^/     /'
+      fi
+    fi
+  fi
+done 3< "$FLEET"
+
+case "$rc" in
+  0) echo "fleet conforms to the canonical agent map" ;;
+  1) echo "fleet drift found (see above)" ;;
+  2) echo "fleet check incomplete: a host was unreachable" ;;
+esac
+exit "$rc"
+#+END_SRC
+
+The tests drive both scripts against a scratch map whose only fleet host is the
+local one, so they need no SSH and change nothing: a missing agent, a uid
+collision (an agent mapped onto the operator's own uid), the refusal of an
+unknown =--only= tool, and the dry-run default.
+
+#+BEGIN_SRC python :tangle linux/.local/share/dotcortex/tests/test-agent-fleet.py :shebang "#!/usr/bin/env python3" :comments no :noweb no
+from __future__ import annotations
+
+import os
+import socket
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+CHECK = ROOT / "all/.local/bin/agent-fleet-check"
+USERS = ROOT / "all/.local/bin/agent-users-bootstrap"
+
+
+def free_uid() -> int:
+    """A uid/gid in the reserved band that nothing on this host holds."""
+    for uid in range(2090, 2100):
+        taken = subprocess.run(["getent", "passwd", str(uid)], capture_output=True).returncode == 0
+        taken |= subprocess.run(["getent", "group", str(uid)], capture_output=True).returncode == 0
+        if not taken:
+            return uid
+    raise unittest.SkipTest("no free test uid in 2090-2099")
+
+
+class AgentFleetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        conf = Path(self.tmp.name)
+        (conf / "fleet.ssv").write_text(f"# alias hostname\nself {socket.gethostname()}\n")
+        (conf / "uids.ssv").write_text(
+            "# tool uid provision\n"
+            f"ghost {free_uid()} yes\n"
+            f"clash {os.getuid()} yes\n"
+            "parked 2010 no\n"
+        )
+        self.env = dict(os.environ, AGENT_CLI_CONF=str(conf), AGENT_UIDS_FILE=str(conf / "uids.ssv"))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def run_tool(self, tool: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(tool), *args], env=self.env, text=True, capture_output=True, check=False)
+
+    def test_reports_missing_and_collision(self) -> None:
+        out = self.run_tool(CHECK)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("MISSING agent-ghost", out.stdout)
+        self.assertIn("COLLISION agent-clash", out.stdout)
+        self.assertNotIn("agent-parked", out.stdout, "provision=no agents are not gaps")
+
+    def test_agents_column_narrows_the_host(self) -> None:
+        conf = Path(self.env["AGENT_CLI_CONF"])
+        (conf / "fleet.ssv").write_text(f"# alias hostname reach agents warm\nself {socket.gethostname()} - ghost -\n")
+        out = self.run_tool(CHECK)
+        self.assertIn("MISSING agent-ghost", out.stdout)
+        self.assertNotIn("agent-clash", out.stdout, "an agent the host does not carry is not expected there")
+
+    def test_apply_needs_provision(self) -> None:
+        self.assertEqual(self.run_tool(CHECK, "--apply").returncode, 2)
+
+    def test_users_bootstrap_dry_run_and_guards(self) -> None:
+        dry = self.run_tool(USERS, "--only", "ghost,clash")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("DRY-RUN: sudo useradd --uid", dry.stdout)
+        self.assertIn("COLLISION", dry.stdout)
+        self.assertNotIn("+ sudo", dry.stdout, "dry-run must not execute")
+        bad = self.run_tool(USERS, "--only", "nosuch")
+        self.assertEqual(bad.returncode, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+** First rollout plan (no action without approval)
+
+Target: *T480* (Gold — freshest install, lowest blast radius, no persistent agents,
+no docker). First agent: *agent-opencode* (npm-installable under the agent home,
+self-contained auth, and breakage does not block daily rescue work the way codex or
+claude would).
+
+1. =git pull --ff-only= + =loom stow:t480= on T480, then =agent-inventory-report=
+   there — baseline snapshot into the private topography doc.
+2. *Approval gate (Stage 2):* =agent-users-bootstrap --only opencode= dry-run output
+   reviewed → human word → =--apply=.
+3. *Approval gate (Stage 3):* =agent-key-bootstrap --only opencode= dry-run → word →
+   =--apply=; review exported pubkey. No installation anywhere yet.
+4. =agent-tool-bootstrap --only opencode --apply= (same-session approval), then
+   install the OpenCode CLI under the agent home via its npm prefix and log in as
+   the agent's own identity.
+5. Test: =sudo -u agent-opencode -i= session runs OpenCode against a scratch repo;
+   confirm it cannot read =/home/metsatron=.
+6. Record results + repo-access decision here and in the private topography doc
+   before any second agent or second host.
+
+*** First rollout — results (2026-06-11)
+Steps 1–3 + tool layout COMPLETE on T480: =agent-opencode= exists (uid 1001 at the time — moved to canonical 2005 the same day, see the uid map; own
+group, locked password, 750 home), ed25519 key generated in place (pubkey exported
+to =~/.local/state/agent-pubkeys/= for review — installed nowhere), npm/pipx/local-bin
+layout written. *Isolation verified*: the agent cannot list =/home/metsatron=, cannot
+read the human SSH key or =~/.env=, and has no sudo; its own home is fully functional.
+- Gotcha fixed: =useradd --comment= rejects colons (GECOS delimiter) — script corrected.
+- T480 reality: no system node/npm — the human's lives in a per-user Guix profile,
+  which the agent (correctly) cannot see. Next step for the CLI install is therefore
+  a *per-agent Guix profile* — pending, alongside the repo-access decision. No
+  package was shortcut into place from the human's toolchain.
+- *Ruling (Mètsàtron, 2026-06-11): all Guix installs go through loom* — per-agent
+  profiles included. The loom verbs need an agent-profile lane (manifest-driven,
+  not raw =guix install=) before the CLI install proceeds. Design this as a loom
+  extension, not an ad-hoc command.

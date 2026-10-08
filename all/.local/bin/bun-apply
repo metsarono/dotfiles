@@ -5,6 +5,59 @@
 # ~/DotCortex/all/.local/bin/bun-apply
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+Usage: bun-apply [-h|--help]
+
+Reconcile the DotCortex Bun global-package and source-build manifests.
+Operational arguments are not accepted; configure an apply with environment variables.
+
+Options:
+  -h, --help              Show this help and exit before any apply or build work.
+
+Environment:
+  ENFORCE=0|1             Reconcile packages absent from the manifest (default: 1).
+  UNINSTALL=0|1           Remove extras when ENFORCE=1 (default: 1).
+  UPDATE=0|1              Update installed globals and source checkouts (default: 0).
+  BUN_BUILD_ONLY=NAME     Skip global add/remove work and run only the named build row.
+  DOTCORTEX_ROOT=PATH     Root for relative build paths and gate fallback
+                          (default: $HOME/DotCortex).
+  PROVISION_APPLY=1       Permit additive installs on a gated host; never removals.
+  BUN_INSTALL=PATH        Bun installation root (default: $HOME/.bun).
+  BUN_GLOBAL_DIR=PATH     Installed-global tree scanned by the Bun runner
+                          (default: $BUN_INSTALL/install/global).
+  BUN_GLOBAL_BIN_DIR=PATH Bun global executable directory exported by the runner
+                          (default: $BUN_INSTALL/bin).
+  BUN_BUILD_MANIFEST=PATH Source-build manifest (default:
+                          $DOTCORTEX_ROOT/all/.local/share/dotcortex/manifests/bun/build.ssv).
+  BUN_BUILD_STATE_ROOT=PATH
+                          Source-build fingerprint state (default:
+                          ${XDG_STATE_HOME:-$HOME/.local/state}/dotcortex/bun-build).
+  DOTCORTEX_BUN_ENV=PATH  Command wrapper used by source-build steps
+                          (default: $HOME/.local/bin/dotcortex-bun-env).
+  XDG_STATE_HOME=PATH     State base when BUN_BUILD_STATE_ROOT is unset.
+EOF
+}
+
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    -h|--help)
+      if [ "$#" -eq 1 ]; then
+        usage
+        exit 0
+      fi
+      echo "bun-apply: $1 does not accept additional arguments" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      echo "bun-apply: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
+
 MAN="$HOME/DotCortex/all/.local/share/dotcortex/manifests/bun/global.ssv"
 RUN="$HOME/.local/bin/dotcortex-bun-env"
 
@@ -153,6 +206,8 @@ if [ -x "$HOME/.local/bin/dotcortex-bun-build-lib" ]; then
     state_dir="$(bun_build_state_dir "$name")"
     install_stamp="$state_dir/install.fp"
     build_stamp="$state_dir/build.fp"
+
+    bun_build_apply_extra_guards "$name" "$root_abs" "$ref" "$extra"
 
     install_effective="$(bun_build_effective_install_cmd "$root_abs" "$workdir_abs" "$install_cmd")"
     build_effective="$(bun_build_effective_build_cmd "$build_cmd")"

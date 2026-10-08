@@ -1,57 +1,270 @@
 #!/usr/bin/env bash
-# Nanobot Telegram runtime (Linux, uv-managed)
-
-# Nanobot is a fleet bot, not a user-site Python library.  Keep its dependency
-# graph isolated inside the HelmCortex Nano workspace and pin the upstream release
-# here.  Re-running =nanobot-apply= upgrades or repairs the runtime to the declared
-# version without touching private credentials, OAuth state, sessions, or memory.
-
-
-# [[file:../../../package-pip.org::*Nanobot Telegram runtime (Linux, uv-managed)][Nanobot Telegram runtime (Linux, uv-managed):1]]
+# [[file:../../../package-pip.org::*Nano Telegram idle-prompt admission][Nano Telegram idle-prompt admission:3]]
 # ~/DotCortex/linux/.local/bin/nanobot-apply
 set -euo pipefail
-
-NANOBOT_VERSION="0.3.5"
-WORKSPACE="${NANOBOT_WORKSPACE:-$HOME/HelmCortex/FORGE/brain/nanobot}"
-VENV="${NANOBOT_VENV:-$WORKSPACE/.venv}"
-CONFIG_DIR="${NANOBOT_CONFIG_DIR:-$HOME/.config/nanobot-telegram}"
-CONFIG="${NANOBOT_CONFIG:-$CONFIG_DIR/config.json}"
-TEMPLATE="${NANOBOT_CONFIG_TEMPLATE:-$HOME/DotCortex/all/.bots/templates/nanobot-config.json}"
-
-export PATH="$HOME/.local/bin:$PATH"
+case "${1:-}" in
+    -h|--help)
+        echo 'Usage: nanobot-apply [--check]'
+        echo 'Preflight pinned source and all seams before repair; --check reads local drift only.'
+        echo 'NANOBOT_SOURCE_ARCHIVE supplies the pinned source archive for offline apply.'
+        exit 0 ;;
+    ''|--check) [ "$#" -le 1 ] || exit 2 ;;
+    *) echo 'nanobot-apply: unknown argument' >&2; exit 2 ;;
+esac
+export PYTHONDONTWRITEBYTECODE=1
 export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
+export PATH="$HOME/.local/bin:$PATH"
+python3 - "${1:-}" <<'PY'
+import ast
+from email.parser import BytesParser
+import hashlib
+import io
+import json
+import math
+import os
+from pathlib import Path, PurePosixPath
+import shutil
+import subprocess
+import sys
+import tarfile
+import tomllib
+import tempfile
+from urllib.request import urlopen
 
-command -v uv >/dev/null 2>&1 || {
-    echo "nanobot-apply: uv is missing; run loom pip:apply first" >&2
-    exit 1
-}
-[ -r "$TEMPLATE" ] || {
-    echo "nanobot-apply: config template is missing: $TEMPLATE" >&2
-    exit 1
-}
+VERSION = "0.3.5"
+DIGEST = "5d5d92ba163937421c99404ac026dc4723d3b23b83c13a0be3111237401a1dc0"
+URL = "https://files.pythonhosted.org/packages/20/9c/398b2bb63ceee937b496e4b9a26bc7ddc9a2d25d66dc6f7728fca18f80be/nanobot_ai-0.3.5.tar.gz"
+home = Path.home()
+workspace = Path(os.environ.get("NANOBOT_WORKSPACE", str(home / "HelmCortex/FORGE/brain/nanobot"))).expanduser()
+venv = Path(os.environ.get("NANOBOT_VENV", str(workspace / ".venv"))).expanduser()
+config_dir = Path(os.environ.get("NANOBOT_CONFIG_DIR", str(home / ".config/nanobot-telegram"))).expanduser()
+config = Path(os.environ.get("NANOBOT_CONFIG", str(config_dir / "config.json"))).expanduser()
+template = Path(os.environ.get("NANOBOT_CONFIG_TEMPLATE", str(home / "DotCortex/all/.bots/templates/nanobot-config.json"))).expanduser()
+patch_root = home / "DotCortex/all/.bots/patches"
+patches = [Path(os.environ.get(key, str(patch_root / name))).expanduser() for key, name in (
+    ("NANOBOT_CACHE_POLICY_PATCH", "nanobot-cache-policy.patch"),
+    ("NANOBOT_VOICE_REPLY_PATCH", "nanobot-voice-reply.patch"),
+    ("NANOBOT_TOOL_PATCH", "nanobot-tool-isolation.patch"),
+    ("NANOBOT_IDLE_PROMPT_PATCH", "nanobot-idle-prompt.patch"),
+)]
+seam = Path(os.environ.get("NANOBOT_SEARCH_ISOLATION", str(patch_root / "nanobot-search-isolation.py"))).expanduser()
+stamp = venv / ".dotcortex-runtime-patches.sha256"
+managed = ("agent/autocompact.py", "channels/telegram/runtime.py", "agent/tools/execution.py",
+           "agent/tools/registry.py", "agent/loop.py", "cli/gateway_runtime.py",
+           "agent/tools/search_isolation.py")
 
-mkdir -p "$WORKSPACE" "$CONFIG_DIR"
-chmod 700 "$CONFIG_DIR"
+def fail(message):
+    raise ValueError(message)
 
-if [ ! -x "$VENV/bin/python" ]; then
-    uv venv --python 3.13 "$VENV"
-fi
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
 
-uv pip install --upgrade --python "$VENV/bin/python" \
-    "nanobot-ai==$NANOBOT_VERSION" \
-    "python-telegram-bot[socks,webhooks]>=22.6,<23.0" \
-    "python-socks[asyncio]>=2.8,<3.0"
+def object_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            fail("duplicate JSON key")
+        result[key] = value
+    return result
 
-if [ ! -e "$CONFIG" ]; then
-    install -m 600 "$TEMPLATE" "$CONFIG"
-    echo "nanobot-apply: installed non-secret config template at $CONFIG"
-else
-    chmod 600 "$CONFIG"
-fi
+def read_object(data):
+    result = json.loads(data, object_pairs_hook=object_pairs,
+                        parse_float=lambda value: float(value) if math.isfinite(float(value)) else fail("nonfinite JSON number"),
+                        parse_constant=lambda value: fail("nonfinite JSON value"))
+    if not isinstance(result, dict):
+        fail("config/manifest must be a JSON object")
+    return result
 
-"$VENV/bin/nanobot" onboard --refresh --config "$CONFIG" --workspace "$WORKSPACE"
-"$VENV/bin/nanobot" --version
-"$VENV/bin/python" -c 'import telegram; print("telegram adapter", telegram.__version__)'
+def regular(path):
+    if path.is_symlink() or not path.is_file():
+        fail("missing or nonregular input")
+    return path.read_bytes()
 
-echo "nanobot-apply: ready at $VENV (pinned nanobot-ai $NANOBOT_VERSION)"
-# Nanobot Telegram runtime (Linux, uv-managed):1 ends here
+def inputs():
+    return {str(p): digest(regular(p)) for p in [*patches, seam]}
+
+def runtime():
+    python = venv / "bin/python"
+    if not python.is_file():
+        return None, None
+    code = 'import site,importlib.metadata,json; print(json.dumps([site.getsitepackages()[0],importlib.metadata.version("nanobot-ai")]))'
+    result = subprocess.run([str(python), "-c", code], capture_output=True, text=True, check=True)
+    site, version = json.loads(result.stdout)
+    site = Path(site)
+    if not site.is_absolute() or not site.resolve().is_relative_to(venv.resolve()):
+        fail("runtime site-packages escapes venv")
+    return site, version
+
+def checked_files(site, expected):
+    root = site / "nanobot"
+    if root.is_symlink() or not root.resolve().is_relative_to(site.resolve()):
+        fail("runtime package escapes site-packages")
+    for rel, value in expected.items():
+        path = site / "nanobot" / rel
+        if not path.resolve().is_relative_to((site / "nanobot").resolve()) or path.is_symlink():
+            fail("managed runtime path escapes package")
+        if not path.is_file() or digest(path.read_bytes()) != value:
+            return False
+    return True
+
+try:
+    source_hashes = inputs()
+    if stamp.is_symlink():
+        fail("managed manifest must not be a symlink")
+    if sys.argv[1] == "--check":
+        data = read_object(regular(stamp))
+        expected_inputs = {str(i): value for i, value in enumerate(source_hashes.values())}
+        expected_files = data.get("files")
+        if (data.get("format") != "nanobot-seams.v1" or data.get("version") != VERSION
+                or data.get("inputs") != expected_inputs or not isinstance(expected_files, dict)
+                or set(expected_files) != set(managed)
+                or any(not isinstance(h, str) or len(h) != 64
+                       or any(c not in "0123456789abcdef" for c in h) for h in expected_files.values())):
+            fail("stale or invalid managed manifest")
+        site, version = runtime()
+        if version != VERSION or not checked_files(site, expected_files):
+            fail("managed runtime byte drift")
+        read_object(regular(config))
+        print("nanobot: pinned runtime and managed bytes OK")
+        sys.exit(0)
+
+    if not shutil.which("uv") or not shutil.which("git"):
+        fail("uv/git missing; provision through loom first")
+    template_bytes = regular(template)
+    if config.is_symlink() or (config.exists() and not config.is_file()):
+        fail("config must be a regular file")
+    current_bytes = config.read_bytes() if config.exists() else None
+    current = read_object(current_bytes) if current_bytes is not None else {}
+    declared = read_object(template_bytes)
+    # Preserve all existing private values and runtime selections; only fill gaps.
+    def fill(base, defaults):
+        for key, value in defaults.items():
+            if key not in base:
+                base[key] = value
+            elif isinstance(value, dict):
+                if not isinstance(base[key], dict):
+                    fail("managed config object has invalid shape")
+                fill(base[key], value)
+    fill(current, declared)
+    for key in ("agents", "modelPresets", "providers", "channels", "tools", "gateway"):
+        if key in current and not isinstance(current[key], dict):
+            fail("invalid config section shape")
+    defaults = current.setdefault("agents", {}).setdefault("defaults", {})
+    if not isinstance(defaults, dict):
+        fail("invalid agent defaults")
+    defaults["idleCompactAfterMinutes"] = 0
+    interval = declared.get("agents", {}).get("defaults", {}).get("idleCompactCheckIntervalSeconds", 60)
+    if type(interval) is not int or interval <= 0:
+        fail("invalid scanner interval")
+    defaults["idleCompactCheckIntervalSeconds"] = interval
+    presets = current.get("modelPresets", {})
+    if any(not isinstance(value, dict) for value in presets.values()):
+        fail("invalid model preset shape")
+    selected = defaults.get("modelPreset")
+    if selected is not None and (not isinstance(selected, str) or selected not in presets):
+        fail("selected model preset is unresolved")
+    for value in presets.values():
+        if any(key in value and (not isinstance(value[key], str) or not value[key]) for key in ("model", "provider")):
+            fail("invalid model/provider selection")
+    prepared = (json.dumps(current, ensure_ascii=False, indent=2) + "\n").encode()
+    archive_source = os.environ.get("NANOBOT_SOURCE_ARCHIVE")
+    source = Path(archive_source).expanduser() if archive_source else None
+    archive = regular(source) if source is not None else None
+    if archive is None:
+        with urlopen(URL, timeout=30) as response:
+            archive = response.read()
+    if digest(archive) != DIGEST:
+        fail("pinned source digest mismatch")
+    with tempfile.TemporaryDirectory(prefix="nanobot-preflight-") as temporary:
+        stage = Path(temporary)
+        seen = set()
+        prefix = "nanobot_ai-" + VERSION
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            for member in tar.getmembers():
+                path = PurePosixPath(member.name)
+                if (path.is_absolute() or ".." in path.parts or not path.parts
+                        or path.parts[0] != prefix or member.issym() or member.islnk()
+                        or not (member.isdir() or member.isfile()) or member.name in seen):
+                    fail("unsafe source archive path/type")
+                seen.add(member.name)
+                target = stage.joinpath(*path.parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(tar.extractfile(member).read())
+        release = stage / prefix
+        metadata = BytesParser().parsebytes((release / "PKG-INFO").read_bytes())
+        if metadata["Name"] != "nanobot-ai" or metadata["Version"] != VERSION:
+            fail("wrong pristine release identity")
+        package = release / "nanobot"
+        project = tomllib.loads((release / "pyproject.toml").read_text())["project"]
+        if project.get("name") != "nanobot-ai" or project.get("version") != VERSION or not (package / "__init__.py").is_file():
+            fail("wrong pristine package identity")
+        pristine = {rel: digest((package / rel).read_bytes()) for rel in managed[:-1]}
+        for index, patch in enumerate(patches):
+            payload = regular(patch)
+            for line in payload.decode().splitlines():
+                if line.startswith(("--- ", "+++ ")):
+                    if line[4:] not in {side + "/nanobot/" + rel for side in ("a", "b") for rel in managed[:-1]}:
+                        fail("patch target outside managed files")
+            staged_patch = stage / ("patch-" + str(index))
+            staged_patch.write_bytes(payload)
+            subprocess.run(["git", "apply", "--check", str(staged_patch)], cwd=release, check=True, capture_output=True)
+            subprocess.run(["git", "apply", str(staged_patch)], cwd=release, check=True, capture_output=True)
+        (package / managed[-1]).write_bytes(regular(seam))
+        for path in package.rglob("*.py"):
+            compile(ast.parse(path.read_bytes(), filename=str(path)), str(path), "exec")
+        expected = {rel: digest((package / rel).read_bytes()) for rel in managed}
+        site, version = runtime()
+        matching = version == VERSION and checked_files(site, expected)
+        # Last read-only gate: originals must still match the validated staged inputs.
+        if (inputs() != source_hashes or regular(template) != template_bytes
+                or (config.read_bytes() if config.exists() else None) != current_bytes
+                or (source is not None and digest(regular(source)) != DIGEST)):
+            fail("inputs changed after preflight")
+        print("nanobot-apply: complete pristine series and config preflight passed")
+        # LIVE MUTATION GATE. No workspace/config/venv/mode/stamp changes above.
+        if not matching:
+            workspace.mkdir(parents=True, exist_ok=True)
+            if not (venv / "bin/python").is_file():
+                subprocess.run(["uv", "venv", "--python", "3.13", str(venv)], check=True)
+            subprocess.run(["uv", "pip", "install", "--upgrade", "--reinstall-package", "nanobot-ai",
+                            "--python", str(venv / "bin/python"), "nanobot-ai==" + VERSION,
+                            "python-telegram-bot[socks,webhooks]>=22.6,<23.0",
+                            "python-socks[asyncio]>=2.8,<3.0"], check=True)
+            site, version = runtime()
+            if version != VERSION or not checked_files(site, pristine):
+                fail("installer did not produce pinned pristine managed bytes")
+            for rel in managed:
+                target = site / "nanobot" / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((package / rel).read_bytes())
+                target.chmod(0o644)
+        if not checked_files(site, expected):
+            fail("installed managed bytes differ from staged series")
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.parent.chmod(0o700)
+        if prepared != current_bytes:
+            with tempfile.NamedTemporaryFile(dir=config.parent, prefix=".config-", delete=False) as fh:
+                fh.write(prepared)
+                fh.flush()
+                os.fsync(fh.fileno())
+                temporary_config = Path(fh.name)
+            temporary_config.chmod(0o600)
+            os.replace(temporary_config, config)
+        else:
+            config.chmod(0o600)
+        manifest = dict(format="nanobot-seams.v1", version=VERSION, files=expected,
+                        inputs={str(i): value for i, value in enumerate(source_hashes.values())})
+        stamp.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+        stamp.chmod(0o600)
+        # Native profiles, memories, sessions and cron are Dream/operator-owned.
+        # Do not onboard/refresh or initialize a workspace git store here.
+        print("nanobot-apply: pinned runtime and managed seams ready; native state preserved")
+except Exception as exc:
+    message = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+    print("nanobot-apply: failed: " + message, file=sys.stderr)
+    sys.exit(1)
+PY
+# Nano Telegram idle-prompt admission:3 ends here

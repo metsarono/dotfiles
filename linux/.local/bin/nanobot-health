@@ -1,25 +1,15 @@
 #!/usr/bin/env bash
-# [[file:../../../package-pip.org::*Nanobot Telegram runtime (Linux, uv-managed)][Nanobot Telegram runtime (Linux, uv-managed):2]]
+# [[file:../../../package-pip.org::*Nano Telegram idle-prompt admission][Nano Telegram idle-prompt admission:4]]
 # ~/DotCortex/linux/.local/bin/nanobot-health
 set -euo pipefail
-
-WORKSPACE="${NANOBOT_WORKSPACE:-$HOME/HelmCortex/FORGE/brain/nanobot}"
-VENV="${NANOBOT_VENV:-$WORKSPACE/.venv}"
-CONFIG_DIR="${NANOBOT_CONFIG_DIR:-$HOME/.config/nanobot-telegram}"
-CONFIG="${NANOBOT_CONFIG:-$CONFIG_DIR/config.json}"
-
-if [ ! -x "$VENV/bin/nanobot" ]; then
-    echo "nanobot: MISSING ($VENV); run loom nanobot:apply"
-    exit 1
-fi
-
-"$VENV/bin/nanobot" --version
-"$VENV/bin/python" -c 'import telegram; print("telegram adapter", telegram.__version__)'
-printf 'workspace: %s\nconfig: %s\n' "$WORKSPACE" "$CONFIG"
-if [ -r "$CONFIG" ]; then
-    stat -c 'config mode: %a' "$CONFIG"
-else
-    echo "config: MISSING"
-    exit 1
-fi
-# Nanobot Telegram runtime (Linux, uv-managed):2 ends here
+case "${1:-}" in
+    -h|--help)
+        echo 'Usage: nanobot-health'
+        echo 'Check pinned runtime and managed-file drift locally without downloads or installs.'
+        exit 0 ;;
+    '') [ "$#" -eq 0 ] || exit 2 ;;
+    *) echo 'nanobot-health: unknown argument' >&2; exit 2 ;;
+esac
+script_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+exec "$script_dir/nanobot-apply" --check
+# Nano Telegram idle-prompt admission:4 ends here

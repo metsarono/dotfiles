@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -266,6 +267,55 @@ class ApplyTests(unittest.TestCase):
             self.assertIn("upstream drift", result.stderr)
             self.assertEqual(snapshot(site), before)
             print("DRIFT REFUSAL:\n" + result.stdout + result.stderr)
+
+    def test_ordered_series_all_valid_hook_states(self):
+        for mirror, compact, stage in itertools.product((False, True), (False, True), range(3)):
+            with self.subTest(mirror=mirror, compact=compact, stage=stage), tempfile.TemporaryDirectory() as root:
+                site = Path(root)
+                shutil.copytree(SITE / "ductor_bot", site / "ductor_bot",
+                                ignore=shutil.ignore_patterns("__pycache__"))
+                patches = []
+                if not mirror:
+                    patches.append("idle_prompt_telegram.patch")
+                if stage < 2:
+                    patches.append("idle_prompt_api.patch")
+                if stage < 1:
+                    patches.append("busy_state_api.patch")
+                if not compact:
+                    patches.append("idle_compact_lifecycle.patch")
+                for name in patches:
+                    subprocess.run(["patch", "-d", str(site), "-p1", "--fuzz=0",
+                                    "--reverse", "--force", "-s"],
+                                   input=(SEAMS / name).read_bytes(), check=True, capture_output=True)
+                before = snapshot(site)
+                checked = apply(site, "--check")
+                self.assertEqual(checked.returncode, int(bool(patches)), checked.stdout + checked.stderr)
+                self.assertEqual(snapshot(site), before)
+                result = apply(site)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                after = snapshot(site)
+                result = apply(site)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("already applied", result.stdout)
+                self.assertEqual(snapshot(site), after)
+                self.assertEqual(apply(site, "--check").returncode, 0)
+
+    def test_admission_drift_refuses_before_mutation_on_applied_series(self):
+        with tempfile.TemporaryDirectory() as root:
+            site = Path(root)
+            shutil.copytree(SITE / "ductor_bot", site / "ductor_bot",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            target = site / "ductor_bot/api/server.py"
+            needle = "        self._idle_message_handler = None"
+            source = target.read_text()
+            self.assertEqual(source.count(needle), 1)
+            target.write_text(source.replace(needle, needle + "  # fixture upstream drift"))
+            before = snapshot(site)
+            for args in ((), ("--check",)):
+                result = apply(site, *args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("upstream drift", result.stderr)
+                self.assertEqual(snapshot(site), before)
 
     def test_forced_idle_mutant_fails_active_turn_test(self):
         env = dict(os.environ, DUCTOR_BUSY_MUTANT="1", PYTHONDONTWRITEBYTECODE="1")

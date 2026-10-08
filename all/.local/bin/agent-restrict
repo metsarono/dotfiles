@@ -19,7 +19,7 @@
 # until then, the wall is the working tree only.
 
 
-# [[file:../../../agents.org::*Script: agent-restrict (dry-run by default)][Script: agent-restrict (dry-run by default):1]]
+# [[file:../../../agents-users.org::*Script: agent-restrict (dry-run by default)][Script: agent-restrict (dry-run by default):1]]
 # ~/DotCortex/all/.local/bin/agent-restrict
 # Close listed repo paths to a clearance group. DRY-RUN unless --apply.
 set -euo pipefail

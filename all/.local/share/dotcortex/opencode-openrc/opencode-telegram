@@ -1,0 +1,94 @@
+#!/sbin/openrc-run
+# OpenCode Telegram bot (@grinev/opencode-telegram-bot) as an OpenRC service
+# (agents-bots-opencode-openrc.org). Install with opencode-openrc-install;
+# settings in /etc/conf.d/<svc>:
+#   opencode_user        account that runs the bot (required)
+#   opencode_serve_svc   the server's service name (required)
+#   opencode_port        the server's loopback port (required)
+#   opencode_telegram_bin  (default ~/.local/bin/opencode-telegram)
+#   opencode_telegram_home OPENCODE_TELEGRAM_HOME: .env, settings.json, logs/
+#                          (default ~/.config/opencode-telegram-bot)
+#   opencode_auth_file   shared with the server (default ~/.config/opencode/server-auth.env)
+#   opencode_path_add    extra PATH entries appended after ~/.local/bin
+#   opencode_patch_apply HelmCortex's opencode-telegram-patch-apply; when set,
+#                        the seams are applied as the user before every start
+#                        and a refusal refuses the start (unset: no patching)
+#   opencode_patch_root  HELMCORTEX_ROOT the guard reads its patches from
+#   opencode_description
+
+user_home="$(getent passwd "${opencode_user}" | cut -d: -f6)"
+: "${opencode_telegram_bin:=${user_home}/.local/bin/opencode-telegram}"
+: "${opencode_telegram_home:=${user_home}/.config/opencode-telegram-bot}"
+: "${opencode_auth_file:=${user_home}/.config/opencode/server-auth.env}"
+
+name="${RC_SVCNAME}"
+description="${opencode_description:-OpenCode Telegram bot (${opencode_user})}"
+command="${opencode_telegram_bin}"
+command_args="start --mode installed"
+command_user="${opencode_user}:${opencode_user}"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+directory="${user_home}"
+
+export HOME="${user_home}"
+# Node comes from the agent's own profile (no system node on Honey).
+export PATH="${PATH}:${user_home}/.local/bin${opencode_path_add:+:${opencode_path_add}}"
+# Pin the bot's app home regardless of cwd/XDG.
+export OPENCODE_TELEGRAM_HOME="${opencode_telegram_home}"
+
+depend() {
+    use net dns
+    need "${opencode_serve_svc}"
+    after net "${opencode_serve_svc}"
+}
+
+# Parse (never source) the auth file; process env overrides the bot's .env.
+load_server_auth() {
+    if [ ! -r "$opencode_auth_file" ]; then
+        eerror "missing $opencode_auth_file - bot cannot authenticate to opencode serve"
+        return 1
+    fi
+    OPENCODE_SERVER_USERNAME=$(sed -n 's/^OPENCODE_SERVER_USERNAME=//p' "$opencode_auth_file" | tail -n 1)
+    OPENCODE_SERVER_PASSWORD=$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' "$opencode_auth_file" | tail -n 1)
+    if [ -z "$OPENCODE_SERVER_PASSWORD" ]; then
+        eerror "OPENCODE_SERVER_PASSWORD empty in $opencode_auth_file"
+        return 1
+    fi
+    export OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-opencode}"
+    export OPENCODE_SERVER_PASSWORD
+}
+
+start_pre() {
+    [ -n "${opencode_user}" ] && [ -n "${user_home}" ] && [ -n "${opencode_port}" ] && [ -n "${opencode_serve_svc}" ] \
+        || { eerror "opencode_user, opencode_serve_svc and opencode_port must be set in /etc/conf.d/${RC_SVCNAME}"; return 1; }
+    load_server_auth || return 1
+    checkpath -f -m 0640 -o "${opencode_user}:${opencode_user}" "${output_log}"
+    apply_patches || return 1
+    # `need` orders starts but does not wait for the socket; wait up to 30s.
+    # (openrc-run scripts run under dash, so no /dev/tcp fallback.)
+    _i=0
+    while [ "$_i" -lt 30 ]; do
+        /bin/nc -z -w 1 127.0.0.1 "${opencode_port}" 2>/dev/null && return 0
+        _i=$((_i + 1))
+        sleep 1
+    done
+    ewarn "${opencode_serve_svc} not answering on loopback port ${opencode_port} after 30s; starting anyway"
+}
+
+# The guard, as the bot's user so patched files keep their owner. Its package is
+# the one the launcher belongs to: the prefix is two levels above the bin.
+apply_patches() {
+    [ -n "${opencode_patch_apply}" ] || return 0
+    if [ ! -x "${opencode_patch_apply}" ] || [ ! -d "${opencode_patch_root}" ]; then
+        eerror "opencode_patch_apply or opencode_patch_root missing: ${opencode_patch_apply} ${opencode_patch_root}"
+        return 1
+    fi
+    setpriv --reuid="${opencode_user}" --regid="${opencode_user}" --init-groups \
+        env -i HOME="${user_home}" PATH="${PATH}" HELMCORTEX_ROOT="${opencode_patch_root}" \
+        NPM_CONFIG_PREFIX="$(dirname "$(dirname "${opencode_telegram_bin}")")" \
+        OPENCODE_TELEGRAM_BIN="${opencode_telegram_bin}" \
+        "${opencode_patch_apply}" >>"${output_log}" 2>&1 \
+        || { eerror "opencode-telegram-patch-apply refused; see ${output_log}"; return 1; }
+}

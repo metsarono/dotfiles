@@ -2,7 +2,7 @@
 # Script: agent-key-bootstrap (dry-run by default)
 
 
-# [[file:../../../agents.org::*Script: agent-key-bootstrap (dry-run by default)][Script: agent-key-bootstrap (dry-run by default):1]]
+# [[file:../../../agents-users.org::*Script: agent-key-bootstrap (dry-run by default)][Script: agent-key-bootstrap (dry-run by default):1]]
 # ~/DotCortex/all/.local/bin/agent-key-bootstrap
 # Generates per-agent ed25519 keypairs inside each agent home and exports the
 # PUBLIC halves for review. Never touches authorized_keys anywhere.

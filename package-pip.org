@@ -51,6 +51,13 @@ kokoro-onnx "" ""
 # which the pvox kitten engine invokes via the env's python directly.
 rofimoji "" ""
 PyOpenGL-accelerate "3.1.9" ""
+# Mistral Vibe CLI (mistral-vibe) — coding agent lane. Installed 2026-10-08 for
+# the Vibe Code budget work (Mistral Pro plan). Provides `vibe` + `vibe-acp`.
+# mistralai is pinned here too because it is a hard dependency of mistral-vibe
+# but is NOT in this manifest on its own — listing it keeps pip-diff from
+# reporting it as an untracked extra on every fresh apply.
+mistral-vibe "2.26.0" ""
+mistralai "2.6.0" ""
 #+END_SRC
 
 * Capture current pip → manifest
@@ -319,79 +326,2296 @@ Nanobot is a fleet bot, not a user-site Python library.  Keep its dependency
 graph isolated inside the HelmCortex Nano workspace and pin the upstream release
 here.  Re-running =nanobot-apply= upgrades or repairs the runtime to the declared
 version without touching private credentials, OAuth state, sessions, or memory.
+The public non-secret template is recursively merged into an existing private
+config on every apply, with the template winning only for managed keys. This
+keeps access policy, MCP servers, model defaults, and gateway settings
+reproducible while preserving pairing state, WebUI secrets, OAuth metadata, and
+Nanobot-added defaults that the template does not own.
+
+The managed seam below keeps Nanobot's native locking and consolidation path,
+but replaces its fixed idle threshold with the fleet's measured endpoint/model
+policy. Upstream auto-compaction remains explicitly disabled in config; the
+scanner remains disabled whenever policy is missing, stale, unsupported, or
+unreadable. Nano explicitly accepts either the fully supported tier or a
+repeatable observed endpoint/model transition; weaker evidence cannot arm it.
+Apply stages the pinned pristine source and complete seam series before any live
+mutation. Existing config selections/private values are preserved, and native
+profiles and state remain Dream/operator-owned; apply does not onboard/refresh.
+Health checks the local managed-byte manifest without downloading or installing.
+
+The runtime consumer binds the physical endpoint and wire model, validates fresh
+evidence and ordered timers, and keeps an immutable 70,000-token floor. Physical
+route identity preserves path case, underscores, and percent-escape spelling;
+only scheme/host case and one SDK-added terminal slash are canonicalized. The
+minimum-token environment setting can raise the floor; malformed or unknown
+routes and estimates disable scheduling.
+
+#+BEGIN_SRC diff :tangle all/.bots/patches/nanobot-cache-policy.patch :comments no
+--- a/nanobot/agent/autocompact.py
++++ b/nanobot/agent/autocompact.py
+@@ -4,7 +4,14 @@
+ 
+ from collections.abc import Collection
+-from datetime import datetime
++from datetime import datetime, timezone
++import json
++import math
++import re
++import os
++from pathlib import Path
++import subprocess
+ from typing import TYPE_CHECKING, Any, Callable, Coroutine
++from urllib.parse import urlsplit
+ 
+ from loguru import logger
+ 
+@@ -36,9 +43,203 @@
+         self._summaries: dict[str, SessionSummary] = {}
+         self._bind_events = bind_events
+ 
++    @staticmethod
++    def _policy_identity(runtime: LLMRuntime) -> tuple[str, str, str] | None:
++        """Bind evidence to a proven wire route, never a provider display label."""
++        from nanobot.providers.anthropic_provider import AnthropicProvider
++        from nanobot.providers.openai_codex_provider import (
++            DEFAULT_CODEX_URL, OpenAICodexProvider, _strip_model_prefix,
++        )
++        from nanobot.providers.openai_compat_provider import OpenAICompatProvider
++
++        provider = runtime.provider
++        model = runtime.model
++        name = provider.provider_name
++        if not isinstance(model, str) or not model.strip():
++            return None
++        if not isinstance(name, str) or not name.strip():
++            return None
++        # Overrides and failover wrappers can select a different physical model.
++        # Unknown provider implementations remain disabled until explicitly bound.
++        if type(provider) is OpenAICodexProvider:
++            if (DEFAULT_CODEX_URL != "https://chatgpt.com/backend-api/codex/responses"
++                    or provider.api_base is not None
++                    or "model" in provider._extra_body):
++                return None
++            return "openai", "openai-codex-oauth", _strip_model_prefix(model).lower().replace("_", "-")
++        if type(provider) is OpenAICompatProvider:
++            if "model" in provider._extra_body or provider._extra_query:
++                return None
++            endpoint = (str(provider._client.base_url) if provider._client is not None
++                        else provider._effective_base)
++            model = provider._request_model_name(model)
++        elif type(provider) is AnthropicProvider:
++            endpoint = str(provider._client.base_url)
++            model = provider._strip_prefix(model)
++        else:
++            return None
++        if not isinstance(endpoint, str) or not endpoint:
++            return None
++        if (endpoint != endpoint.strip() or "\\" in endpoint or "?" in endpoint or "#" in endpoint
++                or re.search(r"%(?![0-9A-Fa-f]{2})", endpoint)
++                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in endpoint)):
++            return None
++        try:
++            parsed = urlsplit(endpoint)
++            parsed.port
++        except ValueError:
++            return None
++        scheme = parsed.scheme.lower()
++        if (scheme not in {"http", "https"} or not parsed.hostname
++                or parsed.username is not None or parsed.password is not None):
++            return None
++        path = parsed.path
++        if path.endswith("//"):
++            return None
++        if path == "/":
++            path = ""
++        elif path.endswith("/"):
++            path = path[:-1]
++        endpoint_key = f"{scheme}://{parsed.netloc.lower()}{path}"
++        name = name.strip().lower().replace("_", "-")
++        name = {"openai-codex": "openai", "openai-codex-oauth": "openai"}.get(name, name)
++        model = model.strip().lower().replace("_", "-")
++        if name == "anthropic":
++            model = re.sub(r"[ .]+", "-", model)
++            model = re.sub(r"-+", "-", model).strip("-")
++            if not model.startswith("claude-"):
++                model = "claude-" + model
++        if not model:
++            return None
++        return name, endpoint_key, model
++
++    @staticmethod
++    def _policy_env_integer(name: str, default: str) -> int:
++        value = os.environ.get(name, default)
++        if not value or not value.isascii() or not value.isdecimal():
++            raise ValueError("invalid cache-policy environment integer")
++        result = int(value)
++        if not math.isfinite(result):
++            raise ValueError("nonfinite cache-policy environment integer")
++        return result
++
++    @staticmethod
++    def _policy_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
++        result: dict[str, Any] = {}
++        for key, value in pairs:
++            if key in result:
++                raise ValueError("duplicate cache-policy key")
++            result[key] = value
++        return result
++
++    @staticmethod
++    def _policy_ttl_seconds(runtime: LLMRuntime) -> float | None:
++        try:
++            identity = AutoCompact._policy_identity(runtime)
++            if identity is None:
++                return None
++            provider, endpoint, model = identity
++            fallback_compact = AutoCompact._policy_env_integer(
++                "NANOBOT_CACHE_POLICY_FALLBACK_COMPACT_SECONDS", "1620",
++            )
++            fallback_cache = AutoCompact._policy_env_integer(
++                "NANOBOT_CACHE_POLICY_FALLBACK_CACHE_SECONDS", "1800",
++            )
++            if not 0 < fallback_compact < fallback_cache:
++                return None
++            if os.environ.get("NANOBOT_CACHE_POLICY_MODE", "enforce") not in {"enforce", "shadow"}:
++                return None
++            helper_value = os.environ.get(
++                "FLEET_CACHE_POLICY_HELPER",
++                str(Path.home() / "HelmCortex/FORGE/bin/cache-policy"),
++            )
++            policy_value = os.environ.get(
++                "FLEET_CACHE_POLICY_PATH",
++                str(Path.home() / "HelmCortex/ROOTS/DotRoot/agent-session/centre/data/cache-policy.json"),
++            )
++            if not helper_value.strip() or not policy_value.strip():
++                return None
++            helper = Path(helper_value).expanduser()
++            policy = Path(policy_value).expanduser()
++            completed = subprocess.run(
++                [str(helper), "resolve", "--policy", str(policy),
++                 "--harness", "nanobot", "--provider", provider,
++                 "--endpoint", endpoint, "--model", model,
++                 "--fallback-compact", str(fallback_compact),
++                 "--fallback-cache", str(fallback_cache), "--allow-observed"],
++                capture_output=True, text=True, timeout=5, check=True,
++            )
++            decision = json.loads(completed.stdout, object_pairs_hook=AutoCompact._policy_json_object)
++            if not isinstance(decision, dict):
++                return None
++            mode, confidence = decision.get("mode"), decision.get("confidence")
++            if (mode, confidence) not in (("measured", "supported"), ("observed", "observed")):
++                return None
++            if (decision.get("provider"), decision.get("endpoint_id"), decision.get("model")) != identity:
++                return None
++            compact, expiry = decision.get("compact_before_seconds"), decision.get("cache_expires_seconds")
++            if any(type(value) not in (int, float) or not math.isfinite(value)
++                   for value in (compact, expiry)):
++                return None
++            if not 0 < compact < expiry:
++                return None
++            stamp = decision.get("observed_at")
++            if not isinstance(stamp, str):
++                return None
++            observed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
++            if observed.tzinfo is None:
++                return None
++            age = (datetime.now(timezone.utc) - observed).total_seconds()
++            # The resolver also checks policy/entry fresh_until. Independently
++            # reject stale or future evidence using its 24-hour freshness contract.
++            if not 0 <= age < 24 * 60 * 60:
++                return None
++            # The resolver normalizes numbers with int(). Validate the selected
++            # source evidence too, so coercion cannot arm malformed policy data.
++            evidence = json.loads(policy.read_text(encoding="utf-8"),
++                                  object_pairs_hook=AutoCompact._policy_json_object)
++            if not isinstance(evidence, dict) or evidence.get("format") != "cache-policy.v1":
++                return None
++            def fresh_until(value: Any) -> bool:
++                if not isinstance(value, str):
++                    return False
++                stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
++                return stamp.tzinfo is not None and stamp > datetime.now(timezone.utc)
++            if not fresh_until(evidence.get("fresh_until")):
++                return None
++            entries = evidence.get("entries")
++            source_harness = decision.get("source_harness")
++            if (not isinstance(entries, list) or not isinstance(source_harness, str)
++                    or not source_harness):
++                return None
++            matches = [entry for entry in entries if isinstance(entry, dict)
++                       and (entry.get("provider"), entry.get("endpoint_id"), entry.get("model")) == identity
++                       and entry.get("harness") == source_harness
++                       and entry.get("confidence") == confidence
++                       and entry.get("mode") == mode
++                       and entry.get("observed_at") == decision.get("observed_at")]
++            if not matches:
++                return None
++            for entry in matches:
++                timers = (entry.get("compact_before_seconds"), entry.get("cache_expires_seconds"))
++                if (any(type(value) not in (int, float) or not math.isfinite(value) for value in timers)
++                        or timers != (compact, expiry) or not 0 < timers[0] < timers[1]
++                        or not fresh_until(entry.get("fresh_until"))):
++                    return None
++        except (AttributeError, ImportError, OSError, OverflowError, TypeError,
++                ValueError, KeyError, subprocess.SubprocessError):
++            return None
++        logger.debug(
++            "Auto-compact policy provider={} model={} mode={} threshold={}s",
++            provider, model, mode, compact,
++        )
++        return float(compact)
++
+     def _is_expired(self, ts: datetime | str | None,
+-                    now: datetime | None = None) -> bool:
+-        if self._ttl <= 0 or not ts:
++                    now: datetime | None = None,
++                    ttl_seconds: float | None = None) -> bool:
++        threshold = self._ttl * 60 if ttl_seconds is None else ttl_seconds
++        if threshold <= 0 or not ts:
+             return False
+         try:
+             if isinstance(ts, str):
+@@ -52,7 +253,7 @@
+             # list_sessions() forwards raw persisted metadata; an unusable value
+             # must not escape the idle scan and stop the agent loop.
+             return False
+-        return idle_seconds >= self._ttl * 60
++        return idle_seconds >= threshold
+ 
+     def _has_unarchived_messages(self, key: str) -> bool:
+         session = self.sessions.get_or_create(key)
+@@ -80,12 +281,47 @@
+             if key in active_session_keys:
+                 continue
+             updated_at = info.get("updated_at")
+-            if self._is_expired(updated_at, now) and self._has_unarchived_messages(key):
+-                session = self.sessions.get_or_create(key)
++            session = self.sessions.get_or_create(key)
++            try:
++                runtime = resolve_runtime(session)
++            except (KeyError, ValueError):
++                # Invalid session selections remain recoverable through /model.
++                continue
++            ttl_seconds = self._policy_ttl_seconds(runtime)
++            if ttl_seconds is None:
++                continue
++            if (self._is_expired(updated_at, now, ttl_seconds)
++                    and self._has_unarchived_messages(key)):
+                 try:
+-                    runtime = resolve_runtime(session)
+-                except (KeyError, ValueError):
+-                    # Invalid session selections remain recoverable through /model.
++                    estimated_tokens, estimate_source = (
++                        self.consolidator.estimate_session_prompt_tokens(
++                            session, runtime=runtime,
++                        )
++                    )
++                    min_tokens = max(70000, self._policy_env_integer(
++                        "NANOBOT_CACHE_POLICY_MIN_TOKENS", "70000",
++                    ))
++                    if (type(estimated_tokens) not in (int, float)
++                            or not math.isfinite(estimated_tokens) or estimated_tokens <= 0
++                            or not isinstance(estimate_source, str)
++                            or estimate_source not in {"tiktoken", "heuristic", "provider_counter"}):
++                        continue
++                    mode = os.environ.get("NANOBOT_CACHE_POLICY_MODE", "enforce")
++                    if mode not in {"enforce", "shadow"}:
++                        continue
++                except (OSError, OverflowError, TypeError, ValueError):
++                    continue
++                if estimated_tokens < min_tokens:
++                    logger.debug(
++                        "Auto-compact policy below token gate {} tokens={} minimum={} source={}",
++                        key, estimated_tokens, min_tokens, estimate_source,
++                    )
++                    continue
++                if os.environ.get("NANOBOT_CACHE_POLICY_MODE", "enforce") == "shadow":
++                    logger.info(
++                        "Auto-compact policy shadow candidate {} threshold={}s tokens={}",
++                        key, int(ttl_seconds), estimated_tokens,
++                    )
+                     continue
+                 self._archiving.add(key)
+                 schedule_background(self._archive(key, runtime=runtime))
+#+END_SRC
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-nanobot-cache-policy.py :comments no
+"""Fail-closed behavior checks for Nano's runtime cache-policy consumer."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import os
+import json
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+
+from nanobot.agent.autocompact import AutoCompact
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.key = "telegram:approved"
+        self.updated_at = datetime.now() - timedelta(hours=3)
+        self.messages = [{"role": "user", "content": "durable context"}]
+        self.last_archived = 0
+        self.metadata = {}
+
+
+class FakeSessions:
+    def __init__(self, session: FakeSession) -> None:
+        self.session = session
+
+    def list_sessions(self):
+        return [{"key": self.session.key, "updated_at": self.session.updated_at}]
+
+    def get_or_create(self, _key: str):
+        return self.session
+
+
+class FakeConsolidator:
+    def __init__(self, estimated_tokens: int) -> None:
+        self.estimated_tokens = estimated_tokens
+
+    def estimate_session_prompt_tokens(self, _session, *, runtime):
+        return self.estimated_tokens, getattr(self, "source", "tiktoken")
+
+
+class NanoCachePolicyTest(unittest.TestCase):
+    def run_scan(self, estimated_tokens, *, minimum="70000", source="tiktoken",
+                 mode="enforce", key="telegram:approved", active=(), archiving=False) -> int:
+        session = FakeSession()
+        session.key = key
+        counter = FakeConsolidator(estimated_tokens)
+        counter.source = source
+        compact = AutoCompact(FakeSessions(session), counter)
+        if archiving:
+            compact._archiving.add(key)
+        scheduled = []
+        runtime = object()
+        with mock.patch.object(AutoCompact, "_policy_ttl_seconds", return_value=60), \
+             mock.patch.dict(os.environ, {"NANOBOT_CACHE_POLICY_MIN_TOKENS": minimum,
+                                          "NANOBOT_CACHE_POLICY_MODE": mode}):
+            compact.check_expired(scheduled.append, lambda _session: runtime, active)
+        for coroutine in scheduled:
+            coroutine.close()
+        return len(scheduled)
+
+    def test_expiry_below_token_gate_does_not_compact(self) -> None:
+        self.assertEqual(self.run_scan(69999), 0)
+
+    def test_expiry_at_token_gate_forces_compaction(self) -> None:
+        self.assertEqual(self.run_scan(70000), 1)
+
+
+    def test_floor_cannot_be_lowered(self):
+        for minimum in ("1", "0", "69999"):
+            with self.subTest(minimum=minimum):
+                self.assertEqual(self.run_scan(69999, minimum=minimum), 0)
+                self.assertEqual(self.run_scan(70000, minimum=minimum), 1)
+
+    def test_floor_can_be_raised(self):
+        self.assertEqual(self.run_scan(70000, minimum="80000"), 0)
+        self.assertEqual(self.run_scan(80000, minimum="80000"), 1)
+
+    def test_bad_minimum_disables_without_scan_crash(self):
+        for minimum in ("", "NaN", "Infinity", "true", "70000.0", "-1", " 70000", "７００００"):
+            with self.subTest(minimum=minimum):
+                self.assertEqual(self.run_scan(90000, minimum=minimum), 0)
+
+    def test_bad_estimates_disable_without_scan_crash(self):
+        for tokens in (None, True, False, "90000", [], {}, float("nan"), float("inf"), -1, 0):
+            with self.subTest(tokens=tokens):
+                self.assertEqual(self.run_scan(tokens), 0)
+
+    def test_unknown_sources_disable(self):
+        for source in (None, "", "none", "unknown", "invented", [], True):
+            with self.subTest(source=source):
+                self.assertEqual(self.run_scan(90000, source=source), 0)
+
+    def test_shadow_and_invalid_modes_do_not_archive(self):
+        for mode in ("shadow", "", "typo"):
+            self.assertEqual(self.run_scan(90000, mode=mode), 0)
+
+    def test_active_dream_and_archiving_sessions_remain_excluded(self):
+        self.assertEqual(self.run_scan(90000, active=("telegram:approved",)), 0)
+        self.assertEqual(self.run_scan(90000, key="dream:probe"), 0)
+        self.assertEqual(self.run_scan(90000, archiving=True), 0)
+
+
+class PolicyDecisionTest(unittest.TestCase):
+    def setUp(self):
+        from nanobot.providers.openai_compat_provider import OpenAICompatProvider
+        self.provider = OpenAICompatProvider(api_key="fixture", api_base="https://fixture.invalid/v1",
+                                             provider_name="custom")
+        from nanobot.utils.llm_runtime import LLMRuntime
+        self.runtime = LLMRuntime.capture(self.provider, "fixture-model", context_window_tokens=100000)
+        self.decision = dict(mode="measured", confidence="supported", compact_before_seconds=60,
+                             cache_expires_seconds=120, provider="custom",
+                             endpoint_id="https://fixture.invalid/v1", model="fixture-model",
+                             observed_at=datetime.now(timezone.utc).isoformat(), source_harness="nanobot")
+
+    def resolve(self, decision=None, *, raw=None, runtime=None, env=None, evidence=None):
+        output = json.dumps(self.decision if decision is None else decision) if raw is None else raw
+        entry = dict(self.decision if decision is None else decision)
+        entry.update(harness=entry.get("source_harness"),
+                     fresh_until=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())
+        policy = evidence if evidence is not None else dict(format="cache-policy.v1",
+                     fresh_until=entry["fresh_until"], entries=[entry])
+        with mock.patch("nanobot.agent.autocompact.subprocess.run",
+                        return_value=SimpleNamespace(stdout=output)) as run, \
+             mock.patch.dict(os.environ, env or {}, clear=True), \
+             mock.patch("nanobot.agent.autocompact.Path.read_text", return_value=json.dumps(policy)):
+            result = AutoCompact._policy_ttl_seconds(runtime or self.runtime)
+        return result, run
+
+    def test_supported_and_observed_accept_exact_route(self):
+        for mode, confidence in (("measured", "supported"), ("observed", "observed")):
+            decision = self.decision | dict(mode=mode, confidence=confidence)
+            result, run = self.resolve(decision)
+            self.assertEqual(result, 60)
+            args = run.call_args.args[0]
+            self.assertEqual(args[args.index("--endpoint") + 1], "https://fixture.invalid/v1")
+            self.assertEqual(args[args.index("--model") + 1], "fixture-model")
+            self.assertIn("--allow-observed", args)
+
+    def test_confidence_and_fallback_fail_closed(self):
+        for mode, confidence in (("measured", "observed"), ("observed", "supported"),
+                                 ("fallback", "supported"), ("measured", None),
+                                 ("unsupported", "supported"), ([], "supported")):
+            with self.subTest(mode=mode, confidence=confidence):
+                self.assertIsNone(self.resolve(self.decision | dict(mode=mode, confidence=confidence))[0])
+
+    def test_nonobjects_and_bad_json_fail_closed(self):
+        for raw in ("[]", "null", "true", '"string"', "1", "garbage"):
+            with self.subTest(raw=raw):
+                self.assertIsNone(self.resolve(raw=raw)[0])
+
+    def test_bad_or_unordered_durations_fail_closed(self):
+        for field in ("compact_before_seconds", "cache_expires_seconds"):
+            for value in (None, True, "60", float("nan"), float("inf"), -1, 0, []):
+                with self.subTest(field=field, value=value):
+                    self.assertIsNone(self.resolve(self.decision | {field: value})[0])
+        for expiry in (59, 60):
+            self.assertIsNone(self.resolve(self.decision | dict(cache_expires_seconds=expiry))[0])
+
+    def test_missing_fields_fail_closed(self):
+        for field in self.decision:
+            decision = self.decision.copy()
+            del decision[field]
+            with self.subTest(field=field):
+                self.assertIsNone(self.resolve(decision)[0])
+
+    def test_mismatched_route_model_provider_fail_closed(self):
+        for field in ("provider", "endpoint_id", "model"):
+            self.assertIsNone(self.resolve(self.decision | {field: "other"})[0])
+
+    def test_stale_future_and_bad_evidence_dates_fail_closed(self):
+        for stamp in (None, "", "invalid", datetime.now().isoformat(),
+                      (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+                      (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()):
+            with self.subTest(stamp=stamp):
+                self.assertIsNone(self.resolve(self.decision | dict(observed_at=stamp))[0])
+
+    def test_environment_validation_fail_closed(self):
+        for env in ({"NANOBOT_CACHE_POLICY_FALLBACK_COMPACT_SECONDS": "bad"},
+                    {"NANOBOT_CACHE_POLICY_FALLBACK_CACHE_SECONDS": "NaN"},
+                    {"NANOBOT_CACHE_POLICY_FALLBACK_COMPACT_SECONDS": "1800"},
+                    {"NANOBOT_CACHE_POLICY_FALLBACK_CACHE_SECONDS": "0"},
+                    {"FLEET_CACHE_POLICY_HELPER": ""}, {"FLEET_CACHE_POLICY_PATH": ""}):
+            with self.subTest(env=env):
+                self.assertIsNone(self.resolve(env=env)[0])
+
+    def test_helper_errors_fail_closed(self):
+        import subprocess
+        for error in (OSError(), subprocess.TimeoutExpired("fixture", 5),
+                      subprocess.CalledProcessError(1, "fixture")):
+            with mock.patch("nanobot.agent.autocompact.subprocess.run", side_effect=error):
+                self.assertIsNone(AutoCompact._policy_ttl_seconds(self.runtime))
+
+    def test_oauth_actual_class_and_wire_model(self):
+        from nanobot.providers.openai_codex_provider import OpenAICodexProvider
+        provider = OpenAICodexProvider(default_model="openai-codex/fixture-model")
+        from nanobot.utils.llm_runtime import LLMRuntime
+        runtime = LLMRuntime.capture(provider, "openai-codex/fixture-model", context_window_tokens=100000)
+        decision = self.decision | dict(provider="openai", endpoint_id="openai-codex-oauth")
+        result, run = self.resolve(decision, runtime=runtime)
+        self.assertEqual(result, 60)
+        args = run.call_args.args[0]
+        self.assertEqual(args[args.index("--endpoint") + 1], "openai-codex-oauth")
+        self.assertEqual(args[args.index("--model") + 1], "fixture-model")
+
+    def test_provider_label_cannot_impersonate_oauth(self):
+        runtime = SimpleNamespace(provider=SimpleNamespace(provider_name="openai_codex", api_base=None),
+                                  model="fixture-model")
+        result, run = self.resolve(runtime=runtime)
+        self.assertIsNone(result)
+        run.assert_not_called()
+
+    def test_model_override_and_unresolved_endpoint_disable(self):
+        self.provider._extra_body = {"model": "other"}
+        self.assertIsNone(self.resolve()[0])
+        self.provider._extra_body = {}
+        self.provider._effective_base = None
+        self.assertIsNone(self.resolve()[0])
+
+
+    def test_initialized_client_route_is_authoritative(self):
+        self.provider._client = SimpleNamespace(base_url="https://other.invalid/v1/")
+        self.assertIsNone(self.resolve()[0])
+        decision = self.decision | dict(endpoint_id="https://other.invalid/v1")
+        result, run = self.resolve(decision)
+        self.assertEqual(result, 60)
+        args = run.call_args.args[0]
+        self.assertEqual(args[args.index("--endpoint") + 1], "https://other.invalid/v1")
+
+    def test_case_underscore_and_percent_routes_preserve_identity(self):
+        from openai import AsyncOpenAI
+        for endpoint, canonical in (
+            ("HTTPS://Fixture.Invalid/Route_A/%2fValue",
+             "https://fixture.invalid/Route_A/%2fValue"),
+            ("https://fixture.invalid/Route_A/%2FValue/",
+             "https://fixture.invalid/Route_A/%2FValue"),
+        ):
+            for initialized in (False, True):
+                with self.subTest(endpoint=endpoint, initialized=initialized):
+                    self.provider._effective_base = endpoint
+                    self.provider._client = (
+                        AsyncOpenAI(api_key="fixture", base_url=endpoint) if initialized else None
+                    )
+                    identity = AutoCompact._policy_identity(self.runtime)
+                    self.assertEqual(identity, ("custom", canonical, "fixture-model"))
+                    decision = self.decision | dict(endpoint_id=canonical)
+                    self.assertEqual(self.resolve(decision)[0], 60)
+
+    def test_distinct_path_and_percent_spellings_cannot_cross_arm(self):
+        endpoint = "https://fixture.invalid/Route_A/%2fValue"
+        self.provider._effective_base = endpoint
+        for other in (
+            "https://fixture.invalid/route_A/%2fValue",
+            "https://fixture.invalid/Route-A/%2fValue",
+            "https://fixture.invalid/Route_A/%2FValue",
+        ):
+            with self.subTest(other=other):
+                result, run = self.resolve(self.decision | dict(endpoint_id=other))
+                self.assertIsNone(result)
+                run.assert_called_once()
+
+    def test_malformed_physical_routes_fail_before_resolver(self):
+        for endpoint in (
+            "https://fixture.invalid/route/v1//",
+            "https://fixture.invalid/path?",
+            "https://fixture.invalid/path#",
+            "https://fixture.invalid/%ZZ",
+            "https://fixture.invalid/%2",
+            "https://fixture.invalid\\other/path",
+            "https://fixture.invalid:bad/path",
+            "https:///path",
+            "ftp://fixture.invalid/path",
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.provider._effective_base = endpoint
+                result, run = self.resolve()
+                self.assertIsNone(result)
+                run.assert_not_called()
+                self.assertIsNone(AutoCompact._policy_identity(self.runtime))
+
+    def test_bare_root_slash_matches_no_slash(self):
+        from openai import AsyncOpenAI
+        canonical = "https://fixture.invalid"
+        for endpoint in (canonical, canonical + "/"):
+            for initialized in (False, True):
+                with self.subTest(endpoint=endpoint, initialized=initialized):
+                    self.provider._effective_base = endpoint
+                    self.provider._client = (
+                        AsyncOpenAI(api_key="fixture", base_url=endpoint) if initialized else None
+                    )
+                    self.assertEqual(
+                        AutoCompact._policy_identity(self.runtime),
+                        ("custom", canonical, "fixture-model"),
+                    )
+                    self.assertEqual(
+                        self.resolve(self.decision | dict(endpoint_id=canonical))[0], 60,
+                    )
+
+    def test_unchanged_lowercase_sdk_route_remains_supported(self):
+        from openai import AsyncOpenAI
+        endpoint = "https://fixture.invalid/route-a/v1"
+        for initialized in (False, True):
+            self.provider._effective_base = endpoint
+            self.provider._client = AsyncOpenAI(api_key="fixture", base_url=endpoint) if initialized else None
+            decision = self.decision | dict(endpoint_id=endpoint)
+            self.assertEqual(self.resolve(decision)[0], 60)
+
+    def test_duplicate_keys_fail_closed(self):
+        raw = json.dumps(self.decision)[:-1] + ', "mode": "measured"}'
+        self.assertIsNone(self.resolve(raw=raw)[0])
+
+    def test_route_secrets_and_ambiguous_wrappers_disable(self):
+        for endpoint in ("https://name:password@fixture.invalid/v1", "https://fixture.invalid/v1?key=fixture",
+                         "https://fixture.invalid/v1#other", "relative-path"):
+            self.provider._effective_base = endpoint
+            result, run = self.resolve()
+            self.assertIsNone(result)
+            run.assert_not_called()
+        runtime = SimpleNamespace(provider=SimpleNamespace(provider_name="custom", primary=self.provider),
+                                  model="fixture-model")
+        self.assertIsNone(self.resolve(runtime=runtime)[0])
+
+
+    def test_raw_evidence_coercion_cannot_arm_timer(self):
+        fresh = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        entry = self.decision | dict(harness="nanobot", fresh_until=fresh)
+        for field in ("compact_before_seconds", "cache_expires_seconds"):
+            for value in (True, "60", "120", None, float("nan"), float("inf")):
+                evidence = dict(format="cache-policy.v1", fresh_until=fresh,
+                                entries=[entry | {field: value}])
+                with self.subTest(field=field, value=value):
+                    self.assertIsNone(self.resolve(evidence=evidence)[0])
+
+    def test_raw_evidence_missing_stale_and_mismatched_disable(self):
+        fresh = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        entry = self.decision | dict(harness="nanobot", fresh_until=fresh)
+        policy = dict(format="cache-policy.v1", fresh_until=fresh, entries=[entry])
+        for evidence in ([], {}, policy | dict(fresh_until=stale),
+                         policy | dict(entries=[entry | dict(fresh_until=stale)]),
+                         policy | dict(entries=[entry | dict(endpoint_id="other")]),
+                         policy | dict(entries=[entry | dict(compact_before_seconds=59)]),
+                         policy | dict(entries=[entry | dict(mode="fallback")]),
+                         policy | dict(entries=[entry | dict(mode=None)])):
+            self.assertIsNone(self.resolve(evidence=evidence)[0])
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+Nano's outbound voice lane reuses the fleet's established
+=claude-hook-voice-reply= payload instead of introducing a second pvox path.
+Only successfully delivered terminal Telegram text is queued: ordinary sends
+speak after the last chunk, and streamed replies speak once at =stream_end=.
+Progress/tool events and compaction notices remain silent. The relay runs in a
+tracked background task, identifies as =Nanobot= (mapped to the existing Haiku
+voice in =agents-hooks.org=), and retains =PVOX_REPLY_OFF=1= as the kill switch.
+
+#+BEGIN_SRC diff :tangle all/.bots/patches/nanobot-voice-reply.patch :comments no
+--- a/nanobot/channels/telegram/runtime.py
++++ b/nanobot/channels/telegram/runtime.py
+@@ -3,6 +3,8 @@
+ from __future__ import annotations
+
+ import asyncio
++import json
++import os
+ import re
+ import time
+ import unicodedata
+@@ -561,6 +563,7 @@
+         self._compaction_notices: dict[tuple[str, str], int] = {}  # (chat_id, compaction_id) -> message_id
+         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
+         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
++        self._voice_reply_tasks: set[asyncio.Task[None]] = set()
+         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
+         self._last_poll_ok: float = 0.0  # monotonic time of last getUpdates round trip
+         self._app_ready = asyncio.Event()  # cleared while the app is being rebuilt
+@@ -851,6 +854,13 @@
+         self._inbound_workers.clear()
+         self._inbound_buffers.clear()
+
++        voice_tasks = tuple(self._voice_reply_tasks)
++        for task in voice_tasks:
++            task.cancel()
++        if voice_tasks:
++            await asyncio.gather(*voice_tasks, return_exceptions=True)
++        self._voice_reply_tasks.clear()
++
+         if self._app:
+             self.logger.info("Stopping bot...")
+         # Join an in-flight supervisor teardown before ChannelManager cancels
+@@ -1056,6 +1066,57 @@
+         buf.message_id = sent.message_id
+         buf.draft_id = None
+
++    def _queue_voice_reply(self, text: str) -> None:
++        """Speak one delivered terminal reply without delaying Telegram."""
++        if not text.strip() or os.environ.get("PVOX_REPLY_OFF"):
++            return
++        task = asyncio.create_task(self._run_voice_reply(text))
++        self._voice_reply_tasks.add(task)
++        task.add_done_callback(self._voice_reply_tasks.discard)
++
++    async def _run_voice_reply(self, text: str) -> None:
++        """Feed the shared DotCortex relay its established hook payload."""
++        command = Path(os.environ.get(
++            "NANOBOT_VOICE_REPLY_COMMAND",
++            "~/.local/bin/claude-hook-voice-reply",
++        )).expanduser()
++        if not command.is_file() or not os.access(command, os.X_OK):
++            self.logger.warning("voice reply relay unavailable: {}", command)
++            return
++
++        payload = json.dumps(
++            {"tool_input": {"text": text}}, ensure_ascii=False,
++        ).encode("utf-8")
++        env = os.environ.copy()
++        env["CLAUDE_WARM_HERDR_AGENT"] = "Nanobot"
++        process: asyncio.subprocess.Process | None = None
++        try:
++            process = await asyncio.create_subprocess_exec(
++                str(command),
++                stdin=asyncio.subprocess.PIPE,
++                stdout=asyncio.subprocess.DEVNULL,
++                stderr=asyncio.subprocess.DEVNULL,
++                env=env,
++                start_new_session=os.name != "nt",
++            )
++            await asyncio.wait_for(process.communicate(payload), timeout=5.0)
++            if process.returncode != 0:
++                self.logger.warning(
++                    "voice reply relay exited with status {}", process.returncode,
++                )
++        except asyncio.CancelledError:
++            if process is not None and process.returncode is None:
++                process.kill()
++                await process.wait()
++            raise
++        except asyncio.TimeoutError:
++            if process is not None and process.returncode is None:
++                process.kill()
++                await process.wait()
++            self.logger.warning("voice reply relay timed out")
++        except OSError as exc:
++            self.logger.warning("voice reply relay failed: {}", exc)
++
+     async def send(self, msg: OutboundMessage) -> None:
+         """Send a message through Telegram."""
+         app = await self._wait_for_app()
+@@ -1181,6 +1242,8 @@
+                     chat_id, text, reply_params, thread_kwargs, reply_markup,
+                 )
+                 if rich_ok:
++                    if progress_event is None:
++                        self._queue_voice_reply(text)
+                     return
+
+             chunks = _split_telegram_markdown(text, TELEGRAM_MAX_MESSAGE_LEN)
+@@ -1191,6 +1254,8 @@
+                     render_as_blockquote=render_as_blockquote,
+                     reply_markup=reply_markup if is_last else None,
+                 )
++            if progress_event is None:
++                self._queue_voice_reply(text)
+
+     async def _call_with_retry(
+         self,
+@@ -1370,6 +1435,7 @@
+                         buf.text = "\n".join(legacy_chunks[legacy_index + 1:])
+                     break
+                 self._stream_bufs.pop(chat_id, None)
++                self._queue_voice_reply(raw_text)
+                 return
+
+             # Group chats and streams that rejected drafts keep the established
+@@ -1387,6 +1453,7 @@
+                 if self._is_not_modified_error(e):
+                     self.logger.debug("Final stream edit already applied for {}", chat_id)
+                     self._stream_bufs.pop(chat_id, None)
++                    self._queue_voice_reply(raw_text)
+                     return
+                 self.logger.debug("Final stream edit failed (HTML), trying plain: {}", e)
+                 primary_plain = (
+@@ -1421,6 +1488,7 @@
+                         thread_kwargs=thread_kwargs,
+                     )
+             self._stream_bufs.pop(chat_id, None)
++            self._queue_voice_reply(raw_text)
+             return
+
+         buf = self._stream_bufs.get(chat_id)
+#+END_SRC
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-nanobot-voice-reply.py :comments no
+"""Regression checks for Nano's Telegram-to-pvox terminal reply lane."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+from types import SimpleNamespace
+import unittest
+from unittest.mock import AsyncMock, Mock, patch
+
+from nanobot.bus.events import OutboundMessage
+from nanobot.bus.outbound_events import ProgressEvent
+from nanobot.bus.queue import MessageBus
+from nanobot.channels.telegram.runtime import TelegramChannel, TelegramConfig, _StreamBuf
+from nanobot.events import ContextCompactionEvent
+
+
+ALL_OVERLAY = Path(__file__).resolve().parents[4]
+VOICE_HOOK = ALL_OVERLAY / ".local/bin/claude-hook-voice-reply"
+
+
+def make_channel() -> TelegramChannel:
+    channel = TelegramChannel(
+        TelegramConfig(token="test-token", rich_messages=False),
+        MessageBus(),
+    )
+    channel._app = SimpleNamespace(bot=SimpleNamespace(
+        edit_message_text=AsyncMock(),
+        send_message=AsyncMock(),
+    ))
+    channel._app_ready.set()
+    return channel
+
+
+class RuntimeVoiceReplyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_send_queues_only_after_success(self):
+        channel = make_channel()
+        channel._send_text = AsyncMock()
+        channel._queue_voice_reply = Mock()
+        message = OutboundMessage("telegram", "7", "delivered terminal text")
+
+        await channel.send(message)
+
+        channel._send_text.assert_awaited_once()
+        channel._queue_voice_reply.assert_called_once_with("delivered terminal text")
+
+        channel._send_text.reset_mock(side_effect=True)
+        channel._queue_voice_reply.reset_mock()
+        channel._send_text.side_effect = RuntimeError("delivery failed")
+        with self.assertRaisesRegex(RuntimeError, "delivery failed"):
+            await channel.send(message)
+        channel._queue_voice_reply.assert_not_called()
+
+    async def test_progress_and_compaction_events_stay_silent(self):
+        channel = make_channel()
+        channel._send_text = AsyncMock()
+        channel._send_compaction_notice = AsyncMock()
+        channel._queue_voice_reply = Mock()
+
+        await channel.send(OutboundMessage(
+            "telegram", "7", "tool progress",
+            event=ProgressEvent(content="tool progress", tool_hint=True),
+        ))
+        await channel.send(OutboundMessage(
+            "telegram", "7", "compacting",
+            event=ContextCompactionEvent("compact-1", "started"),
+        ))
+
+        channel._send_text.assert_awaited_once()
+        channel._send_compaction_notice.assert_awaited_once()
+        channel._queue_voice_reply.assert_not_called()
+
+    async def test_stream_speaks_once_at_successful_stream_end(self):
+        channel = make_channel()
+        channel._queue_voice_reply = Mock()
+        channel._stream_bufs["7"] = _StreamBuf(
+            text="one streamed terminal reply",
+            message_id=17,
+            last_edit=time.monotonic(),
+        )
+
+        await channel.send_delta("7", " still streaming", stream_id="stream-1")
+        channel._queue_voice_reply.assert_not_called()
+
+        await channel.send_delta("7", "", stream_id="stream-1", stream_end=True)
+        await channel.send_delta("7", "", stream_id="stream-1", stream_end=True)
+
+        channel._queue_voice_reply.assert_called_once_with(
+            "one streamed terminal reply still streaming",
+        )
+
+    async def test_relay_payload_uses_nanobot_identity_and_kill_switch(self):
+        channel = make_channel()
+        with tempfile.TemporaryDirectory(prefix="nano-voice-payload-") as root:
+            root_path = Path(root)
+            capture = root_path / "payload.json"
+            identity = root_path / "identity"
+            relay = root_path / "relay"
+            relay.write_text(
+                "#!/bin/sh\n"
+                "printf '%s' \"$CLAUDE_WARM_HERDR_AGENT\" > \"$NANO_IDENTITY\"\n"
+                "cat > \"$NANO_CAPTURE\"\n",
+                encoding="utf-8",
+            )
+            relay.chmod(0o755)
+            env = {
+                "NANOBOT_VOICE_REPLY_COMMAND": str(relay),
+                "NANO_CAPTURE": str(capture),
+                "NANO_IDENTITY": str(identity),
+                "PVOX_REPLY_OFF": "",
+            }
+            with patch.dict(os.environ, env):
+                await channel._run_voice_reply("voice payload ✓")
+            self.assertEqual(identity.read_text(encoding="utf-8"), "Nanobot")
+            self.assertEqual(
+                json.loads(capture.read_text(encoding="utf-8")),
+                {"tool_input": {"text": "voice payload ✓"}},
+            )
+
+        channel._voice_reply_tasks.clear()
+        with patch.dict(os.environ, {"PVOX_REPLY_OFF": "1"}):
+            channel._queue_voice_reply("must stay silent")
+        self.assertFalse(channel._voice_reply_tasks)
+
+
+class SharedRelayIntegrationTest(unittest.TestCase):
+    def _run_hook(self, fail_host: str = "") -> tuple[list[str], str, str]:
+        self.assertTrue(VOICE_HOOK.is_file(), f"missing tangled hook: {VOICE_HOOK}")
+        with tempfile.TemporaryDirectory(prefix="nano-shared-relay-") as root:
+            home = Path(root)
+            bindir = home / "bin"
+            pvox = home / "HelmCortex/FORGE/VoxForge/bin/pvox"
+            bindir.mkdir(parents=True)
+            pvox.parent.mkdir(parents=True)
+            ssh_log = home / "ssh.log"
+            pvox_log = home / "pvox.log"
+            cache = home / "cache"
+
+            pvox.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" >> \"$PVOX_LOG\"\n"
+                "case \"${1:-}\" in\n"
+                "  voicespec) printf '%s\\n' '{\"engine\":\"piper\",\"voice\":\"test\",\"speed\":1.0}' ;;\n"
+                "  clean) cat ;;\n"
+                "  render) out=\"${@: -1}\"; printf 'RIFFnano' > \"$out\" ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            pvox.chmod(0o755)
+            ssh = bindir / "ssh"
+            ssh.write_text(
+                "#!/usr/bin/env bash\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  case \"$1\" in -o) shift 2 ;; *) host=\"$1\"; shift; break ;; esac\n"
+                "done\n"
+                "cat >/dev/null\n"
+                "printf '%s\\n' \"$host\" >> \"$SSH_LOG\"\n"
+                "[ -n \"${SSH_FAIL_HOST:-}\" ] && [ \"$host\" = \"$SSH_FAIL_HOST\" ] && exit 1\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            ssh.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home),
+                "PATH": f"{bindir}:{env.get('PATH', '')}:/usr/bin:/bin",
+                "XDG_CACHE_HOME": str(cache),
+                "CLAUDE_WARM_HERDR_AGENT": "Nanobot",
+                "PVOX_REPLY_HOST": "s24",
+                "PVOX_REPLY_FALLBACK_HOST": "t480s",
+                "PVOX_REPLY_NO_ONDEVICE": "1",
+                "PVOX_LOG": str(pvox_log),
+                "SSH_LOG": str(ssh_log),
+                "SSH_FAIL_HOST": fail_host,
+            })
+            env.pop("PVOX_REPLY_OFF", None)
+            subprocess.run(
+                [str(VOICE_HOOK)],
+                input=json.dumps({"tool_input": {"text": "Nano relay test"}}),
+                text=True,
+                env=env,
+                check=True,
+                timeout=10,
+            )
+
+            reply_log = cache / "pvox-reply.log"
+            deadline = time.monotonic() + 10
+            expected = "delivered=t480s" if fail_host else "delivered=s24"
+            while time.monotonic() < deadline:
+                log_text = reply_log.read_text(encoding="utf-8") if reply_log.exists() else ""
+                if expected in log_text:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail(f"shared relay did not finish: {log_text!r}")
+
+            hosts = ssh_log.read_text(encoding="utf-8").splitlines()
+            pvox_calls = pvox_log.read_text(encoding="utf-8")
+            return hosts, pvox_calls, log_text
+
+    def test_nanobot_maps_to_haiku_and_prefers_s24(self):
+        hosts, pvox_calls, log_text = self._run_hook()
+        self.assertEqual(hosts, ["s24"])
+        self.assertIn("render --agent Haiku --no-play", pvox_calls)
+        self.assertIn("voice=Haiku", log_text)
+        self.assertIn("delivered=s24", log_text)
+
+    def test_t480s_is_used_only_after_s24_delivery_failure(self):
+        hosts, _, log_text = self._run_hook(fail_host="s24")
+        self.assertEqual(hosts, ["s24", "t480s"])
+        self.assertIn("host=s24 DELIVER-FAIL", log_text)
+        self.assertIn("delivered=t480s", log_text)
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+The following direct-wrapper prototype is retained only as design history and
+is deliberately not tangled. The active process boundary is the registry-level
+=nanobot-tool-isolation.patch= below, which keeps path policy inside the child.
+Nanobot's built-in =grep= executes its filesystem walk synchronously on the
+gateway event loop, while =find_files= moves the same risk into an unkillable
+thread. A blocked network filesystem lookup can therefore freeze the bot long
+after the nominal timeout. The managed search seam moves both walks into a
+dedicated process group. Cancellation or the 30-second scan budget kills only
+that scan group, leaving the gateway and other agent sessions intact.
+
+#+BEGIN_SRC diff :tangle no :comments no
+--- a/nanobot/agent/tools/search.py
++++ b/nanobot/agent/tools/search.py
+@@ -7,8 +7,11 @@
+ import asyncio
+ import fnmatch
+ import heapq
++import json
+ import os
+ import re
++import signal
++import sys
+ import threading
+ import time
+ from collections import deque
+@@ -20,5 +23,6 @@
+ from nanobot.agent.tools.base import ToolResult
+ from nanobot.agent.tools.filesystem import ListDirTool, _FsTool
++from nanobot.config.loader import get_config_path
+ from nanobot.utils.document import (
+     LocatedDocumentLine,
+     PdfPageRangeError,
+@@ -186,0 +191,63 @@
++    _SCAN_PROCESS_GRACE_SECONDS = 5.0
++
++    async def _execute_isolated(
++        self,
++        kind: str,
++        arguments: dict[str, Any],
++        *,
++        timeout_seconds: float,
++    ) -> str:
++        """Run a potentially blocking filesystem walk outside the gateway process."""
++        requested_path = str(arguments.get("path") or ".")
++        try:
++            target = self._resolve(requested_path)
++        except PermissionError as exc:
++            return ToolResult.error(f"Error: {exc}")
++        except Exception as exc:
++            return ToolResult.error(f"Error resolving search path: {exc}")
++
++        worker = Path(__file__).with_name("_dotcortex_search_worker.py")
++        if not worker.is_file():
++            return ToolResult.error("Error: isolated search worker is not installed")
++
++        payload = {
++            "kind": kind,
++            "workspace": str(self._display_workspace() or target.parent),
++            "config_path": str(get_config_path()),
++            "arguments": {**arguments, "path": str(target)},
++        }
++        process = await asyncio.create_subprocess_exec(
++            sys.executable,
++            str(worker),
++            stdin=asyncio.subprocess.PIPE,
++            stdout=asyncio.subprocess.PIPE,
++            stderr=asyncio.subprocess.PIPE,
++            start_new_session=os.name != "nt",
++        )
++        try:
++            stdout, stderr = await asyncio.wait_for(
++                process.communicate(json.dumps(payload).encode("utf-8")),
++                timeout=timeout_seconds + self._SCAN_PROCESS_GRACE_SECONDS,
++            )
++        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
++            if process.returncode is None:
++                with suppress(ProcessLookupError, PermissionError):
++                    if os.name == "nt":
++                        process.kill()
++                    else:
++                        os.killpg(process.pid, signal.SIGKILL)
++                with suppress(asyncio.TimeoutError):
++                    await asyncio.wait_for(process.wait(), timeout=1.0)
++            if isinstance(exc, asyncio.CancelledError):
++                raise
++            return ToolResult.error(
++                f"Error: {kind} scan exceeded {timeout_seconds:g} seconds; "
++                "narrow path, query, glob, or type and retry."
++            )
++
++        output = stdout.decode("utf-8", errors="replace")
++        error = stderr.decode("utf-8", errors="replace").strip()
++        if process.returncode != 0:
++            detail = error or f"worker exited with status {process.returncode}"
++            return ToolResult.error(f"Error: isolated {kind} scan failed: {detail}")
++        return output
+@@ -381,21 +448,14 @@
+-        cancelled = threading.Event()
+-        try:
+-            return await asyncio.to_thread(
+-                self._execute_sync,
+-                path=path,
+-                query=query,
+-                glob=glob,
+-                file_type=type,
+-                include_dirs=include_dirs,
+-                sort=sort,
+-                head_limit=head_limit,
+-                offset=offset,
+-                cancelled=cancelled,
+-            )
+-        except asyncio.CancelledError:
+-            cancelled.set()
+-            raise
+-        except PermissionError as e:
+-            return ToolResult.error(f"Error: {e}")
+-        except Exception as e:
+-            return ToolResult.error(f"Error finding files: {e}")
++        return await self._execute_isolated(
++            "find_files",
++            {
++                "path": path,
++                "query": query,
++                "glob": glob,
++                "file_type": type,
++                "include_dirs": include_dirs,
++                "sort": sort,
++                "head_limit": head_limit,
++                "offset": offset,
++            },
++            timeout_seconds=self._MAX_SCAN_SECONDS,
++        )
+@@ -510,0 +571 @@
++    _MAX_SCAN_SECONDS = 30.0
+@@ -690,18 +752,57 @@
+-    async def execute(
+-        self,
+-        pattern: str,
+-        path: str = ".",
+-        glob: str | None = None,
+-        type: str | None = None,
+-        pages: str | None = None,
+-        case_insensitive: bool = False,
+-        fixed_strings: bool = False,
+-        output_mode: str = "content",
+-        context_before: int = 5,
+-        context_after: int = 5,
+-        max_matches: int | None = None,
+-        max_results: int | None = None,
+-        head_limit: int | None = None,
+-        offset: int = 0,
+-        **kwargs: Any,
+-    ) -> str:
++    async def execute(
++        self,
++        pattern: str,
++        path: str = ".",
++        glob: str | None = None,
++        type: str | None = None,
++        pages: str | None = None,
++        case_insensitive: bool = False,
++        fixed_strings: bool = False,
++        output_mode: str = "content",
++        context_before: int = 5,
++        context_after: int = 5,
++        max_matches: int | None = None,
++        max_results: int | None = None,
++        head_limit: int | None = None,
++        offset: int = 0,
++        **kwargs: Any,
++    ) -> str:
++        return await self._execute_isolated(
++            "grep",
++            {
++                "pattern": pattern,
++                "path": path,
++                "glob": glob,
++                "type": type,
++                "pages": pages,
++                "case_insensitive": case_insensitive,
++                "fixed_strings": fixed_strings,
++                "output_mode": output_mode,
++                "context_before": context_before,
++                "context_after": context_after,
++                "max_matches": max_matches,
++                "max_results": max_results,
++                "head_limit": head_limit,
++                "offset": offset,
++            },
++            timeout_seconds=self._MAX_SCAN_SECONDS,
++        )
++
++    def _execute_sync(
++        self,
++        pattern: str,
++        path: str = ".",
++        glob: str | None = None,
++        type: str | None = None,
++        pages: str | None = None,
++        case_insensitive: bool = False,
++        fixed_strings: bool = False,
++        output_mode: str = "content",
++        context_before: int = 5,
++        context_after: int = 5,
++        max_matches: int | None = None,
++        max_results: int | None = None,
++        head_limit: int | None = None,
++        offset: int = 0,
++        **kwargs: Any,
++    ) -> str:
+#+END_SRC
+
+#+BEGIN_SRC python :tangle no :comments no
+"""DotCortex child-process boundary for Nanobot filesystem scans."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+import threading
+from typing import Any
+
+from nanobot.agent.tools.search import FindFilesTool, GrepTool
+from nanobot.config.loader import set_config_path
+
+
+def main() -> int:
+    payload: dict[str, Any] = json.load(sys.stdin)
+    kind = payload.get("kind")
+    arguments = payload.get("arguments")
+    workspace = payload.get("workspace")
+    config_path = payload.get("config_path")
+    if (
+        not isinstance(arguments, dict)
+        or not isinstance(workspace, str)
+        or not isinstance(config_path, str)
+    ):
+        raise ValueError("invalid isolated-search payload")
+    set_config_path(Path(config_path))
+
+    if kind == "find_files":
+        tool = FindFilesTool(workspace=Path(workspace), restrict_to_workspace=False)
+        result = tool._execute_sync(cancelled=threading.Event(), **arguments)
+    elif kind == "grep":
+        tool = GrepTool(workspace=Path(workspace), restrict_to_workspace=False)
+        result = tool._execute_sync(**arguments)
+    else:
+        raise ValueError(f"unknown isolated-search kind: {kind!r}")
+
+    sys.stdout.write(str(result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+#+END_SRC
+
+The search isolation seam runs the native =grep= and =find_files= implementations
+inside spawned child processes. Their existing path policy, document extraction,
+and output semantics remain Nanobot's own. A 60-second parent deadline prevents
+the gateway event loop from waiting on NFS indefinitely. A child blocked in
+kernel D-state may persist until the NFS RPC returns; the gateway records the
+timeout, limits concurrent search children, and remains responsive.
+
+#+BEGIN_SRC diff :tangle all/.bots/patches/nanobot-tool-isolation.patch :comments no
+--- a/nanobot/agent/tools/execution.py
++++ b/nanobot/agent/tools/execution.py
+@@ -169,7 +169,11 @@
+             if tool_call.name == "read_file" else nullcontext()
+         ):
+             if tool is not None:
+-                result = await tool.execute(**params)
++                if tool_call.name in {"grep", "find_files"}:
++                    from nanobot.agent.tools.search_isolation import isolated_search
++                    result = await isolated_search(tool, params, tool_call.name)
++                else:
++                    result = await tool.execute(**params)
+             else:
+                 result = await tools.execute(tool_call.name, params)
+     except asyncio.CancelledError:
+--- a/nanobot/agent/tools/registry.py
++++ b/nanobot/agent/tools/registry.py
+@@ -194,6 +194,10 @@
+         try:
+             assert tool is not None  # guarded by prepare_call()
+-            result = await tool.execute(**params)
++            if name in {"grep", "find_files"}:
++                from nanobot.agent.tools.search_isolation import isolated_search
++                result = await isolated_search(tool, params, name)
++            else:
++                result = await tool.execute(**params)
+             if is_tool_error_result(result):
+                 return ToolResult.error(str(result) + hint)
+             return result
+#+END_SRC
+
+#+BEGIN_SRC python :tangle all/.bots/patches/nanobot-search-isolation.py :comments no
+"""Keep filesystem search from blocking Nanobot's gateway event loop."""
+
+from __future__ import annotations
+
+import asyncio
+import multiprocessing
+import os
+from pathlib import Path
+import signal
+import time
+from typing import Any
+
+from nanobot.agent.tools.base import ToolResult
+from nanobot.security.workspace_access import (
+    bind_workspace_scope,
+    current_workspace_scope,
+    reset_workspace_scope,
+)
+
+_MAX_CHILDREN = 4
+_TIMEOUT_SECONDS = 60.0
+
+
+def _child(send: Any, tool: Any, params: dict[str, Any], scope: Any) -> None:
+    if os.name == "posix":
+        os.setsid()
+        try:
+            Path("/proc/self/comm").write_text("nanobot-search\n", encoding="utf-8")
+        except OSError:
+            pass
+    token = bind_workspace_scope(scope) if scope is not None else None
+    try:
+        result = asyncio.run(tool.execute(**params))
+        send.send((bool(getattr(result, "is_error", False)), str(result)))
+    except BaseException as exc:
+        send.send((True, f"Error: {type(exc).__name__}: {exc}"))
+    finally:
+        if token is not None:
+            reset_workspace_scope(token)
+        send.close()
+
+
+async def isolated_search(tool: Any, params: dict[str, Any], name: str,
+                          timeout: float = _TIMEOUT_SECONDS) -> str:
+    """Run native search in a spawned process; return a bounded tool result."""
+    if name not in {"grep", "find_files"}:
+        return ToolResult.error(f"Error: unsupported isolated tool {name}")
+    active = [child for child in multiprocessing.active_children()
+              if child.name == "nanobot-search"]
+    if len(active) >= _MAX_CHILDREN:
+        return ToolResult.error("Error: search workers are still blocked; retry later")
+    ctx = multiprocessing.get_context("spawn")
+    receive, send = ctx.Pipe(duplex=False)
+    child = ctx.Process(target=_child, args=(send, tool, params,
+                                             current_workspace_scope()),
+                        name="nanobot-search", daemon=True)
+    started = False
+    try:
+        child.start()
+        started = True
+        send.close()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if receive.poll(0):
+                try:
+                    is_error, result = receive.recv()
+                except EOFError:
+                    return ToolResult.error(f"Error: {name} search worker exited without a result")
+                return ToolResult.error(result) if is_error else result
+            if not child.is_alive():
+                return ToolResult.error(f"Error: {name} search worker exited without a result")
+            await asyncio.sleep(0.05)
+        return ToolResult.error(
+            f"Error: {name} search worker timed out after {timeout:g} seconds; "
+            "narrow the path and retry"
+        )
+    except asyncio.CancelledError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        return ToolResult.error(f"Error: cannot start {name} search worker: {exc}")
+    finally:
+        receive.close()
+        send.close()
+        if started:
+            child.join(timeout=0.1)
+            if child.is_alive():
+                try:
+                    if os.name == "posix" and os.getpgid(child.pid) == child.pid:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    else:
+                        child.kill()
+                except (OSError, ProcessLookupError):
+                    pass
+                child.join(timeout=0.1)
+#+END_SRC
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-nanobot-search-isolation.py :comments no
+"""Synthetic process-boundary checks; no live gateway or filesystem scan."""
+from __future__ import annotations
+
+import asyncio
+import multiprocessing
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+SOURCE = Path(__file__).resolve().parents[4] / ".bots/patches/nanobot-search-isolation.py"
+MODULE_DIR = tempfile.TemporaryDirectory(prefix="nano-isolation-module-")
+shutil.copyfile(SOURCE, Path(MODULE_DIR.name) / "candidate_search_isolation.py")
+sys.path.insert(0, MODULE_DIR.name)
+from candidate_search_isolation import isolated_search
+from nanobot.agent.tools.search import FindFilesTool, GrepTool
+from nanobot.security.workspace_access import (
+    bind_workspace_scope,
+    current_workspace_scope,
+    default_workspace_scope,
+    reset_workspace_scope,
+)
+
+
+class FakeSearch:
+    def __init__(self, mode: str, pid_file: str | None = None):
+        self.mode = mode
+        self.pid_file = pid_file
+
+    async def execute(self, **_params):
+        if self.mode == "descendant":
+            child = subprocess.Popen(["/bin/sleep", "30"],
+                                     stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+            Path(self.pid_file).write_text(str(child.pid), encoding="utf-8")
+        if self.mode == "hang":
+            await asyncio.sleep(10)
+        if self.mode == "descendant":
+            await asyncio.sleep(60)
+        scope = current_workspace_scope()
+        return str(scope.project_path) if scope else "unscoped"
+
+
+class SearchIsolationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_native_tools_match_isolation_and_reject_outside_workspace(self):
+        with (tempfile.TemporaryDirectory(prefix="nano-native-workspace-") as root,
+              tempfile.TemporaryDirectory(prefix="nano-native-outside-") as outside):
+            workspace = Path(root)
+            outside_dir = Path(outside)
+            (workspace / "inside.txt").write_text("needle\n", encoding="utf-8")
+            outside_file = outside_dir / "outside.txt"
+            secret = "OUTSIDE_SECRET_SENTINEL"
+            outside_file.write_text(secret + "\n", encoding="utf-8")
+            cases = (
+                ("grep", GrepTool(workspace=workspace, allowed_dir=workspace,
+                                   restrict_to_workspace=True),
+                 {"pattern": "needle", "path": str(workspace), "fixed_strings": True,
+                  "context_before": 0, "context_after": 0, "head_limit": 10},
+                 {"pattern": secret, "path": str(outside_file), "fixed_strings": True}),
+                ("find_files", FindFilesTool(workspace=workspace, allowed_dir=workspace,
+                                             restrict_to_workspace=True),
+                 {"path": str(workspace), "glob": "*.txt", "head_limit": 10},
+                 {"path": str(outside_dir), "glob": "*.txt", "head_limit": 10}),
+            )
+            for name, tool, inside_params, outside_params in cases:
+                with self.subTest(tool=name):
+                    native = await tool.execute(**inside_params)
+                    isolated = await isolated_search(tool, inside_params, name, timeout=5)
+                    self.assertFalse(getattr(native, "is_error", False))
+                    self.assertEqual(str(isolated), str(native))
+                    self.assertEqual(getattr(isolated, "is_error", False),
+                                     getattr(native, "is_error", False))
+                    self.assertIn("inside.txt", str(isolated))
+
+                    native_denied = await tool.execute(**outside_params)
+                    isolated_denied = await isolated_search(tool, outside_params, name, timeout=5)
+                    self.assertTrue(getattr(native_denied, "is_error", False))
+                    self.assertEqual(str(isolated_denied), str(native_denied))
+                    self.assertEqual(getattr(isolated_denied, "is_error", False),
+                                     getattr(native_denied, "is_error", False))
+                    self.assertNotIn(secret, str(native_denied))
+                    self.assertNotIn(secret, str(isolated_denied))
+
+    async def test_native_scope_is_transmitted_to_each_search_kind(self):
+        with tempfile.TemporaryDirectory(prefix="nano-scope-") as root:
+            token = bind_workspace_scope(default_workspace_scope(Path(root), True))
+            try:
+                for kind in ("grep", "find_files"):
+                    result = await isolated_search(FakeSearch("return"), {}, kind, timeout=5)
+                    self.assertEqual(result, root)
+            finally:
+                reset_workspace_scope(token)
+
+    async def test_timeout_reaps_synthetic_worker(self):
+        start = time.monotonic()
+        result = await isolated_search(FakeSearch("hang"), {}, "grep", timeout=0.2)
+        self.assertIn("timed out", result)
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertFalse(any(p.name == "nanobot-search" for p in multiprocessing.active_children()))
+
+    async def test_cancel_reaps_synthetic_worker(self):
+        task = asyncio.create_task(isolated_search(FakeSearch("hang"), {}, "find_files", timeout=5))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertFalse(any(p.name == "nanobot-search" for p in multiprocessing.active_children()))
+
+    async def test_timeout_kills_synthetic_descendant_group(self):
+        with tempfile.TemporaryDirectory(prefix="nano-descendant-") as root:
+            pid_file = Path(root) / "pid"
+            # A spawned interpreter may cold-start through an NFS-backed venv;
+            # leave startup headroom while keeping the synthetic descendant alive.
+            result = await isolated_search(FakeSearch("descendant", str(pid_file)),
+                                           {}, "grep", timeout=10.0)
+            self.assertIn("timed out", result)
+            self.assertTrue(pid_file.is_file())
+            pid = int(pid_file.read_text(encoding="utf-8"))
+            for _ in range(20):
+                stat = Path(f"/proc/{pid}/stat")
+                if not stat.exists() or stat.read_text(encoding="utf-8").rsplit(") ", 1)[1].startswith("Z"):
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                self.fail(f"search descendant {pid} survived group kill")
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+* Nano Telegram idle-prompt admission
+
+MailCortex uses a bearer-authenticated conditional endpoint on Nano's live
+gateway process.  The endpoint accepts only an exact Telegram target shape.
+Admission checks global work, queued input, deferred automation, lock owners and
+lock waiters, then takes the real per-session dispatch lock without yielding.
+The detached turn owns that lock even if the HTTP acknowledgement is lost.
+
+The secret is not declared here: the gateway reads the private file named by
+=NANOBOT_MAILCORTEX_TOKEN_FILE=.  The watcher reads the same private file path
+from its private seat registry.  No listener, token, chat identity or port is
+created by this seam.
+
+#+BEGIN_SRC diff :tangle all/.bots/patches/nanobot-idle-prompt.patch :comments no
+--- a/nanobot/agent/loop.py
++++ b/nanobot/agent/loop.py
+@@ -1388,7 +1388,66 @@
+         """
+         self._preserve_inflight_turns_on_shutdown = True
+
+-    async def _dispatch(self, msg: InboundMessage) -> None:
++    @staticmethod
++    def _idle_prompt_lock_claimable(lock: asyncio.Lock) -> bool:
++        """True only for asyncio's no-suspension uncontended acquire path."""
++        return (type(lock) is asyncio.Lock and not lock.locked()
++                and not any(not waiter.cancelled()
++                            for waiter in (getattr(lock, "_waiters", None) or ())))
++
++    def idle_prompt_busy(self, session_key: str) -> bool | None:
++        """Fail-closed global-idle authority for conditional external admission."""
++        if not self._running or not isinstance(session_key, str) or not session_key:
++            return None
++        active = any(not task.done() for tasks in self._active_tasks.values() for task in tasks)
++        background = any(not task.done() for task in self._background_tasks)
++        deferred = any(queue for queue in self._deferred_automation_turns.values())
++        locks = list(self._session_locks.values())
++        gate = self._concurrency_gate
++        gate_busy = bool(gate is not None and (
++            gate.locked() or any(not waiter.cancelled()
++                                 for waiter in (getattr(gate, "_waiters", None) or ()))))
++        return bool(self.bus.inbound_size or self._pending_queues or active or background
++                    or deferred or gate_busy
++                    or any(not self._idle_prompt_lock_claimable(lock) for lock in locks))
++
++    async def try_admit_idle_message(self, msg: InboundMessage) -> str:
++        """Atomically reserve the real dispatch lock, then run one routed turn."""
++        session_key = self._effective_session_key(msg)
++        busy = self.idle_prompt_busy(session_key)
++        if busy is None:
++            return "unavailable"
++        if busy:
++            return "busy"
++        lock = self._get_session_lock(session_key)
++        if not self._idle_prompt_lock_claimable(lock):
++            return "busy"
++        # asyncio.Lock's uncontended acquire path does not suspend. There is no
++        # admission gap between the authoritative check and this reservation.
++        await lock.acquire()
++
++        async def run_admitted() -> None:
++            if msg.is_user_input:
++                await self.runtime_event_publisher.user_input_accepted(msg, session_key)
++            await self._dispatch(msg, _admitted_lock=lock)
++
++        try:
++            task = asyncio.create_task(run_admitted())
++        except BaseException:
++            lock.release()
++            raise
++
++        def settled(done: asyncio.Task[Any]) -> None:
++            if lock.locked():
++                lock.release()
++
++        task.add_done_callback(settled)
++        self._track_active_task(session_key, task)
++        return "accepted"
++
++    async def _dispatch(
++        self, msg: InboundMessage, *, _admitted_lock: asyncio.Lock | None = None,
++    ) -> None:
+         """Process a message: per-session serial, cross-session concurrent."""
+         session_key = self._effective_session_key(msg)
+         if session_key != msg.session_key:
+@@ -1409,13 +1468,16 @@
+                     recovery_admission.unregister_recovery_task(session_key, current_task)
+                 return
+         lock = self._get_session_lock(session_key)
++        if _admitted_lock is not None and _admitted_lock is not lock:
++            raise RuntimeError("idle admission lock does not match the routed session")
++        lock_context = nullcontext() if _admitted_lock is lock else lock
+         gate = self._concurrency_gate or nullcontext()
+
+         delivery = self.turn_delivery_factory.unrouted(msg, session_key)
+         pending: asyncio.Queue[InboundMessage] | None = None
+         completion_published = False
+         try:
+-            async with lock, gate:
++            async with lock_context, gate:
+                 # Only the task that owns the session lock may publish the
+                 # active mid-turn injection queue for this session.
+                 pending = asyncio.Queue(maxsize=20)
+--- a/nanobot/cli/gateway_runtime.py
++++ b/nanobot/cli/gateway_runtime.py
+@@ -759,11 +759,70 @@
+         console.print("[yellow]✗[/yellow] Heartbeat: disabled")
+
+     async def _health_server(host: str, health_port: int) -> None:
+-        """Lightweight HTTP health endpoint on the gateway port."""
++        """Health plus authenticated MailCortex conditional admission."""
++        import hmac as _hmac
+         import json as _json
++        import os as _os
++        import re as _re
++        import urllib.parse as _urlparse
++
++        from nanobot.bus.events import InboundMessage
+
+         connection_slots = asyncio.Semaphore(_GATEWAY_HEALTH_MAX_CONNECTIONS)
+
++        def admission_token() -> str | None:
++            raw = _os.environ.get("NANOBOT_MAILCORTEX_TOKEN_FILE", "").strip()
++            if not raw:
++                return None
++            path = Path(raw).expanduser()
++            try:
++                if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
++                    return None
++                token = path.read_text(encoding="utf-8").strip()
++            except OSError:
++                return None
++            return token or None
++
++        async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str], bytes]:
++            head = await asyncio.wait_for(
++                reader.readuntil(b"\r\n\r\n"),
++                timeout=_GATEWAY_HEALTH_READ_TIMEOUT_SECONDS,
++            )
++            if len(head) > 8192:
++                raise ValueError("request headers too large")
++            lines = head[:-4].split(b"\r\n")
++            parts = lines[0].decode("ascii", errors="strict").split(" ")
++            if len(parts) != 3:
++                raise ValueError("invalid request line")
++            headers: dict[str, str] = {}
++            for raw_line in lines[1:]:
++                name, separator, value = raw_line.partition(b":")
++                if not separator:
++                    raise ValueError("invalid request header")
++                headers[name.decode("ascii", errors="strict").strip().lower()] = (
++                    value.decode("utf-8", errors="strict").strip()
++                )
++            length = int(headers.get("content-length", "0"))
++            if length < 0 or length > 16384:
++                raise ValueError("request body too large")
++            body = await asyncio.wait_for(
++                reader.readexactly(length),
++                timeout=_GATEWAY_HEALTH_READ_TIMEOUT_SECONDS,
++            ) if length else b""
++            return parts[0], parts[1], headers, body
++
++        def response_payload(payload: object, status: str) -> tuple[str, str]:
++            return _json.dumps(payload, separators=(",", ":")), status
++
++        def authorized(headers: dict[str, str]) -> bool:
++            token = admission_token()
++            supplied = headers.get("authorization", "")
++            return bool(token and _hmac.compare_digest(supplied, "Bearer " + token))
++
++        def valid_session_key(value: object) -> bool:
++            return (isinstance(value, str) and value.startswith("telegram:")
++                    and 9 < len(value) <= 265)
++
+         async def handle(
+             reader: asyncio.StreamReader,
+             writer: asyncio.StreamWriter,
+@@ -774,22 +833,67 @@
+
+             async with connection_slots:
+                 try:
+-                    data = await asyncio.wait_for(
+-                        reader.read(4096),
+-                        timeout=_GATEWAY_HEALTH_READ_TIMEOUT_SECONDS,
+-                    )
+-                    request_line = data.split(b"\r\n", 1)[0].decode(
+-                        "utf-8", errors="replace",
+-                    )
+-                    method, path = "", ""
+-                    parts = request_line.split(" ")
+-                    if len(parts) >= 2:
+-                        method, path = parts[0], parts[1]
++                    method, raw_path, headers, raw_body = await read_request(reader)
++                    parsed_path = _urlparse.urlsplit(raw_path)
++                    path = parsed_path.path
+
+                     if method == "GET" and path == "/health":
+                         ready, payload = _gateway_readiness_payload(channels)
+-                        body = _json.dumps(payload)
+-                        status = "200 OK" if ready else "503 Service Unavailable"
++                        body, status = response_payload(
++                            payload, "200 OK" if ready else "503 Service Unavailable")
++                        content_type = "application/json"
++                    elif path in {"/mailcortex/idle-prompt/status", "/mailcortex/idle-prompt"} \
++                            and not authorized(headers):
++                        body, status = response_payload(
++                            {"error": "unauthorized"}, "401 Unauthorized")
++                        content_type = "application/json"
++                    elif method == "GET" and path == "/mailcortex/idle-prompt/status":
++                        query = _urlparse.parse_qs(parsed_path.query, strict_parsing=True)
++                        session_key = query.get("session_key", [None])[-1]
++                        busy = agent.idle_prompt_busy(session_key) if valid_session_key(session_key) else None
++                        payload = {"protocol": "nanobot.idle_prompt.v1", "known": busy is not None,
++                                   "busy": True if busy is None else busy,
++                                   "session_key": session_key}
++                        body, status = response_payload(
++                            payload, "200 OK" if busy is not None else "503 Service Unavailable")
++                        content_type = "application/json"
++                    elif method == "POST" and path == "/mailcortex/idle-prompt":
++                        try:
++                            value = _json.loads(raw_body.decode("utf-8"))
++                        except (UnicodeDecodeError, _json.JSONDecodeError):
++                            value = None
++                        target = value.get("target") if isinstance(value, dict) else None
++                        request_id = value.get("request_id") if isinstance(value, dict) else None
++                        session_key = target.get("session_key") if isinstance(target, dict) else None
++                        valid = (isinstance(value, dict)
++                                 and set(value) == {"protocol", "request_id", "target", "text"}
++                                 and value.get("protocol") == "nanobot.idle_prompt.v1"
++                                 and isinstance(request_id, str)
++                                 and _re.fullmatch(r"[0-9a-f]{32}", request_id)
++                                 and isinstance(target, dict)
++                                 and set(target) == {"mode", "channel", "chat_id", "session_key"}
++                                 and target.get("mode") == "telegram_gateway"
++                                 and target.get("channel") == "telegram"
++                                 and isinstance(target.get("chat_id"), str)
++                                 and session_key == f"telegram:{target['chat_id']}"
++                                 and valid_session_key(session_key)
++                                 and isinstance(value.get("text"), str)
++                                 and 0 < len(value["text"].strip()) <= 16000)
++                        if valid:
++                            outcome = await agent.try_admit_idle_message(InboundMessage(
++                                channel="telegram", sender_id="mailcortex",
++                                chat_id=target["chat_id"], content=value["text"],
++                                session_key_override=session_key,
++                            ))
++                        else:
++                            outcome = "invalid"
++                        payload = {"protocol": "nanobot.idle_prompt.v1",
++                                   "request_id": request_id, "session_key": session_key,
++                                   "status": outcome}
++                        code = {"accepted": "202 Accepted", "busy": "409 Conflict",
++                                "unavailable": "503 Service Unavailable",
++                                "invalid": "400 Bad Request"}[outcome]
++                        body, status = response_payload(payload, code)
+                         content_type = "application/json"
+                     else:
+                         body = "Not Found"
+@@ -805,7 +909,8 @@
+                     )
+                     writer.write(resp.encode())
+                     await writer.drain()
+-                except (asyncio.TimeoutError, ConnectionError):
++                except (asyncio.IncompleteReadError, asyncio.LimitOverrunError,
++                        asyncio.TimeoutError, ConnectionError, UnicodeError, ValueError):
+                     pass
+                 finally:
+                     writer.close()
+#+END_SRC
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-nanobot-idle-prompt.py :comments no
+"""Disposable-copy checks for Nano's atomic Telegram idle admission seam."""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import importlib
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from types import MethodType, SimpleNamespace
+import unittest
+
+
+ALL_OVERLAY = Path(__file__).resolve().parents[4]
+PATCH = ALL_OVERLAY / ".bots/patches/nanobot-idle-prompt.patch"
+
+
+class NanoIdlePromptSeamTest(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        source_value = os.environ.get("NANOBOT_SOURCE", "").strip()
+        if source_value:
+            source = Path(source_value).resolve()
+        else:
+            spec = importlib.util.find_spec("nanobot")
+            if spec is None or not spec.submodule_search_locations:
+                raise unittest.SkipTest("declared Nano runtime is unavailable")
+            source = Path(next(iter(spec.submodule_search_locations)))
+        if not (source / "agent/loop.py").is_file() \
+                or not (source / "cli/gateway_runtime.py").is_file():
+            raise unittest.SkipTest("NANOBOT_SOURCE lacks the pinned runtime files")
+        cls.temporary = tempfile.TemporaryDirectory(prefix="nano-idle-prompt-")
+        cls.site = Path(cls.temporary.name) / "site"
+        shutil.copytree(source, cls.site / "nanobot")
+        applied = subprocess.run(
+            ["patch", "--batch", "--fuzz=0", "-d", str(cls.site), "-p1", "-i", str(PATCH)],
+            text=True, capture_output=True, check=False,
+        )
+        if applied.returncode:
+            raise AssertionError(applied.stdout + applied.stderr)
+        compiled = subprocess.run(
+            [sys.executable, "-m", "py_compile",
+             str(cls.site / "nanobot/agent/loop.py"),
+             str(cls.site / "nanobot/cli/gateway_runtime.py")],
+            text=True, capture_output=True, check=False,
+        )
+        if compiled.returncode:
+            raise AssertionError(compiled.stdout + compiled.stderr)
+        for name in tuple(sys.modules):
+            if name == "nanobot" or name.startswith("nanobot."):
+                sys.modules.pop(name, None)
+        sys.path.insert(0, str(cls.site))
+        importlib.invalidate_caches()
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        cls.AgentLoop = AgentLoop
+        cls.InboundMessage = InboundMessage
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if hasattr(cls, "site"):
+            with contextlib.suppress(ValueError):
+                sys.path.remove(str(cls.site))
+        for name in tuple(sys.modules):
+            if name == "nanobot" or name.startswith("nanobot."):
+                sys.modules.pop(name, None)
+        if hasattr(cls, "temporary"):
+            cls.temporary.cleanup()
+
+    def make_loop(self):
+        entered, finish = asyncio.Event(), asyncio.Event()
+        lock = asyncio.Lock()
+        calls = []
+        class Publisher:
+            async def user_input_accepted(inner, message, session_key):
+                calls.append(("accepted", message.channel, session_key))
+        fake = SimpleNamespace(
+            _running=True, _active_tasks={}, _background_tasks=set(),
+            _deferred_automation_turns={}, _pending_queues={},
+            _session_locks={"telegram:YOUR_CHAT_ID": lock},
+            _concurrency_gate=None, _unified_session=False,
+            bus=SimpleNamespace(inbound_size=0),
+            runtime_event_publisher=Publisher(),
+        )
+        fake._effective_session_key = MethodType(self.AgentLoop._effective_session_key, fake)
+        fake._get_session_lock = lambda session_key: fake._session_locks.setdefault(
+            session_key, asyncio.Lock())
+        fake._track_active_task = MethodType(self.AgentLoop._track_active_task, fake)
+        fake._active_task_done = MethodType(self.AgentLoop._active_task_done, fake)
+        fake._idle_prompt_lock_claimable = self.AgentLoop._idle_prompt_lock_claimable
+        fake.idle_prompt_busy = MethodType(self.AgentLoop.idle_prompt_busy, fake)
+        async def dispatch(message, *, _admitted_lock=None):
+            calls.append(("dispatch", message.channel, message.chat_id, message.session_key))
+            self.assertIs(_admitted_lock, lock)
+            self.assertTrue(lock.locked())
+            entered.set()
+            await finish.wait()
+        fake._dispatch = dispatch
+        message = self.InboundMessage(
+            channel="telegram", sender_id="mailcortex", chat_id="YOUR_CHAT_ID",
+            content="MailCortex delivery", session_key_override="telegram:YOUR_CHAT_ID",
+        )
+        return fake, message, lock, entered, finish, calls
+
+    async def test_acceptance_reserves_real_session_lock_before_ack(self):
+        fake, message, lock, entered, finish, calls = self.make_loop()
+        outcome = await self.AgentLoop.try_admit_idle_message(fake, message)
+        self.assertEqual(outcome, "accepted")
+        self.assertTrue(lock.locked())
+        await entered.wait()
+        self.assertEqual(calls[-1], (
+            "dispatch", "telegram", "YOUR_CHAT_ID", "telegram:YOUR_CHAT_ID"))
+        finish.set()
+        await asyncio.gather(*tuple(fake._active_tasks["telegram:YOUR_CHAT_ID"]))
+        await asyncio.sleep(0)
+        self.assertFalse(lock.locked())
+
+    async def test_second_admission_is_busy_and_never_dispatches(self):
+        fake, message, lock, entered, finish, calls = self.make_loop()
+        self.assertEqual(
+            await self.AgentLoop.try_admit_idle_message(fake, message), "accepted")
+        await entered.wait()
+        self.assertEqual(
+            await self.AgentLoop.try_admit_idle_message(fake, message), "busy")
+        self.assertEqual(sum(item[0] == "dispatch" for item in calls), 1)
+        finish.set()
+        await asyncio.gather(*tuple(fake._active_tasks["telegram:YOUR_CHAT_ID"]))
+
+    async def test_queued_input_and_stopped_gateway_fail_closed(self):
+        fake, message, lock, entered, finish, calls = self.make_loop()
+        fake.bus.inbound_size = 1
+        self.assertEqual(
+            await self.AgentLoop.try_admit_idle_message(fake, message), "busy")
+        fake.bus.inbound_size = 0
+        fake._running = False
+        self.assertEqual(
+            await self.AgentLoop.try_admit_idle_message(fake, message), "unavailable")
+        self.assertEqual(calls, [])
+        self.assertFalse(lock.locked())
+
+    async def test_notified_lock_waiter_counts_as_busy(self):
+        fake, message, lock, entered, finish, calls = self.make_loop()
+        await lock.acquire()
+        waiter = asyncio.create_task(lock.acquire())
+        await asyncio.sleep(0)
+        lock.release()
+        self.assertEqual(
+            await self.AgentLoop.try_admit_idle_message(fake, message), "busy")
+        await waiter
+        lock.release()
+        self.assertEqual(calls, [])
+
+    def test_disposable_patch_is_repeatable_and_endpoint_is_authenticated(self):
+        reverse = subprocess.run(
+            ["patch", "--batch", "--fuzz=0", "--dry-run", "--reverse",
+             "-d", str(self.site), "-p1", "-i", str(PATCH)],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(reverse.returncode, 0, reverse.stdout + reverse.stderr)
+        runtime = (self.site / "nanobot/cli/gateway_runtime.py").read_text(encoding="utf-8")
+        self.assertIn("NANOBOT_MAILCORTEX_TOKEN_FILE", runtime)
+        self.assertIn("/mailcortex/idle-prompt", runtime)
+        self.assertIn('"status": outcome', runtime)
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
 
 #+BEGIN_SRC bash :tangle linux/.local/bin/nanobot-apply :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
 # ~/DotCortex/linux/.local/bin/nanobot-apply
 set -euo pipefail
-
-NANOBOT_VERSION="0.3.5"
-WORKSPACE="${NANOBOT_WORKSPACE:-$HOME/HelmCortex/FORGE/brain/nanobot}"
-VENV="${NANOBOT_VENV:-$WORKSPACE/.venv}"
-CONFIG_DIR="${NANOBOT_CONFIG_DIR:-$HOME/.config/nanobot-telegram}"
-CONFIG="${NANOBOT_CONFIG:-$CONFIG_DIR/config.json}"
-TEMPLATE="${NANOBOT_CONFIG_TEMPLATE:-$HOME/DotCortex/all/.bots/templates/nanobot-config.json}"
-
-export PATH="$HOME/.local/bin:$PATH"
+case "${1:-}" in
+    -h|--help)
+        echo 'Usage: nanobot-apply [--check]'
+        echo 'Preflight pinned source and all seams before repair; --check reads local drift only.'
+        echo 'NANOBOT_SOURCE_ARCHIVE supplies the pinned source archive for offline apply.'
+        exit 0 ;;
+    ''|--check) [ "$#" -le 1 ] || exit 2 ;;
+    *) echo 'nanobot-apply: unknown argument' >&2; exit 2 ;;
+esac
+export PYTHONDONTWRITEBYTECODE=1
 export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
+export PATH="$HOME/.local/bin:$PATH"
+python3 - "${1:-}" <<'PY'
+import ast
+from email.parser import BytesParser
+import hashlib
+import io
+import json
+import math
+import os
+from pathlib import Path, PurePosixPath
+import shutil
+import subprocess
+import sys
+import tarfile
+import tomllib
+import tempfile
+from urllib.request import urlopen
 
-command -v uv >/dev/null 2>&1 || {
-    echo "nanobot-apply: uv is missing; run loom pip:apply first" >&2
-    exit 1
-}
-[ -r "$TEMPLATE" ] || {
-    echo "nanobot-apply: config template is missing: $TEMPLATE" >&2
-    exit 1
-}
+VERSION = "0.3.5"
+DIGEST = "5d5d92ba163937421c99404ac026dc4723d3b23b83c13a0be3111237401a1dc0"
+URL = "https://files.pythonhosted.org/packages/20/9c/398b2bb63ceee937b496e4b9a26bc7ddc9a2d25d66dc6f7728fca18f80be/nanobot_ai-0.3.5.tar.gz"
+home = Path.home()
+workspace = Path(os.environ.get("NANOBOT_WORKSPACE", str(home / "HelmCortex/FORGE/brain/nanobot"))).expanduser()
+venv = Path(os.environ.get("NANOBOT_VENV", str(workspace / ".venv"))).expanduser()
+config_dir = Path(os.environ.get("NANOBOT_CONFIG_DIR", str(home / ".config/nanobot-telegram"))).expanduser()
+config = Path(os.environ.get("NANOBOT_CONFIG", str(config_dir / "config.json"))).expanduser()
+template = Path(os.environ.get("NANOBOT_CONFIG_TEMPLATE", str(home / "DotCortex/all/.bots/templates/nanobot-config.json"))).expanduser()
+patch_root = home / "DotCortex/all/.bots/patches"
+patches = [Path(os.environ.get(key, str(patch_root / name))).expanduser() for key, name in (
+    ("NANOBOT_CACHE_POLICY_PATCH", "nanobot-cache-policy.patch"),
+    ("NANOBOT_VOICE_REPLY_PATCH", "nanobot-voice-reply.patch"),
+    ("NANOBOT_TOOL_PATCH", "nanobot-tool-isolation.patch"),
+    ("NANOBOT_IDLE_PROMPT_PATCH", "nanobot-idle-prompt.patch"),
+)]
+seam = Path(os.environ.get("NANOBOT_SEARCH_ISOLATION", str(patch_root / "nanobot-search-isolation.py"))).expanduser()
+stamp = venv / ".dotcortex-runtime-patches.sha256"
+managed = ("agent/autocompact.py", "channels/telegram/runtime.py", "agent/tools/execution.py",
+           "agent/tools/registry.py", "agent/loop.py", "cli/gateway_runtime.py",
+           "agent/tools/search_isolation.py")
 
-mkdir -p "$WORKSPACE" "$CONFIG_DIR"
-chmod 700 "$CONFIG_DIR"
+def fail(message):
+    raise ValueError(message)
 
-if [ ! -x "$VENV/bin/python" ]; then
-    uv venv --python 3.13 "$VENV"
-fi
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
 
-uv pip install --upgrade --python "$VENV/bin/python" \
-    "nanobot-ai==$NANOBOT_VERSION" \
-    "python-telegram-bot[socks,webhooks]>=22.6,<23.0" \
-    "python-socks[asyncio]>=2.8,<3.0"
+def object_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            fail("duplicate JSON key")
+        result[key] = value
+    return result
 
-if [ ! -e "$CONFIG" ]; then
-    install -m 600 "$TEMPLATE" "$CONFIG"
-    echo "nanobot-apply: installed non-secret config template at $CONFIG"
-else
-    chmod 600 "$CONFIG"
-fi
+def read_object(data):
+    result = json.loads(data, object_pairs_hook=object_pairs,
+                        parse_float=lambda value: float(value) if math.isfinite(float(value)) else fail("nonfinite JSON number"),
+                        parse_constant=lambda value: fail("nonfinite JSON value"))
+    if not isinstance(result, dict):
+        fail("config/manifest must be a JSON object")
+    return result
 
-"$VENV/bin/nanobot" onboard --refresh --config "$CONFIG" --workspace "$WORKSPACE"
-"$VENV/bin/nanobot" --version
-"$VENV/bin/python" -c 'import telegram; print("telegram adapter", telegram.__version__)'
+def regular(path):
+    if path.is_symlink() or not path.is_file():
+        fail("missing or nonregular input")
+    return path.read_bytes()
 
-echo "nanobot-apply: ready at $VENV (pinned nanobot-ai $NANOBOT_VERSION)"
+def inputs():
+    return {str(p): digest(regular(p)) for p in [*patches, seam]}
+
+def runtime():
+    python = venv / "bin/python"
+    if not python.is_file():
+        return None, None
+    code = 'import site,importlib.metadata,json; print(json.dumps([site.getsitepackages()[0],importlib.metadata.version("nanobot-ai")]))'
+    result = subprocess.run([str(python), "-c", code], capture_output=True, text=True, check=True)
+    site, version = json.loads(result.stdout)
+    site = Path(site)
+    if not site.is_absolute() or not site.resolve().is_relative_to(venv.resolve()):
+        fail("runtime site-packages escapes venv")
+    return site, version
+
+def checked_files(site, expected):
+    root = site / "nanobot"
+    if root.is_symlink() or not root.resolve().is_relative_to(site.resolve()):
+        fail("runtime package escapes site-packages")
+    for rel, value in expected.items():
+        path = site / "nanobot" / rel
+        if not path.resolve().is_relative_to((site / "nanobot").resolve()) or path.is_symlink():
+            fail("managed runtime path escapes package")
+        if not path.is_file() or digest(path.read_bytes()) != value:
+            return False
+    return True
+
+try:
+    source_hashes = inputs()
+    if stamp.is_symlink():
+        fail("managed manifest must not be a symlink")
+    if sys.argv[1] == "--check":
+        data = read_object(regular(stamp))
+        expected_inputs = {str(i): value for i, value in enumerate(source_hashes.values())}
+        expected_files = data.get("files")
+        if (data.get("format") != "nanobot-seams.v1" or data.get("version") != VERSION
+                or data.get("inputs") != expected_inputs or not isinstance(expected_files, dict)
+                or set(expected_files) != set(managed)
+                or any(not isinstance(h, str) or len(h) != 64
+                       or any(c not in "0123456789abcdef" for c in h) for h in expected_files.values())):
+            fail("stale or invalid managed manifest")
+        site, version = runtime()
+        if version != VERSION or not checked_files(site, expected_files):
+            fail("managed runtime byte drift")
+        read_object(regular(config))
+        print("nanobot: pinned runtime and managed bytes OK")
+        sys.exit(0)
+
+    if not shutil.which("uv") or not shutil.which("git"):
+        fail("uv/git missing; provision through loom first")
+    template_bytes = regular(template)
+    if config.is_symlink() or (config.exists() and not config.is_file()):
+        fail("config must be a regular file")
+    current_bytes = config.read_bytes() if config.exists() else None
+    current = read_object(current_bytes) if current_bytes is not None else {}
+    declared = read_object(template_bytes)
+    # Preserve all existing private values and runtime selections; only fill gaps.
+    def fill(base, defaults):
+        for key, value in defaults.items():
+            if key not in base:
+                base[key] = value
+            elif isinstance(value, dict):
+                if not isinstance(base[key], dict):
+                    fail("managed config object has invalid shape")
+                fill(base[key], value)
+    fill(current, declared)
+    for key in ("agents", "modelPresets", "providers", "channels", "tools", "gateway"):
+        if key in current and not isinstance(current[key], dict):
+            fail("invalid config section shape")
+    defaults = current.setdefault("agents", {}).setdefault("defaults", {})
+    if not isinstance(defaults, dict):
+        fail("invalid agent defaults")
+    defaults["idleCompactAfterMinutes"] = 0
+    interval = declared.get("agents", {}).get("defaults", {}).get("idleCompactCheckIntervalSeconds", 60)
+    if type(interval) is not int or interval <= 0:
+        fail("invalid scanner interval")
+    defaults["idleCompactCheckIntervalSeconds"] = interval
+    presets = current.get("modelPresets", {})
+    if any(not isinstance(value, dict) for value in presets.values()):
+        fail("invalid model preset shape")
+    selected = defaults.get("modelPreset")
+    if selected is not None and (not isinstance(selected, str) or selected not in presets):
+        fail("selected model preset is unresolved")
+    for value in presets.values():
+        if any(key in value and (not isinstance(value[key], str) or not value[key]) for key in ("model", "provider")):
+            fail("invalid model/provider selection")
+    prepared = (json.dumps(current, ensure_ascii=False, indent=2) + "\n").encode()
+    archive_source = os.environ.get("NANOBOT_SOURCE_ARCHIVE")
+    source = Path(archive_source).expanduser() if archive_source else None
+    archive = regular(source) if source is not None else None
+    if archive is None:
+        with urlopen(URL, timeout=30) as response:
+            archive = response.read()
+    if digest(archive) != DIGEST:
+        fail("pinned source digest mismatch")
+    with tempfile.TemporaryDirectory(prefix="nanobot-preflight-") as temporary:
+        stage = Path(temporary)
+        seen = set()
+        prefix = "nanobot_ai-" + VERSION
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            for member in tar.getmembers():
+                path = PurePosixPath(member.name)
+                if (path.is_absolute() or ".." in path.parts or not path.parts
+                        or path.parts[0] != prefix or member.issym() or member.islnk()
+                        or not (member.isdir() or member.isfile()) or member.name in seen):
+                    fail("unsafe source archive path/type")
+                seen.add(member.name)
+                target = stage.joinpath(*path.parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(tar.extractfile(member).read())
+        release = stage / prefix
+        metadata = BytesParser().parsebytes((release / "PKG-INFO").read_bytes())
+        if metadata["Name"] != "nanobot-ai" or metadata["Version"] != VERSION:
+            fail("wrong pristine release identity")
+        package = release / "nanobot"
+        project = tomllib.loads((release / "pyproject.toml").read_text())["project"]
+        if project.get("name") != "nanobot-ai" or project.get("version") != VERSION or not (package / "__init__.py").is_file():
+            fail("wrong pristine package identity")
+        pristine = {rel: digest((package / rel).read_bytes()) for rel in managed[:-1]}
+        for index, patch in enumerate(patches):
+            payload = regular(patch)
+            for line in payload.decode().splitlines():
+                if line.startswith(("--- ", "+++ ")):
+                    if line[4:] not in {side + "/nanobot/" + rel for side in ("a", "b") for rel in managed[:-1]}:
+                        fail("patch target outside managed files")
+            staged_patch = stage / ("patch-" + str(index))
+            staged_patch.write_bytes(payload)
+            subprocess.run(["git", "apply", "--check", str(staged_patch)], cwd=release, check=True, capture_output=True)
+            subprocess.run(["git", "apply", str(staged_patch)], cwd=release, check=True, capture_output=True)
+        (package / managed[-1]).write_bytes(regular(seam))
+        for path in package.rglob("*.py"):
+            compile(ast.parse(path.read_bytes(), filename=str(path)), str(path), "exec")
+        expected = {rel: digest((package / rel).read_bytes()) for rel in managed}
+        site, version = runtime()
+        matching = version == VERSION and checked_files(site, expected)
+        # Last read-only gate: originals must still match the validated staged inputs.
+        if (inputs() != source_hashes or regular(template) != template_bytes
+                or (config.read_bytes() if config.exists() else None) != current_bytes
+                or (source is not None and digest(regular(source)) != DIGEST)):
+            fail("inputs changed after preflight")
+        print("nanobot-apply: complete pristine series and config preflight passed")
+        # LIVE MUTATION GATE. No workspace/config/venv/mode/stamp changes above.
+        if not matching:
+            workspace.mkdir(parents=True, exist_ok=True)
+            if not (venv / "bin/python").is_file():
+                subprocess.run(["uv", "venv", "--python", "3.13", str(venv)], check=True)
+            subprocess.run(["uv", "pip", "install", "--upgrade", "--reinstall-package", "nanobot-ai",
+                            "--python", str(venv / "bin/python"), "nanobot-ai==" + VERSION,
+                            "python-telegram-bot[socks,webhooks]>=22.6,<23.0",
+                            "python-socks[asyncio]>=2.8,<3.0"], check=True)
+            site, version = runtime()
+            if version != VERSION or not checked_files(site, pristine):
+                fail("installer did not produce pinned pristine managed bytes")
+            for rel in managed:
+                target = site / "nanobot" / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((package / rel).read_bytes())
+                target.chmod(0o644)
+        if not checked_files(site, expected):
+            fail("installed managed bytes differ from staged series")
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.parent.chmod(0o700)
+        if prepared != current_bytes:
+            with tempfile.NamedTemporaryFile(dir=config.parent, prefix=".config-", delete=False) as fh:
+                fh.write(prepared)
+                fh.flush()
+                os.fsync(fh.fileno())
+                temporary_config = Path(fh.name)
+            temporary_config.chmod(0o600)
+            os.replace(temporary_config, config)
+        else:
+            config.chmod(0o600)
+        manifest = dict(format="nanobot-seams.v1", version=VERSION, files=expected,
+                        inputs={str(i): value for i, value in enumerate(source_hashes.values())})
+        stamp.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+        stamp.chmod(0o600)
+        # Native profiles, memories, sessions and cron are Dream/operator-owned.
+        # Do not onboard/refresh or initialize a workspace git store here.
+        print("nanobot-apply: pinned runtime and managed seams ready; native state preserved")
+except Exception as exc:
+    message = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+    print("nanobot-apply: failed: " + message, file=sys.stderr)
+    sys.exit(1)
+PY
 #+END_SRC
 
 #+BEGIN_SRC bash :tangle linux/.local/bin/nanobot-health :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
 # ~/DotCortex/linux/.local/bin/nanobot-health
 set -euo pipefail
-
-WORKSPACE="${NANOBOT_WORKSPACE:-$HOME/HelmCortex/FORGE/brain/nanobot}"
-VENV="${NANOBOT_VENV:-$WORKSPACE/.venv}"
-CONFIG_DIR="${NANOBOT_CONFIG_DIR:-$HOME/.config/nanobot-telegram}"
-CONFIG="${NANOBOT_CONFIG:-$CONFIG_DIR/config.json}"
-
-if [ ! -x "$VENV/bin/nanobot" ]; then
-    echo "nanobot: MISSING ($VENV); run loom nanobot:apply"
-    exit 1
-fi
-
-"$VENV/bin/nanobot" --version
-"$VENV/bin/python" -c 'import telegram; print("telegram adapter", telegram.__version__)'
-printf 'workspace: %s\nconfig: %s\n' "$WORKSPACE" "$CONFIG"
-if [ -r "$CONFIG" ]; then
-    stat -c 'config mode: %a' "$CONFIG"
-else
-    echo "config: MISSING"
-    exit 1
-fi
+case "${1:-}" in
+    -h|--help)
+        echo 'Usage: nanobot-health'
+        echo 'Check pinned runtime and managed-file drift locally without downloads or installs.'
+        exit 0 ;;
+    '') [ "$#" -eq 0 ] || exit 2 ;;
+    *) echo 'nanobot-health: unknown argument' >&2; exit 2 ;;
+esac
+script_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+exec "$script_dir/nanobot-apply" --check
 #+END_SRC
 
 * Local kitten voice venv (Linux clients, uv-managed)

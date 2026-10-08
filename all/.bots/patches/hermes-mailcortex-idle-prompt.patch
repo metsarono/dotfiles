@@ -1,0 +1,327 @@
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index 6195403c90..c61d9df085 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -1760,6 +1760,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
+             ("GET", "/v1/artifacts/download/{artifact_id}", self._handle_artifact_download),
+             ("GET", "/v1/skills", self._handle_skills),
+             ("GET", "/v1/toolsets", self._handle_toolsets),
++            ("POST", "/api/gateway/idle-prompt/status", self._handle_gateway_idle_prompt_status),
++            ("POST", "/api/gateway/idle-prompt", self._handle_gateway_idle_prompt),
+             ("GET", "/api/sessions", self._handle_list_sessions),
+             ("POST", "/api/sessions", self._handle_create_session),
+             ("GET", "/api/sessions/{session_id}", self._handle_get_session),
+@@ -3025,6 +3027,82 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
+         payload["has_model_config"] = bool(session.get("model_config"))
+         return payload
+ 
++    _GATEWAY_IDLE_PROMPT_PROTOCOL = "hermes.gateway_idle_prompt.v1"
++
++    @classmethod
++    def _gateway_idle_prompt_response(
++        cls, *, session_key: Any, request_id: Any = None,
++        status: Optional[str] = None, known: Optional[bool] = None,
++        busy: Optional[bool] = None, http_status: int = 200,
++    ) -> "web.Response":
++        payload: Dict[str, Any] = {
++            "protocol": cls._GATEWAY_IDLE_PROMPT_PROTOCOL,
++            "session_key": session_key,
++        }
++        if request_id is not None:
++            payload["request_id"] = request_id
++        if status is not None:
++            payload["status"] = status
++        if known is not None:
++            payload["known"] = known
++        if busy is not None:
++            payload["busy"] = busy
++        return web.json_response(payload, status=http_status)
++
++    @staticmethod
++    def _valid_gateway_session_key(value: Any) -> bool:
++        return (isinstance(value, str) and 1 <= len(value) <= 512
++                and ":telegram:" in value)
++
++    @_require_auth
++    async def _handle_gateway_idle_prompt_status(
++        self, request: "web.Request",
++    ) -> "web.Response":
++        body, error = await self._read_json_body(request)
++        session_key = body.get("session_key")
++        if (error is not None or set(body) != {"protocol", "session_key"}
++                or body.get("protocol") != self._GATEWAY_IDLE_PROMPT_PROTOCOL
++                or not self._valid_gateway_session_key(session_key)):
++            return self._gateway_idle_prompt_response(
++                session_key=session_key, known=False, busy=True, http_status=400)
++        runner = self.gateway_runner
++        if runner is None:
++            return self._gateway_idle_prompt_response(
++                session_key=session_key, known=False, busy=True, http_status=503)
++        outcome = await runner.gateway_idle_prompt_status(session_key)
++        if outcome == "unavailable":
++            return self._gateway_idle_prompt_response(
++                session_key=session_key, known=False, busy=True, http_status=503)
++        return self._gateway_idle_prompt_response(
++            session_key=session_key, known=True, busy=outcome == "busy")
++
++    @_require_auth
++    async def _handle_gateway_idle_prompt(self, request: "web.Request") -> "web.Response":
++        body, error = await self._read_json_body(request)
++        request_id = body.get("request_id")
++        session_key = body.get("session_key")
++        valid = (error is None
++                 and set(body) == {"protocol", "request_id", "session_key", "text"}
++                 and body.get("protocol") == self._GATEWAY_IDLE_PROMPT_PROTOCOL
++                 and isinstance(request_id, str)
++                 and re.fullmatch(r"[0-9a-f]{32}", request_id)
++                 and self._valid_gateway_session_key(session_key)
++                 and isinstance(body.get("text"), str)
++                 and 0 < len(body["text"].strip()) <= 16000)
++        if not valid:
++            return self._gateway_idle_prompt_response(
++                session_key=session_key, request_id=request_id,
++                status="invalid", http_status=400)
++        runner = self.gateway_runner
++        outcome = (await runner.admit_gateway_idle_prompt(session_key, body["text"])
++                   if runner is not None else "unavailable")
++        http_status = {"accepted": 202, "busy": 409, "unavailable": 503}.get(outcome, 503)
++        if outcome not in {"accepted", "busy", "unavailable"}:
++            outcome = "unavailable"
++        return self._gateway_idle_prompt_response(
++            session_key=session_key, request_id=request_id,
++            status=outcome, http_status=http_status)
++
+     @staticmethod
+     def _message_response(message: Dict[str, Any]) -> Dict[str, Any]:
+         message = _project_client_message(message)
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index b403617076..f63e12084c 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -1943,6 +1943,9 @@ class BasePlatformAdapter(ABC):
+         self._pending_text_batches: Dict[str, MessageEvent] = {}
+         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
+         self._session_tasks: Dict[str, asyncio.Task] = {}
++        # Events inside handle_message() but not yet represented by the active-session guard.
++        # Counts, rather than a set, preserve overlapping admissions for the same routing key.
++        self._admitting_sessions: Dict[str, int] = {}
+         # Busy-text policy is a per-profile config decision the runner installs after construction
+         # (``_wire_adapter_handlers``); a constructor-time process-env read would freeze the launch
+         # profile's values into every profile's adapter under multiplexing (#116893). Defaults here
+@@ -3867,6 +3870,44 @@ class BasePlatformAdapter(ABC):
+     # ── Session task + guard ownership helpers: paired with the _session_tasks owner map so
+     # reconciliation is deterministic across completion, /stop /new /reset, and stale-lock heal.
+ 
++    def _begin_session_admission(self, session_key: str) -> None:
++        admissions = getattr(self, "_admitting_sessions", None)
++        if not isinstance(admissions, dict):
++            admissions = self._admitting_sessions = {}
++        admissions[session_key] = admissions.get(session_key, 0) + 1
++
++    def _end_session_admission(self, session_key: str) -> None:
++        admissions = getattr(self, "_admitting_sessions", None)
++        if not isinstance(admissions, dict):
++            return
++        remaining = admissions.get(session_key, 0) - 1
++        if remaining > 0:
++            admissions[session_key] = remaining
++        else:
++            admissions.pop(session_key, None)
++
++    def _has_platform_pending_input(self, session_key: str) -> bool:
++        """Platform-specific buffered input not represented by the shared text batch."""
++        return False
++
++    def _session_has_pending_work(self, session_key: str) -> bool:
++        """True while this adapter owns or is admitting work for *session_key*."""
++        if any(session_key in work for work in (
++            self._admitting_sessions,
++            self._active_sessions,
++            self._pending_messages,
++            self._pending_text_batches,
++            self._pending_text_batch_tasks,
++            self._text_debounce,
++        )):
++            return True
++        task = self._session_tasks.get(session_key)
++        if task is not None:
++            done = getattr(task, "done", None)
++            if not callable(done) or not done():
++                return True
++        return self._has_platform_pending_input(session_key)
++
+     def _release_session_guard(self, session_key: str, *, guard: Optional[asyncio.Event] = None) -> None:
+         """Release the session guard; with ``guard`` given, only if the entry is still that exact
+         Event (an old task's unwind must not clear the guard a reset-like command swapped in)."""
+@@ -4007,24 +4048,33 @@ class BasePlatformAdapter(ABC):
+         if self._drop_unresolved(event):
+             return
+         expected_session_key = str((event.metadata or {}).get("gateway_session_key") or "").strip()
+-        # Explicitly routed events already name their destination; recovering a
+-        # different topic would redirect them and yield before the session claim.
+-        if (not expected_session_key and getattr(self, "_topic_recovery_fn", None) is not None
+-                and event.source.platform == Platform.TELEGRAM and event.source.chat_type == "dm"):
+-            await asyncio.to_thread(self._apply_topic_recovery, event)
+-        session_key = self._event_session_key(event)
+-        if expected_session_key and session_key != expected_session_key:
+-            logger.warning("Dropping internally routed event: expected session=%s derived=%s",
+-                           expected_session_key, session_key)
+-            return
+-        # On-entry self-heal: clear a guard whose owner task already exited.
+-        if session_key in self._active_sessions:
+-            self._heal_stale_session_lock(session_key)
+-        if session_key in self._active_sessions:
+-            await self._handle_message_while_active(event, session_key)
+-            return
+-        # Guard installed synchronously BEFORE the task spawns so a second message can't race in.
+-        event._gateway_accepted = self._start_session_processing(event, session_key)
++        admission_key = expected_session_key or self._event_session_key(event)
++        self._begin_session_admission(admission_key)
++        try:
++            # Explicitly routed events already name their destination; recovering a
++            # different topic would redirect them and yield before the session claim.
++            if (not expected_session_key and getattr(self, "_topic_recovery_fn", None) is not None
++                    and event.source.platform == Platform.TELEGRAM and event.source.chat_type == "dm"):
++                await asyncio.to_thread(self._apply_topic_recovery, event)
++            session_key = self._event_session_key(event)
++            if session_key != admission_key:
++                self._end_session_admission(admission_key)
++                admission_key = session_key
++                self._begin_session_admission(admission_key)
++            if expected_session_key and session_key != expected_session_key:
++                logger.warning("Dropping internally routed event: expected session=%s derived=%s",
++                               expected_session_key, session_key)
++                return
++            # On-entry self-heal: clear a guard whose owner task already exited.
++            if session_key in self._active_sessions:
++                self._heal_stale_session_lock(session_key)
++            if session_key in self._active_sessions:
++                await self._handle_message_while_active(event, session_key)
++                return
++            # Guard installed synchronously BEFORE the task spawns so a second message can't race in.
++            event._gateway_accepted = self._start_session_processing(event, session_key)
++        finally:
++            self._end_session_admission(admission_key)
+ 
+     async def _handle_message_while_active(self, event: MessageEvent, session_key: str) -> None:
+         """Route a message that arrived while ``session_key`` is busy: bypass
+@@ -4727,7 +4777,8 @@ class BasePlatformAdapter(ABC):
+         for state in self._text_debounce_store().values():
+             state.cancel_timer()
+         for bucket in (self._background_tasks, self._expected_cancelled_tasks, self._session_tasks,
+-                       self._pending_messages, self._active_sessions, self._requeue_counts,
++                       self._pending_messages, self._active_sessions,
++                       getattr(self, "_admitting_sessions", {}), self._requeue_counts,
+                        self._text_debounce_store()):
+             bucket.clear()
+ 
+diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
+index 626d7806ad..b440159226 100644
+--- a/gateway/run_inbound.py
++++ b/gateway/run_inbound.py
+@@ -1842,6 +1842,85 @@ class GatewayInboundMixin:
+ 
+         clear_published_gateway_message_host(self)
+ 
++    async def _gateway_idle_prompt_target(self, session_key: str):
++        """Resolve one durable session back to its authorized delivery adapter."""
++        accepting = (getattr(self, "_running", False)
++                     and not getattr(self, "_draining", False)
++                     and not getattr(self, "_external_drain_active", False))
++        if not accepting:
++            return None
++        try:
++            entry = await self.async_session_store.lookup_by_session_key(session_key)
++            if entry is None or entry.origin is None:
++                return None
++            from gateway.session_identity import replace_source
++            source = replace_source(self._restored_source(entry))
++            if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
++                return None
++            authorized = self._is_user_authorized_for_source(
++                source, allow_adapter_delegation=False)
++            adapter = self._delivery_adapter_for(source) if authorized else None
++        except Exception:
++            logger.warning("Idle-prompt target resolution failed", exc_info=True)
++            return None
++        return (entry, source, adapter) if adapter is not None else None
++
++    def _gateway_idle_prompt_busy(self, session_key: str, entry: Any, adapter: Any) -> bool:
++        """Whether *session_key* has turn-scoped work that must precede an idle prompt.
++
++        Runner and adapter ``_background_tasks`` are lifecycle buckets, not busy signals: they
++        contain permanent watchers and work for unrelated sessions.  The adapter maps below close
++        the session's pre-turn admission window, while the runner state and durable marker cover
++        the turn, its lease, and reply delivery.  An unreadable source fails closed.
++        """
++        try:
++            state = self._peek_session_state(session_key)
++            if state is not None:
++                turn = state.turn
++                if (turn.agent is not None or turn.lease is not None
++                        or bool(turn.lease_tokens)):
++                    return True
++            if getattr(entry, "active_turn_token", None):
++                return True
++
++            session_work = getattr(adapter, "_session_has_pending_work")
++            return bool(session_work(session_key))
++        except Exception:
++            logger.warning(
++                "Idle-prompt busy state unreadable for session %s", session_key, exc_info=True)
++            return True
++
++    async def gateway_idle_prompt_status(self, session_key: str) -> str:
++        """Return ``idle``, ``busy`` or ``unavailable`` for one platform session."""
++        target = await self._gateway_idle_prompt_target(session_key)
++        if target is None:
++            return "unavailable"
++        entry, _source, adapter = target
++        return "busy" if self._gateway_idle_prompt_busy(session_key, entry, adapter) else "idle"
++
++    async def admit_gateway_idle_prompt(self, session_key: str, content: str) -> str:
++        """Atomically claim an idle platform adapter and schedule its routed reply."""
++        target = await self._gateway_idle_prompt_target(session_key)
++        if target is None:
++            return "unavailable"
++        entry, source, adapter = target
++        if self._gateway_idle_prompt_busy(session_key, entry, adapter):
++            return "busy"
++        event = MessageEvent(
++            text=content, message_type=MessageType.TEXT, source=source, internal=True,
++            allow_gateway_control=False,
++            metadata={
++                "hermes_plugin_id": "mailcortex", "hermes_plugin_injection": True,
++                "gateway_session_key": session_key, "gateway_session_id": entry.session_id,
++                "gateway_session_strict": True,
++            },
++        )
++        # BasePlatformAdapter installs its per-session guard synchronously before
++        # its first suspension when gateway_session_key is explicit. No other
++        # gateway coroutine can enter between the busy decision and that claim.
++        await adapter.handle_message(event)
++        return "accepted" if getattr(event, "_gateway_accepted", False) else "unavailable"
++
+     def _schedule_plugin_message_injection(
+         self, *, session_key: str, content: str, plugin_id: str
+     ) -> bool:
+diff --git a/plugins/platforms/telegram/adapter.py b/plugins/platforms/telegram/adapter.py
+index 019fd69d1a..392c39de34 100644
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -6696,6 +6696,15 @@ class TelegramAdapter(BasePlatformAdapter):
+             prior_task.cancel()
+         self._pending_photo_batch_tasks[batch_key] = asyncio.create_task(self._flush_photo_batch(batch_key))
+ 
++    def _has_platform_pending_input(self, session_key: str) -> bool:
++        """Include Telegram's media buffers in the shared per-session admission check."""
++        buffered = (
++            *self._pending_photo_batches.values(),
++            *self._media_group_events.values(),
++            *self._held_inbound_events,
++        )
++        return any(self._event_session_key(event) == session_key for event in buffered)
++
+     async def _route_photo_event(self, msg, event: MessageEvent) -> None:
+         """Album items debounce on media_group_id; singles go through the photo burst batcher."""
+         if self._drop_unresolved(event):  # identity FIRST: the batch lane is derived from it

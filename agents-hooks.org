@@ -8,7 +8,8 @@
 * Hook source notes
 The Claude-specific helper scripts live in `all/.local/bin/` and the plugin manifest lives in `all/.local/share/dotcortex/claude/plugins.ssv`.
 
-The repo does not manage `.claude/` paths directly. That directory remains read-only runtime state.
+The repo does not own the mutable user-level `~/.claude/settings.json`. Its shared
+baseline is generated in the repo and merged into the live regular file.
 
 * Plugin manifest
 #+BEGIN_SRC text :tangle all/.local/share/dotcortex/claude/plugins.ssv :comments no
@@ -19,7 +20,7 @@ codex openai-codex openai/codex-plugin-cc
 
 * Claude settings
 
-The tracked JSON below is the SHARED settings baseline for every machine. It tangles to =all/.claude/settings.shared.json= (generated, git-ignored), NOT to the live =settings.json=. The live file is produced by =claude-settings-apply= (next section), which overlays this baseline onto the machine's existing =settings.json= while preserving the machine-local keys the harness writes — =model= (=/model=) and =effortLevel= (=/effort=). Those keys are therefore deliberately ABSENT here — they are per-machine state, not shared. =theme= and everything else are shared: edit them here, then run =loom claude:settings= (which tangles this block and re-merges). This is the "merge" tier of the pipeline: stow → tangle → merge. To make another key machine-local, delete it from this block and add it to the preserve-list in =claude-settings-apply=. One key is deep-merged rather than replaced: =enabledPlugins= — shared entries here win per key, but machine-local additions survive the merge, because plugin enablement is per-machine state (the telegram channel plugin runs on exactly ONE machine at a time — one getUpdates consumer per bot token — so it must never be enabled fleet-wide from this baseline; it is enabled locally on the bot machine and the merge preserves it).
+The JSON below is the SHARED settings baseline. It tangles to =all/.claude/settings.shared.json= (generated, git-ignored), never to the live =settings.json=. =claude-settings-apply= merges it directly into the live regular =~/.claude/settings.json=. Keys present in the baseline are DotCortex-owned and win; absent keys remain machine-local, including =model=, =effortLevel=, and =agentPushNotifEnabled=. =enabledPlugins= deep-merges, with shared entries winning and local additions surviving. Hook commands named exactly =claude-hook-*= are DotCortex-owned: applying the baseline replaces their old registrations, including obsolete commands, while leaving private HelmCortex hook groups and other foreign registrations intact. Stow ignores the live file. The pipeline is tangle → merge; run =loom claude:settings= after changing this baseline.
 
 #+BEGIN_SRC json :tangle all/.claude/settings.shared.json :comments no
 {
@@ -224,22 +225,21 @@ The tracked JSON below is the SHARED settings baseline for every machine. It tan
 }
 #+END_SRC
 
-* Claude settings merge (apply shared baseline, preserve machine-local model)
+* Claude settings merge (shared keys and hooks into live regular file)
 
-=claude-settings-apply= is the deploy step that lets machine-local and shared Claude settings coexist in the single =settings.json= that Claude Code mandates (it has no user-level =settings.local.json=). It reads the tangled shared baseline (=settings.shared.json=) and the machine's current live =settings.json=, then writes a merged =settings.json= where every shared key wins EXCEPT the machine-local ones (=model=, =effortLevel=), which are preserved from the live file (what =/model= and =/effort= write). Bootstrap-safe: with no live file yet, the shared baseline is used verbatim (no =model= → Claude Code's default) until =/model= runs. The old tangle-straight-to-settings.json path is gone — always go tangle → merge.
+=claude-settings-apply= reads the tangled shared baseline and merges it into the live regular file. It refuses a live symlink or malformed JSON. The HelmCortex userspace compiler owns its hook paths and also merges into this file; apply the two mergers serially. The live file is never a Stow target.
 
 #+BEGIN_SRC bash :tangle all/.local/bin/claude-settings-apply :shebang "#!/usr/bin/env bash" :comments no
 # ~/DotCortex/all/.local/bin/claude-settings-apply
 # Merge the shared Claude settings baseline (tangled from agents-hooks.org) onto the
-# machine's live settings.json, preserving the machine-local `model` key that /model
-# writes. `enabledPlugins` deep-merges: shared entries win per key, machine-local
-# additions (e.g. the telegram channel plugin on the bot machine) survive.
+# machine's live regular settings.json. Keys absent from the baseline survive;
+# enabledPlugins deep-merges and only bare claude-hook-* commands are replaced.
 # The "merge" tier of the pipeline: tangle -> settings.shared.json, then this
 # script -> settings.json. Never tangle directly to settings.json again.
 set -euo pipefail
 
 SHARED="$HOME/DotCortex/all/.claude/settings.shared.json"
-LIVE="$HOME/DotCortex/all/.claude/settings.json"
+LIVE="$HOME/.claude/settings.json"
 
 if [ ! -f "$SHARED" ]; then
   echo "!! claude-settings-apply: shared baseline missing at $SHARED" >&2
@@ -247,20 +247,41 @@ if [ ! -f "$SHARED" ]; then
   exit 1
 fi
 command -v jq >/dev/null 2>&1 || { echo "!! claude-settings-apply: jq not on PATH" >&2; exit 1; }
+if [ -L "$LIVE" ]; then
+  echo "!! claude-settings-apply: $LIVE is a symlink; detach Stow ownership before applying" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "$LIVE")"
 
 # On a fresh machine the live file may not exist; feed jq /dev/null so $live[0] is
 # null and the shared baseline is used verbatim (no model -> Claude Code default).
 live_input="$LIVE"
 [ -f "$LIVE" ] || live_input=/dev/null
 
-tmp="$(mktemp)"
+umask 077
+tmp="$(mktemp "${LIVE}.tmp.XXXXXX")"
 if jq -n \
      --slurpfile shared "$SHARED" \
      --slurpfile live "$live_input" \
-     '($shared[0] // {}) as $s
-      | ($live[0]  // {}) as $l
-      | $s + ( ($l | {model, effortLevel}) | with_entries(select(.value != null)) )
-      | .enabledPlugins = (($l.enabledPlugins // {}) + ($s.enabledPlugins // {}))' > "$tmp" \
+     'def managed: (.type == "command" and (.command | type == "string" and test("^claude-hook-[A-Za-z0-9-]+$")));
+      def valid_groups: type == "array" and all(.[]; type == "object" and (.hooks | type == "array") and all(.hooks[]; type == "object"));
+      ($shared[0]) as $s | ($live[0] // {}) as $l
+      | if ($s | type) != "object" or ($l | type) != "object"
+           or (($s.hooks // {}) | type) != "object" or (($l.hooks // {}) | type) != "object"
+           or (($s.enabledPlugins // {}) | type) != "object" or (($l.enabledPlugins // {}) | type) != "object"
+           or ([$s.hooks[]? | valid_groups] | all(.[]; .)) == false
+           or ([$l.hooks[]? | valid_groups] | all(.[]; .)) == false
+           or ([$s.hooks[]? | .[] | .hooks[] | managed] | all(.[]; .)) == false
+        then error("invalid Claude settings or unowned shared hook") else . end
+      | ($l.hooks // {}) as $oldhooks
+      | ($s.hooks // {}) as $newhooks
+      | (($oldhooks + $newhooks) | keys) as $events
+      | reduce $events[] as $event ({};
+          .[$event] = (([$oldhooks[$event][]? | .hooks |= map(select(managed | not)) | select(.hooks | length > 0)]
+                       + ($newhooks[$event] // [])))) as $mergedhooks
+      | ($l + ($s | del(.hooks, .enabledPlugins)))
+      | .enabledPlugins = (($l.enabledPlugins // {}) + ($s.enabledPlugins // {}))
+      | .hooks = $mergedhooks' > "$tmp" \
    && jq empty "$tmp" 2>/dev/null; then
   mv -f "$tmp" "$LIVE"
   printf '>> claude settings merged: model=%s effort=%s theme=%s\n' \
@@ -272,6 +293,142 @@ else
   echo "!! claude-settings-apply: merge produced invalid JSON; left $LIVE untouched" >&2
   exit 1
 fi
+#+END_SRC
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-claude-settings-apply.py :comments no
+"""The two Claude settings mergers must share one live regular file."""
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[5]
+APPLY = ROOT / "all/.local/bin/claude-settings-apply"
+
+
+class ClaudeSettingsApplyTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.shared = self.home / "DotCortex/all/.claude/settings.shared.json"
+        self.live = self.home / ".claude/settings.json"
+        self.shared.parent.mkdir(parents=True)
+        self.live.parent.mkdir(parents=True)
+        self.baseline = {
+            "theme": "dark",
+            "enabledPlugins": {"shared@plugin": True},
+            "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "claude-hook-stop"}]}]},
+        }
+        self.private = {
+            "matcher": "private",
+            "hooks": [{"type": "command", "command": "VAULT=$HOME/HelmCortex; $VAULT/NEXUS/stow/userspace/.claude/hooks/private.sh"}],
+        }
+        self.private_start = {
+            "hooks": [{"type": "command", "command": "VAULT=$HOME/HelmCortex; $VAULT/NEXUS/stow/userspace/.claude/hooks/start.sh"}],
+        }
+        self.foreign_prompt = {"hooks": [{"type": "prompt", "prompt": "private instruction"}]}
+        self.current = {
+            "theme": "light", "model": "sonnet", "effortLevel": "high",
+            "agentPushNotifEnabled": True, "machineOnly": {"value": 7},
+            "enabledPlugins": {"local@plugin": True, "shared@plugin": False},
+            "hooks": {
+                "Stop": [
+                    {"hooks": [
+                        {"type": "command", "command": "claude-hook-obsolete"},
+                        {"type": "command", "command": "claude-hook-stop"},
+                    ]},
+                    self.private,
+                ],
+                "SessionStart": [{"hooks": [{"type": "command", "command": "foreign-command"}]},
+                                 self.private_start, self.foreign_prompt],
+            },
+        }
+        self.write(self.shared, self.baseline)
+        self.write(self.live, self.current)
+
+    @staticmethod
+    def write(path, value):
+        path.write_text(json.dumps(value) + "\n")
+
+    def apply(self):
+        return subprocess.run([str(APPLY)], env={**os.environ, "HOME": str(self.home)},
+                              text=True, capture_output=True)
+
+    def test_union_and_repeat_are_stable(self):
+        self.assertEqual(self.apply().returncode, 0)
+        first = json.loads(self.live.read_text())
+        self.assertEqual(first["theme"], "dark")
+        self.assertEqual(first["model"], "sonnet")
+        self.assertEqual(first["effortLevel"], "high")
+        self.assertTrue(first["agentPushNotifEnabled"])
+        self.assertEqual(first["machineOnly"], {"value": 7})
+        self.assertEqual(first["enabledPlugins"], {"shared@plugin": True, "local@plugin": True})
+        self.assertIn(self.private, first["hooks"]["Stop"])
+        self.assertEqual(first["hooks"]["SessionStart"], self.current["hooks"]["SessionStart"])
+        self.assertEqual([entry["command"] for group in first["hooks"]["Stop"]
+                          for entry in group["hooks"] if entry["command"].startswith("claude-hook-")],
+                         ["claude-hook-stop"])
+        self.assertEqual(self.apply().returncode, 0)
+        self.assertEqual(json.loads(self.live.read_text()), first)
+
+    def test_invalid_json_keeps_live_bytes(self):
+        before = self.live.read_bytes()
+        self.shared.write_text("{broken")
+        self.assertNotEqual(self.apply().returncode, 0)
+        self.assertEqual(self.live.read_bytes(), before)
+        self.write(self.shared, self.baseline)
+        self.live.write_text("{broken")
+        before = self.live.read_bytes()
+        self.assertNotEqual(self.apply().returncode, 0)
+        self.assertEqual(self.live.read_bytes(), before)
+
+    def test_symlink_refused_without_replacement(self):
+        target = self.home / "foreign.json"
+        self.write(target, self.current)
+        self.live.unlink()
+        self.live.symlink_to(target)
+        before = target.read_bytes()
+        self.assertNotEqual(self.apply().returncode, 0)
+        self.assertTrue(self.live.is_symlink())
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_shared_hook_must_be_dotcortex_owned(self):
+        self.baseline["hooks"]["Stop"].append(self.private)
+        self.write(self.shared, self.baseline)
+        before = self.live.read_bytes()
+        self.assertNotEqual(self.apply().returncode, 0)
+        self.assertEqual(self.live.read_bytes(), before)
+
+    def test_full_generated_baseline_keeps_private_group(self):
+        self.shared.write_bytes((ROOT / "all/.claude/settings.shared.json").read_bytes())
+        self.assertEqual(self.apply().returncode, 0)
+        merged = json.loads(self.live.read_text())
+        self.assertIn(self.private, merged["hooks"]["Stop"])
+        self.assertTrue(merged["agentPushNotifEnabled"])
+
+    def test_stow_ignores_only_live_settings_artifact(self):
+        package = self.home / "packages/all/.claude"
+        target = self.home / "target/.claude"
+        package.mkdir(parents=True)
+        target.mkdir(parents=True)
+        shutil.copy2(ROOT / "all/.stow-local-ignore", package.parent)
+        (package / "settings.json").write_text("{}\n")
+        (package / "settings.shared.json").write_text("{}\n")
+        (target / "settings.json").write_text("{\"private\": true}\n")
+        result = subprocess.run(["stow", "--simulate", "-d", str(package.parent.parent),
+                                 "-t", str(target.parent), "all"],
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((target / "settings.json").read_text(), '{"private": true}\n')
+
+
+if __name__ == "__main__":
+    unittest.main()
 #+END_SRC
 
 * Claude statusline
@@ -2184,11 +2341,11 @@ PYEOF
 
 The other half of the voice loop, per Mètsàtron's ruling (2026-08-16): every Telegram reply an agent sends is ALSO spoken aloud through pvox, automatically, with the voice chosen by the agent's identity — no extra agent action, no extra tokens. A =PostToolUse= hook fires on the Telegram plugin's =reply= tool, lifts the already-generated =text= from the tool input, resolves the speaking identity, and fire-and-forgets it to pvox on the speaker host over SSH. The hook returns immediately (playback is fully detached), so replies are never delayed by synthesis.
 
-Identity resolution, simplest-first: =CLAUDE_WARM_HERDR_AGENT= (set by every claude-* launcher: Fable, Haiku, Auryn, Opus, or OpenCode's Ecco hook) → the basename suffix of =TELEGRAM_STATE_DIR= (=telegram-fable= → fable) → =Default=. The identity maps onto the pvox agent roster (=pvox agents=); identities without their own pvox voice yet (Fable, Haiku, Opus) speak as =Claude= until Mètsàtron seals dedicated voices in VoxForge. Delivery is split-lane (ruling 2026-08-17, the night the phone earned its voice): synthesis runs on the hook's own machine via pvox (HelmCortex is NFS-shared, so pvox and the conda engines are everywhere), and playback ships as a *headered WAV* to =PVOX_REPLY_HOST= (default =s24= — the phone, always in his pocket), falling back to =PVOX_REPLY_FALLBACK_HOST= (default =t480s=) when the phone is unreachable. The old pvox-over-SSH law forbade piping *raw* PCM across SSH because the player cannot know the rate; WAV carries its header, so that law is honored, not repealed. Disable per-session with =PVOX_REPLY_OFF=1=.
+Identity resolution, simplest-first: =CLAUDE_WARM_HERDR_AGENT= (set by every claude-* launcher: Fable, Haiku, Auryn, Opus, or OpenCode's Ecco hook) → the basename suffix of =TELEGRAM_STATE_DIR= (=telegram-fable= → fable) → =Default=. The identity maps onto the pvox agent roster (=pvox agents=); Nano identifies as =Nanobot= and shares the existing =Haiku= voice seat until Mètsàtron seals a dedicated voice. Delivery is split-lane (ruling 2026-08-17, the night the phone earned its voice): synthesis runs on the hook's own machine via pvox (HelmCortex is NFS-shared, so pvox and the conda engines are everywhere), and playback ships as a *headered WAV* to =PVOX_REPLY_HOST= (default =s24= — the phone, always in his pocket), falling back to =PVOX_REPLY_FALLBACK_HOST= (default =t480s=) when the phone is unreachable. The old pvox-over-SSH law forbade piping *raw* PCM across SSH because the player cannot know the rate; WAV carries its header, so that law is honored, not repealed. Disable per-session with =PVOX_REPLY_OFF=1=.
 
 Delivery is *push-then-play* (fix 2026-08-17, the "stopped halfway" incident): the original design streamed the WAV over SSH straight into =sox='s stdin, which made the entire playback depend on the SSH connection staying alive — when the phone dozed mid-play (screen off, in pocket), the stream stalled and the audio truncated halfway. Now the play host receives the whole WAV into a temp file first, then playback detaches from the SSH session (=nohup=, backgrounded) with a Termux wake-lock held for its duration, so the network matters only during transfer and a doze can no longer cut the voice off. The SSH exit code therefore certifies *delivery*, not playback — the log field says =delivered=, honestly. Every skip and failure path logs one line to =~/.cache/pvox-reply.log= (empty-text skip with stdin byte count, render failure, per-host delivery failure, successful delivery with host + sizes) — the hook's original total silence meant every incident cost a fresh archaeology dig, against the silent-skip law.
 
-Kitten seats render *on the play host itself* (his ruling 2026-08-17: the S24 out-muscles the fleet for small models, Q8-verified ~0.4–0.9 RTF): the hook resolves the seat via =pvox voicespec= and cleans the text via =pvox clean= (both fleet-side — pvox's config and markdown cleaner stay the single source of truth), then ships CLEANED TEXT instead of a WAV to =termux-kitten-say= on the play host, detached with a wake lock, sharing the same play queue lock as the ship lane. The fleet render+ship path remains the lane for non-kitten seats, fallback hosts, and a dead enclave — on-device failure logs =ON-DEVICE-FAIL= and falls through. Kill switch: =PVOX_REPLY_NO_ONDEVICE=1=.
+Kitten seats render *on the play host itself* (his ruling 2026-08-17: the S24 out-muscles the fleet for small models, Q8-verified ~0.4–0.9 RTF): the hook resolves the seat via =pvox voicespec=, normalises every reply through the shared =voice-text-normalize= boundary, then ships CLEANED TEXT instead of a WAV to =termux-kitten-say= on the play host, detached with a wake lock, sharing the same play queue lock as the ship lane. The fleet render+ship path remains the lane for non-kitten seats, fallback hosts, and a dead enclave — on-device failure logs =ON-DEVICE-FAIL= and falls through. Kill switch: =PVOX_REPLY_NO_ONDEVICE=1=.
 
 #+BEGIN_SRC bash :tangle all/.local/bin/claude-hook-voice-reply :shebang "#!/usr/bin/env bash"
 # ~/DotCortex/all/.local/bin/claude-hook-voice-reply
@@ -2211,15 +2368,16 @@ else
     HOOK_INPUT="$(cat 2>/dev/null || true)"
 fi
 
-TEXT="$(printf '%s' "$HOOK_INPUT" | python3 -c '
-import json, sys
-try:
-    j = json.load(sys.stdin)
-    t = (j.get("tool_input") or {}).get("text") or ""
-    print(t)
-except Exception:
-    pass
-' 2>/dev/null || true)"
+NORMALIZER="${VOICE_TEXT_NORMALIZER:-$(dirname "$(readlink -f "$0")")/voice-text-normalize}"
+if [ ! -x "$NORMALIZER" ]; then
+    printf '%s SKIP normalizer-missing\n' "$(date '+%F %T')" >> "$LOG" 2>/dev/null || true
+    exit 0
+fi
+if ! TEXT="$(printf '%s' "$HOOK_INPUT" | "$NORMALIZER" --hook-json 2>/dev/null)"; then
+    printf '%s SKIP normalize-failed (stdin %s bytes)\n' \
+      "$(date '+%F %T')" "${#HOOK_INPUT}" >> "$LOG" 2>/dev/null || true
+    exit 0
+fi
 if [ -z "$TEXT" ]; then
     printf '%s SKIP empty-text (stdin %s bytes)\n' "$(date '+%F %T')" "${#HOOK_INPUT}" >> "$LOG" 2>/dev/null || true
     exit 0
@@ -2257,6 +2415,7 @@ case "$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')" in
     metsatron) VOICE="Metsatron" ;;
     fable) VOICE="Fable"; HUD_AGENT="fable" ;;
     haiku) VOICE="Haiku"; HUD_AGENT="haiku" ;;
+    nanobot|nano) VOICE="Haiku"; HUD_AGENT="nanobot" ;;
     opus|claudeificus) VOICE="Opus"; HUD_AGENT="claudeificus" ;;
     hermes) VOICE="Hermes"; HUD_AGENT="hermes-agent" ;;
     claude) VOICE="Claude" ;;
@@ -2265,7 +2424,7 @@ esac
 # The speaker identity can differ from the selected voice. In particular,
 # HelmAstra keeps her working Default voice while her own HUD portrait speaks.
 case "${PVOX_HUD_AGENT:-}" in
-    helmastra|helmductor|auryn|fable|claudeificus|haiku|orcinus-orca|ecco-dolphinus|hermes-agent|gemma)
+    helmastra|helmductor|auryn|fable|claudeificus|haiku|nanobot|orcinus-orca|ecco-dolphinus|hermes-agent|gemma)
         HUD_AGENT="$PVOX_HUD_AGENT" ;;
 esac
 
@@ -2324,8 +2483,8 @@ setsid bash -c '
     # On-device lane (his ruling 2026-08-17: the phone renders its own
     # voices — "my phone has more horsepower for rendering on device").
     # Kitten seats render ON the play host when it carries
-    # termux-kitten-say: cleaned text travels (pvox clean here — one
-    # source of truth for markdown cleanup), is parked in a temp file on
+    # termux-kitten-say: text already crossed the shared normaliser before
+    # this worker detached. It is parked in a temp file on
     # the phone, and render+play detach from the ssh session with a wake
     # lock (doze cannot truncate; exit code means text delivered + spawn
     # ok). Fleet render+ship stays the lane for non-kitten seats, other
@@ -2336,7 +2495,7 @@ setsid bash -c '
 $(printf "%s" "$SPEC" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[\"engine\"], d[\"voice\"], d[\"speed\"])" 2>/dev/null)
 EOF2
         if [ "$ENGINE" = "kitten" ]; then
-            if printf "%s\n" "$TEXT" | "$PVOX" clean 2>/dev/null | ssh $SSHOPTS "$PLAY_HOST" "
+            if printf "%s\n" "$TEXT" | ssh $SSHOPTS "$PLAY_HOST" "
                 command -v termux-kitten-say >/dev/null 2>&1 || exit 9
                 T=\"\$(mktemp)\"; cat > \"\$T\"
                 if command -v pvox-speech-receipt >/dev/null 2>&1; then
@@ -2377,6 +2536,8 @@ exit 0
 ** Agent voice spool (sandboxed agents speak without the operator's SSH key)
 
 An agent that runs as its own Unix user (Agent Boundaries phase 8: =agent-deepseek= first) cannot run the relay above: the relay ships audio to the phone over the operator's SSH identity, and holding that key is exactly what the separate user exists to prevent. So the relay is split at the user boundary (ruling 2026-09-26, "provided that the latency is the same"). The agent side only *drops* its hook payload into a spool directory; an operator-owned watcher picks each file up through inotify within milliseconds and feeds it to the unchanged =claude-hook-voice-reply=, so synthesis, voice choice, phone delivery, fallback host and play queue stay one code path.
+
+The spool deliberately does not parse or rewrite reply text: it is a byte-preserving trust-boundary transport.  Its operator-owned destination is the hook above, which extracts and normalises the text before the shared spoken-character cap.  Ecco and DeepSeek therefore inherit the same speech boundary without a second implementation.
 
 - Spool: =/var/spool/agent-voice=, owned by the operator, group =cortex=, mode =3730=. Agents (all in =cortex=) can create files but cannot list the directory or delete each other's files; the operator owns the directory and removes each file once spoken.
 - Identity comes from the file's owning uid, never from the payload: =agent-deepseek= speaks as =DeepSeek=, =agent-opencode= as =Ecco=, any other =agent-NAME= as =Name=, and files owned by anyone else are discarded. A sandboxed agent cannot make itself speak in another agent's voice.

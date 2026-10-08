@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TAG="session-anchor-cron-apply"
+TARGET="/etc/cron.d/dotcortex-session-anchor"
+EXPECTED_HOST=""
+DRY=0
+REMOVE=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "$TAG: --host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --dry-run) DRY=1 ;;
+    --remove) REMOVE=1 ;;
+    -h|--help|help) echo "Usage: $TAG --host EXACT_HOST [--dry-run] [--remove]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+run_priv() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
+
+if [ "$REMOVE" = 1 ]; then
+  if [ "$DRY" = 1 ]; then echo "remove $TARGET"; else run_priv rm -f "$TARGET"; echo "$TAG: removed $TARGET"; fi
+  exit 0
+fi
+
+[ -n "$EXPECTED_HOST" ] || { echo "$TAG: --host EXACT_HOST is required" >&2; exit 2; }
+[ "$(hostname)" = "$EXPECTED_HOST" ] || { echo "$TAG: refusing installation on $(hostname); expected $EXPECTED_HOST" >&2; exit 1; }
+
+USER_NAME="$(id -un)"
+TARGET_HOME="$HOME"
+ANCHOR="$TARGET_HOME/.local/bin/session-anchor"
+[ "$DRY" = 1 ] || "$ANCHOR" --check || { echo "$TAG: machine-local setup missing; see agents-watchdog.org" >&2; exit 1; }
+
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+cat >"$TMP" <<EOF
+# DotCortex session anchor; managed by $TAG.
+* * * * * ${USER_NAME} HOME=${TARGET_HOME} PATH=/usr/local/bin:/usr/bin:/bin ${ANCHOR} >/dev/null 2>&1
+EOF
+
+if [ "$DRY" = 1 ]; then
+  cat "$TMP"
+else
+  run_priv install -o root -g root -m 0644 "$TMP" "$TARGET"
+  echo "$TAG: installed $TARGET"
+fi
