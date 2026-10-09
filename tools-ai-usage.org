@@ -210,10 +210,11 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         "openrouter",
         "OpenRouter",
-        "codexbar",
-        codexbar_provider="openrouter",
-        codexbar_args=("--source", "api"),
-        note="OpenRouter API source.",
+        "openrouter",
+        note="Native OpenRouter probe: OPENROUTER_API_KEY (env or ~/.env) against "
+        "openrouter.ai /credits and /auth/key. Replaced the codexbar dependency "
+        "2026-10-09: codexbar's openrouter fetch needs cookie auth (web session), "
+        "which no Linux host has, so it showed $0 or 'not found' everywhere.",
     ),
     ProviderSpec(
         "deepinfra",
@@ -243,7 +244,10 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         "mistral",
         "Mistral",
         "mistral",
-        note="Mistral Vibe monthly plan % via /api/vibe/whoami (MISTRAL_API_KEY); Admin API usage needs a separate admin key.",
+        note="Mistral Vibe plan via /api/vibe/whoami (MISTRAL_VIBE_API_KEY, falling "
+        "back to MISTRAL_API_KEY 2026-10-09 — whoami with the Studio key reports the "
+        "free API plan, not the Vibe subscription); budget % via admin-trpc cookie "
+        "session (MISTRAL_COOKIE_JAR).",
     ),
 )
 
@@ -251,8 +255,9 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 # from the default view 2026-09-10 to make room for remote (Gillean) panels; openrouter
 # was unhidden and opencode-go added 2026-09-25 (Go's rolling/weekly/monthly windows
 # belong beside the other fuel gauges). antigravity stays on demand via
-# `--providers antigravity`.
-DEFAULT_PROVIDER_KEYS: tuple[str, ...] = ("codex", "claude", "openrouter", "opencode-go", "mistral")
+# `--providers antigravity`. mistral moved above openrouter 2026-10-09 so OpenRouter
+# sits directly underneath the Mistral panel (Admiral's requested order).
+DEFAULT_PROVIDER_KEYS: tuple[str, ...] = ("codex", "claude", "mistral", "openrouter", "opencode-go")
 
 
 def eprint(*args: Any, **kwargs: Any) -> None:
@@ -2133,6 +2138,78 @@ def _bearer_json_probe(
     }
 
 
+def fetch_openrouter(timeout_seconds: float) -> dict[str, Any]:
+    # Native OpenRouter probe (2026-10-09), replacing the codexbar dependency.
+    # codexbar's openrouter fetch needs cookie auth (a signed-in web session) —
+    # on every Linux host in the fleet it reported $0 from stale cookie caches
+    # or 'not found' where codexbar is absent. OpenRouter's own API is the right
+    # source: GET /api/v1/credits (account balance) and GET /api/v1/auth/key
+    # (key usage/limit) both accept the plain OPENROUTER_API_KEY bearer token.
+    token, token_source = _env_token("OPENROUTER_API_KEY")
+    if not token:
+        return {
+            "provider": "openrouter",
+            "label": "OpenRouter",
+            "state": "missing",
+            "source": token_source,
+            "summary": "no OPENROUTER_API_KEY found (env or ~/.env).",
+            "raw": None,
+        }
+
+    credits = _bearer_json_probe(
+        "openrouter", "OpenRouter",
+        "https://openrouter.ai/api/v1/credits",
+        token, timeout_seconds,
+    )
+    if credits.get("state") != "ok":
+        return credits
+
+    key_info = _bearer_json_probe(
+        "openrouter", "OpenRouter",
+        "https://openrouter.ai/api/v1/auth/key",
+        token, timeout_seconds,
+    )
+
+    credits_data = nested_get(credits.get("raw"), "data") or {}
+    total_credits = credits_data.get("total_credits")
+    total_usage = credits_data.get("total_usage")
+    key_data = nested_get(key_info.get("raw"), "data") or {}
+    key_usage = key_data.get("usage")
+    key_label = key_data.get("label")
+
+    # Balance is pre-paid credits minus spend; key usage is this key's spend.
+    balance = None
+    if isinstance(total_credits, (int, float)) and isinstance(total_usage, (int, float)):
+        balance = round(total_credits - total_usage, 6)
+
+    usage: dict[str, Any] = {
+        "openRouterUsage": {
+            "balance": balance,
+            "keyUsage": key_usage,
+            "totalCredits": total_credits,
+        }
+    }
+    identity: dict[str, Any] = {"loginMethod": f"Balance: ${balance:g}"}
+    if isinstance(key_label, str) and key_label:
+        identity["providerID"] = key_label
+
+    summary_parts = []
+    if isinstance(balance, (int, float)):
+        summary_parts.append(f"balance=${balance:g}")
+    if isinstance(key_usage, (int, float)):
+        summary_parts.append(f"keyUsage=${key_usage:g}")
+    summary_parts.append(f"loginMethod=Balance: ${balance:g}" if isinstance(balance, (int, float)) else "credits unavailable")
+
+    return {
+        "provider": "openrouter",
+        "label": "OpenRouter",
+        "state": "ok",
+        "source": "api",
+        "summary": "; ".join(summary_parts),
+        "raw": {"provider": "openrouter", "source": "api", "usage": usage, "identity": identity},
+    }
+
+
 def fetch_neuralwatt(timeout_seconds: float) -> dict[str, Any]:
     token, token_source = _env_token("NEURALWATT_API_KEY", "NEURALWATT_TOKEN")
     if not token:
@@ -2460,23 +2537,37 @@ MISTRAL_WHOAMI_URL = os.environ.get(
 # MISTRAL_COOKIE_JAR environment variable (e.g. from a private, untracked
 # ai-usage env file) — no default path, no username, no host paths in tracked
 # source. Unset => the budget probe is skipped and the probe falls back to
-# whoami, saying so in its output.
+# whoami, saying so in its output. Resolved at CALL time (2026-10-09), not
+# import time: the module-level constant used to be baked in before ~/.env
+# was loaded, so a jar deployed via the untracked env file was invisible
+# outside login shells (the T480s/SSH case). _mistral_cookie_header now
+# checks os.environ and load_dotenv_exports() on every probe.
 MISTRAL_ADMIN_TRPC = os.environ.get(
     "MISTRAL_ADMIN_TRPC", "https://admin.mistral.ai/api/local-trpc"
 )
-MISTRAL_COOKIE_JAR = os.path.expanduser(os.environ.get("MISTRAL_COOKIE_JAR", ""))
 _MISTRAL_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
 
 
+def _mistral_cookie_jar_path() -> str:
+    # Call-time resolution: os.environ first, then the untracked ~/.env exports.
+    # Interactive shells stopped exporting ~/.env 2026-09-25, so the dotenv
+    # fallback is what makes the TUI/SSH case work (2026-10-09).
+    jar = os.environ.get("MISTRAL_COOKIE_JAR", "").strip()
+    if not jar:
+        jar = load_dotenv_exports().get("MISTRAL_COOKIE_JAR", "").strip()
+    return os.path.expanduser(jar)
+
+
 def _mistral_cookie_header() -> str:
-    if not os.path.exists(MISTRAL_COOKIE_JAR):
+    jar_path = _mistral_cookie_jar_path()
+    if not jar_path or not os.path.exists(jar_path):
         return ""
     pairs = []
     try:
-        with open(MISTRAL_COOKIE_JAR) as fh:
+        with open(jar_path) as fh:
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith("#"):
@@ -2549,10 +2640,10 @@ def fetch_mistral(timeout_seconds: float) -> dict[str, Any]:
     # Fallback: whoami identity only. The budget probe was skipped either because
     # MISTRAL_COOKIE_JAR is unset (say so) or the session failed (whoami still
     # gives the plan identity; the summary keeps pointing at the console).
-    token, token_source = _env_token("MISTRAL_API_KEY")
+    token, token_source = _env_token("MISTRAL_VIBE_API_KEY", "MISTRAL_API_KEY")
     budget_skipped = (
         "budget probe skipped: MISTRAL_COOKIE_JAR not set; "
-        if not MISTRAL_COOKIE_JAR else
+        if not _mistral_cookie_jar_path() else
         "budget probe unavailable (cookie session failed); "
     )
     if not token:
@@ -2562,7 +2653,7 @@ def fetch_mistral(timeout_seconds: float) -> dict[str, Any]:
             "state": "missing",
             "source": token_source,
             "summary": budget_skipped
-                       + "no Mistral API key found (set MISTRAL_COOKIE_JAR or MISTRAL_API_KEY).",
+                       + "no Mistral API key found (set MISTRAL_COOKIE_JAR, or MISTRAL_VIBE_API_KEY / MISTRAL_API_KEY).",
             "raw": None,
         }
     result = _bearer_json_probe(
@@ -2771,6 +2862,16 @@ def _fetch_provider_uncached(spec: ProviderSpec, timeout_seconds: float) -> dict
         if result["state"] == "ok":
             return result
         fallback = fetch_fuelcheck(spec, timeout_seconds)
+        return fallback if fallback["state"] == "ok" else result
+
+    if spec.kind == "openrouter":
+        # Native OpenRouter API first (2026-10-09): works on any host from
+        # OPENROUTER_API_KEY in env or ~/.env. codexbar stays as a fallback —
+        # its openrouter fetch needs cookie auth, which only macOS had.
+        result = fetch_openrouter(timeout_seconds)
+        if result["state"] == "ok":
+            return result
+        fallback = fetch_codexbar(spec, timeout_seconds)
         return fallback if fallback["state"] == "ok" else result
 
     if spec.kind == "deepinfra":
@@ -3210,7 +3311,9 @@ def fetch_remote_results(remotes_file: Path, default_timeout: float) -> list[dic
 # then remote, so Codex (mine, then Gillean's) reads as one block, then Claude,
 # then the direct probes. Remote panels keep their remotes-file order; providers
 # outside the list keep their existing relative order after these.
-PROVIDER_DISPLAY_ORDER = ("codex", "claude", "opencode-go", "openrouter", "mistral")
+# mistral moved above openrouter/opencode-go 2026-10-09 so OpenRouter sits
+# directly underneath the Mistral panel (Admiral's requested order).
+PROVIDER_DISPLAY_ORDER = ("codex", "claude", "mistral", "openrouter", "opencode-go")
 
 
 def order_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3758,10 +3861,11 @@ class ResultOrderTests(unittest.TestCase):
             {"provider": "codex", "label": "Gillean · Codex", "remote": "Gillean"},
             {"provider": "claude", "label": "Gillean · Claude Code", "remote": "Gillean"},
         ]
+        # mistral sits above openrouter since 2026-10-09 (Admiral's panel order).
         self.assertEqual(
             [item["label"] for item in self.ai_usage.order_results(items)],
             ["Codex", "Gillean · Codex", "Claude Code", "Gillean · Claude Code",
-             "OpenCode Go", "OpenRouter", "Mistral"],
+             "Mistral", "OpenRouter", "OpenCode Go"],
         )
 
     def test_remote_panels_keep_file_order_and_unknowns_go_last(self):
@@ -3819,7 +3923,7 @@ class MistralProbeTests(unittest.TestCase):
         cls.ai_usage = load_ai_usage()
 
     def test_no_credential_reports_missing(self):
-        with patch.dict(os.environ, {"MISTRAL_API_KEY": ""}), \
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "", "MISTRAL_VIBE_API_KEY": ""}), \
              patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
              _no_cookie_jar(self.ai_usage):
             result = self.ai_usage.fetch_mistral(1.0)
@@ -3838,7 +3942,7 @@ class MistralProbeTests(unittest.TestCase):
             return {"provider": provider, "label": label, "state": "ok", "source": "api",
                     "summary": summary, "raw": payload}
 
-        with patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key"}), \
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key", "MISTRAL_VIBE_API_KEY": ""}), \
              patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
              _no_cookie_jar(self.ai_usage):
             result = self.ai_usage.fetch_mistral(1.0)
@@ -3885,7 +3989,7 @@ class MistralProbeTests(unittest.TestCase):
             return {"provider": provider, "label": label, "state": "ok", "source": "api",
                     "summary": summary, "raw": payload}
 
-        with patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key"}), \
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key", "MISTRAL_VIBE_API_KEY": ""}), \
              patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
              _no_cookie_jar(self.ai_usage):
             result = self.ai_usage.fetch_mistral(1.0)
@@ -3908,7 +4012,10 @@ class MistralProbeTests(unittest.TestCase):
 
         # Empty cookie header => real _mistral_trpc returns None before any HTTP,
         # so urlopen staying untouched proves the probe was skipped.
-        with patch.dict(os.environ, {"MISTRAL_COOKIE_JAR": "", "MISTRAL_API_KEY": "test-key"}), \
+        # load_dotenv_exports patched empty + vibe key cleared: the jar path is
+        # resolved at call time (2026-10-09), so host env must not leak in.
+        with patch.dict(os.environ, {"MISTRAL_COOKIE_JAR": "", "MISTRAL_API_KEY": "test-key", "MISTRAL_VIBE_API_KEY": ""}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
              patch.object(self.ai_usage, "_mistral_cookie_header", return_value=""), \
              patch.object(self.ai_usage.urllib.request, "urlopen", side_effect=fail_http), \
              patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe):
@@ -3931,7 +4038,7 @@ class MistralProbeTests(unittest.TestCase):
             return {"provider": provider, "label": label, "state": "error", "source": "api",
                     "summary": f"{url} returned HTTP 401", "raw": None}
 
-        with patch.dict(os.environ, {"MISTRAL_API_KEY": "bad-key"}), \
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "bad-key", "MISTRAL_VIBE_API_KEY": ""}), \
              patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
              _no_cookie_jar(self.ai_usage):
             result = self.ai_usage.fetch_mistral(1.0)
@@ -3963,6 +4070,82 @@ class MistralProbeTests(unittest.TestCase):
         self.assertIn("Mistral", plain)
         self.assertIn("Plan: FREE", plain)
         self.assertIn("usage % needs console session or Admin API key", plain)
+
+    def test_whoami_prefers_vibe_key_over_api_key(self):
+        """Fix 2026-10-09: whoami must report the Vibe subscription, so
+        MISTRAL_VIBE_API_KEY wins when both keys exist. The Studio
+        MISTRAL_API_KEY reports the free API plan and masks the sub."""
+        captured = {}
+
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            captured["token"] = token
+            payload = json.loads(json.dumps(MISTRAL_WHOAMI_FIXTURE))
+            payload["plan_name"] = "INDIVIDUAL"
+            payload["plan_type"] = "CHAT"
+            summary = summarize(payload) if summarize else ""
+            return {"provider": provider, "label": label, "state": "ok", "source": "api",
+                    "summary": summary, "raw": payload}
+
+        with patch.dict(os.environ, {"MISTRAL_VIBE_API_KEY": "vibe-key", "MISTRAL_API_KEY": ""}), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe), \
+             _no_cookie_jar(self.ai_usage):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        self.assertEqual(captured["token"], "vibe-key")
+        self.assertEqual(result["identity"]["plan_name"], "INDIVIDUAL")
+
+    def test_cookie_jar_resolved_from_dotenv_at_call_time(self):
+        """Fix 2026-10-09: the jar path used to be baked in at import time, so a
+        MISTRAL_COOKIE_JAR deployed only in ~/.env (untracked env file, not
+        exported by shells since 2026-09-25) was invisible outside login
+        shells. Call-time resolution must see the dotenv value."""
+        with patch.dict(os.environ, {"MISTRAL_COOKIE_JAR": ""}, clear=False), \
+             patch.object(self.ai_usage, "load_dotenv_exports",
+                          return_value={"MISTRAL_COOKIE_JAR": "/tmp/fake-jar.path"}):
+            path = self.ai_usage._mistral_cookie_jar_path()
+        self.assertEqual(path, "/tmp/fake-jar.path")
+
+
+class OpenRouterProbeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ai_usage = load_ai_usage()
+
+    def test_openrouter_spec_is_native_not_codexbar(self):
+        """Fix 2026-10-09: codexbar's openrouter fetch needs cookie auth (web
+        session), which no Linux host has. The spec must be the native kind."""
+        spec = next(s for s in self.ai_usage.PROVIDERS if s.key == "openrouter")
+        self.assertEqual(spec.kind, "openrouter")
+
+    def test_openrouter_native_reads_credits_and_key_endpoints(self):
+        """The native probe hits OpenRouter's own /credits and /auth/key with
+        the OPENROUTER_API_KEY bearer and reports the real balance."""
+        captured = []
+
+        def fake_probe(provider, label, url, token, timeout_seconds, summarize=None):
+            captured.append(url)
+            if url.endswith("/credits"):
+                return {"provider": provider, "label": label, "state": "ok", "source": "api",
+                        "summary": "", "raw": {"data": {"total_credits": 50, "total_usage": 0.5}}}
+            return {"provider": provider, "label": label, "state": "ok", "source": "api",
+                    "summary": "", "raw": {"data": {"usage": 0.000413, "label": "sk-or-v1-test"}}}
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-key"}), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=fake_probe):
+            result = self.ai_usage.fetch_openrouter(1.0)
+
+        self.assertIn("https://openrouter.ai/api/v1/credits", captured)
+        self.assertIn("https://openrouter.ai/api/v1/auth/key", captured)
+        self.assertEqual(result["state"], "ok")
+        self.assertEqual(result["summary"], "balance=$49.5; keyUsage=$0.000413; loginMethod=Balance: $49.5")
+        self.assertEqual(result["raw"]["usage"]["openRouterUsage"]["balance"], 49.5)
+
+    def test_openrouter_missing_key_reports_missing(self):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}):
+            result = self.ai_usage.fetch_openrouter(1.0)
+        self.assertEqual(result["state"], "missing")
+        self.assertIn("OPENROUTER_API_KEY", result["summary"])
 
 
 if __name__ == "__main__":

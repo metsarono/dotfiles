@@ -18,6 +18,63 @@ baseline is generated in the repo and merged into the live regular file.
 codex openai-codex openai/codex-plugin-cc
 #+END_SRC
 
+* Kikin Claude PermissionRequest hook — source only, not applied
+
+The Kikin consort hook is intentionally not part of the shared settings
+baseline.  This source block tangles a wrapper and a review artifact containing
+one exact entry for each Kikin Claude seat; Mètsàtron must copy the private
+manifest, review the four class flags, and apply the desired seat entries as a
+separate machine-local action.
+
+#+BEGIN_SRC python :tangle all/.local/bin/claude-hook-permission-request-kikin :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+import os
+from pathlib import Path
+
+
+def main():
+    override = os.environ.get("DOTCORTEX_KIKIN_APPROVAL_ENGINE")
+    if override:
+        candidates = [Path(override)]
+    else:
+        candidates = [
+            Path.home() / ".local/lib/dotcortex/claude_approval_kikin.py",
+            Path(__file__).resolve().parents[1] / "lib/dotcortex/claude_approval_kikin.py",
+        ]
+    for engine in candidates:
+        if engine.is_file():
+            try:
+                os.execv("/usr/bin/python3", ["/usr/bin/python3", str(engine)])
+            except OSError:
+                return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+#+END_SRC
+
+#+BEGIN_SRC json :tangle all/.config/dotcortex/claude-kikin-settings.fragments.json :comments no
+{
+  "schema": "hc.approval.canary.kikin.settings-fragments.v1",
+  "applied": false,
+  "note": "Review artifact only. Do not merge automatically into any live Claude settings.json.",
+  "entries": {
+    "fable": {
+      "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_USER/.config/dotcortex/claude-approval-canary.kikin.v1.local.json /home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request-kikin", "timeout": 5}]}]
+    },
+    "opus": {
+      "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_USER/.config/dotcortex/claude-approval-canary.kikin.v1.local.json /home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request-kikin", "timeout": 5}]}]
+    },
+    "haiku": {
+      "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_USER/.config/dotcortex/claude-approval-canary.kikin.v1.local.json /home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request-kikin", "timeout": 5}]}]
+    },
+    "auryn": {
+      "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_USER/.config/dotcortex/claude-approval-canary.kikin.v1.local.json /home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request-kikin", "timeout": 5}]}]
+    }
+  }
+}
+#+END_SRC
+
 * Claude settings
 
 The JSON below is the SHARED settings baseline. It tangles to =all/.claude/settings.shared.json= (generated, git-ignored), never to the live =settings.json=. =claude-settings-apply= merges it directly into the live regular =~/.claude/settings.json=. Keys present in the baseline are DotCortex-owned and win; absent keys remain machine-local, including =model=, =effortLevel=, and =agentPushNotifEnabled=. =enabledPlugins= deep-merges, with shared entries winning and local additions surviving. Hook commands named exactly =claude-hook-*= are DotCortex-owned: applying the baseline replaces their old registrations, including obsolete commands, while leaving private HelmCortex hook groups and other foreign registrations intact. Stow ignores the live file. The pipeline is tangle → merge; run =loom claude:settings= after changing this baseline.
@@ -3810,6 +3867,41 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+#+END_SRC
+
+* PermissionRequest approval gate (default off)
+
+This is only the executable hook boundary.  The deterministic engine, default-off
+manifest, and RED/GREEN harness are owned by =agents-approval.org=.  Missing
+engine or launch failure emits no ALLOW response, which leaves Claude at ASK.
+
+#+BEGIN_SRC python :tangle all/.local/bin/claude-hook-permission-request :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+import os
+from pathlib import Path
+import sys
+
+
+def main():
+    override = os.environ.get("DOTCORTEX_APPROVAL_ENGINE")
+    if override:
+        candidates = [Path(override)]
+    else:
+        source_local = Path(__file__).resolve().parents[1] / "lib/dotcortex/claude_approval_p3.py"
+        candidates = [
+            Path.home() / ".local/lib/dotcortex/claude_approval_p3.py",
+            source_local,
+        ]
+    for engine in candidates:
+        if engine.is_file():
+            try:
+                os.execv("/usr/bin/python3", ["/usr/bin/python3", str(engine)])
+            except OSError:
+                return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 #+END_SRC
 
 * Pre-compact

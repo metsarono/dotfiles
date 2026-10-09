@@ -1,0 +1,52 @@
+{
+  "schema_version": "so-approval-p3.v1",
+  "readonly_host": "YOUR_READONLY_HOST",
+  "remote_home": "/home/YOUR_REMOTE_USER",
+  "remote_path_roots": [
+    "/home/YOUR_REMOTE_USER/HelmCortex",
+    "/home/YOUR_REMOTE_USER/mnt/x230/HelmCortex",
+    "/home/YOUR_REMOTE_USER/DotCortex",
+    "/home/YOUR_REMOTE_USER/HelmCortex-wt-kikin",
+    "/home/YOUR_REMOTE_USER/DotCortex-wt-kikin"
+  ],
+  "mailcortex_account": "YOUR_AGENT@YOUR_READONLY_HOST",
+  "local_test_roots": [
+    "/home/YOUR_USER/DotCortex",
+    "/home/YOUR_USER/HelmCortex"
+  ],
+  "centre_roots": [
+    "/home/YOUR_USER/HelmCortex"
+  ],
+  "dotcortex_roots": [
+    "/home/YOUR_USER/DotCortex"
+  ],
+  "tmp_roots": [
+    "/tmp"
+  ],
+  "outbound_tools": [
+    "mcp__plugin_telegram_telegram__reply",
+    "mcp__mailcortex__send"
+  ],
+  "classes": [
+    {
+      "name": "ssh-kikin-readonly",
+      "enabled": true
+    },
+    {
+      "name": "local-test-run",
+      "enabled": false
+    },
+    {
+      "name": "centre-render",
+      "enabled": true
+    },
+    {
+      "name": "dotcortex-safe-commit",
+      "enabled": true
+    },
+    {
+      "name": "outbound-tool-call",
+      "enabled": false
+    }
+  ]
+}

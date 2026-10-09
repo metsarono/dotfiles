@@ -101,6 +101,15 @@ def load_state(path: Path) -> dict:
     return value
 
 
+def child_env() -> dict[str, str]:
+    """Cron carries no XDG_RUNTIME_DIR. A tmux server or warm session started from here inherits
+    this environment, and claude-warm refuses to supervise without it (2026-10-09: every warm
+    revive failed after a kill until the tmux global env was fixed by hand)."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    return env
+
+
 def run_manager(manager: str, args: list[str], timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run(
         [manager, *args],
@@ -110,6 +119,7 @@ def run_manager(manager: str, args: list[str], timeout: int) -> subprocess.Compl
         text=True,
         timeout=timeout,
         close_fds=True,
+        env=child_env(),
     )
 
 

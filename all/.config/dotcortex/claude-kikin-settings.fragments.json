@@ -1,0 +1,19 @@
+{
+  "schema": "hc.approval.canary.kikin.settings-fragments.v1",
+  "applied": false,
+  "note": "Review artifact only. Do not merge automatically into any live Claude settings.json.",
+  "entries": {
+    "fable": {
+      "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_USER/.config/dotcortex/claude-approval-canary.kikin.v1.local.json /home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request-kikin", "timeout": 5}]}]
+    },
+    "opus": {
+      "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_USER/.config/dotcortex/claude-approval-canary.kikin.v1.local.json /home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request-kikin", "timeout": 5}]}]
+    },
+    "haiku": {
+      "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_USER/.config/dotcortex/claude-approval-canary.kikin.v1.local.json /home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request-kikin", "timeout": 5}]}]
+    },
+    "auryn": {
+      "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_USER/.config/dotcortex/claude-approval-canary.kikin.v1.local.json /home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request-kikin", "timeout": 5}]}]
+    }
+  }
+}

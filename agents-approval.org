@@ -1,0 +1,2046 @@
+#+TITLE: DotCortex Deterministic Claude Approval Gate
+#+DESCRIPTION: Model-free PermissionRequest rule engine and fail-closed Honey harness
+#+AUTHOR: Mètsàtron
+#+LANGUAGE: en
+#+PROPERTY: header-args :mkdirp yes :results silent :comments both
+
+* Contract
+
+This module owns the vendored, pure-Python rule engine used by the Claude
+=PermissionRequest= hook.  The committed manifest enables only the three
+classes ruled by the Admiral on 2026-10-09: read-only SSH, Centre render, and
+path-explicit DotCortex commit.  Unknown tools, malformed input, disabled
+classes, parser rejection, and timeout all produce no allow decision, so Claude
+asks the operator.
+
+The executable hook remains in =agents-hooks.org=.  Changing the reviewed class
+flags and wiring the hook into a live =~/.claude/settings.json= are separate,
+machine-local acts.
+
+* Reviewed manifest
+
+The public source carries no fleet address.  =YOUR_READONLY_HOST= is replaced
+only in the Admiral-reviewed, machine-local copy.
+
+#+BEGIN_SRC json :tangle all/.config/dotcortex/claude-approval-p3.json :comments no
+{
+  "schema_version": "so-approval-p3.v1",
+  "readonly_host": "YOUR_READONLY_HOST",
+  "remote_home": "/home/YOUR_REMOTE_USER",
+  "remote_path_roots": [
+    "/home/YOUR_REMOTE_USER/HelmCortex",
+    "/home/YOUR_REMOTE_USER/mnt/x230/HelmCortex",
+    "/home/YOUR_REMOTE_USER/DotCortex",
+    "/home/YOUR_REMOTE_USER/HelmCortex-wt-kikin",
+    "/home/YOUR_REMOTE_USER/DotCortex-wt-kikin"
+  ],
+  "mailcortex_account": "YOUR_AGENT@YOUR_READONLY_HOST",
+  "local_test_roots": [
+    "/home/YOUR_USER/DotCortex",
+    "/home/YOUR_USER/HelmCortex"
+  ],
+  "centre_roots": [
+    "/home/YOUR_USER/HelmCortex"
+  ],
+  "dotcortex_roots": [
+    "/home/YOUR_USER/DotCortex"
+  ],
+  "tmp_roots": [
+    "/tmp"
+  ],
+  "outbound_tools": [
+    "mcp__plugin_telegram_telegram__reply",
+    "mcp__mailcortex__send"
+  ],
+  "classes": [
+    {
+      "name": "ssh-kikin-readonly",
+      "enabled": true
+    },
+    {
+      "name": "local-test-run",
+      "enabled": false
+    },
+    {
+      "name": "centre-render",
+      "enabled": true
+    },
+    {
+      "name": "dotcortex-safe-commit",
+      "enabled": true
+    },
+    {
+      "name": "outbound-tool-call",
+      "enabled": false
+    }
+  ]
+}
+#+END_SRC
+
+* Vendored deterministic engine
+
+This engine has no model dependency.  A model scorer may advise an ASK path in
+some future machine-local integration, but it can never turn a parser rejection
+into ALLOW.
+
+#+BEGIN_SRC python :tangle all/.local/lib/dotcortex/claude_approval_p3.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""Fail-closed deterministic PermissionRequest rule engine for SO-APPROVAL P3."""
+
+import json
+import os
+from pathlib import Path, PurePosixPath
+import posixpath
+import re
+import shlex
+import signal
+import stat
+import subprocess
+import sys
+
+
+SCHEMA_VERSION = "so-approval-p3.v1"
+HARD_TIMEOUT_SECONDS = 3.0
+REMOTE_REALPATH_TIMEOUT_SECONDS = 2.5
+CLASS_NAMES = (
+    "ssh-kikin-readonly",
+    "local-test-run",
+    "centre-render",
+    "dotcortex-safe-commit",
+    "outbound-tool-call",
+)
+ALLOW_OUTPUT = {
+    "hookSpecificOutput": {
+        "hookEventName": "PermissionRequest",
+        "decision": {"behavior": "allow"},
+    }
+}
+SHELL_META_RE = re.compile(r"(?:[\n\r;]|&&|\|\||\$\(|`|[<>])")
+SSH_RE = re.compile(
+    r"^ssh -o BatchMode=yes ([A-Za-z0-9._-]+) '([^'\n\r]+)'$"
+)
+UNITTEST_RE = re.compile(
+    r"^(?:python3|/usr/bin/python3) -m unittest "
+    r"(FORGE\.tests\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)$"
+)
+PYTEST_RE = re.compile(
+    r'^pytest ([A-Za-z0-9_./-]+) -q -m "not live"$'
+)
+CENTRE_COMMANDS = {
+    "/usr/bin/python3 FORGE/bin/pokemon-centre render",
+    "FORGE/bin/clubhouse-bosses-refresh",
+}
+READERS = {
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "ls",
+    "stat",
+    "wc",
+    "mailcortex",
+    "pgrep",
+    "date",
+    "find",
+}
+GIT_READERS = {"log", "status", "diff", "show"}
+FIND_WRITE_ACTIONS = {
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-fprint",
+    "-fprint0",
+    "-fprintf",
+    "-fls",
+}
+GIT_UNSAFE_READ_OPTIONS = {
+    "--ext-diff",
+    "--textconv",
+    "--exec-path",
+    "--paginate",
+}
+
+
+class Rejected(ValueError):
+    """Input is outside the exact allow shape."""
+
+
+def _manifest_path():
+    override = os.environ.get("SO_APPROVAL_P3_MANIFEST")
+    if override:
+        return Path(override)
+    installed = Path.home() / ".config/dotcortex/claude-approval-p3.json"
+    if installed.is_file():
+        return installed
+    source_tree = Path(__file__).resolve().parents[3]
+    return source_tree / ".config/dotcortex/claude-approval-p3.json"
+
+
+def _load_manifest():
+    path = _manifest_path()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if set(data) != {
+        "schema_version",
+        "readonly_host",
+        "remote_home",
+        "remote_path_roots",
+        "mailcortex_account",
+        "local_test_roots",
+        "centre_roots",
+        "dotcortex_roots",
+        "tmp_roots",
+        "outbound_tools",
+        "classes",
+    }:
+        raise Rejected("manifest keys")
+    if data["schema_version"] != SCHEMA_VERSION:
+        raise Rejected("manifest version")
+    if not isinstance(data["readonly_host"], str) or not re.fullmatch(
+        r"[A-Za-z0-9._-]+", data["readonly_host"]
+    ):
+        raise Rejected("readonly host")
+    if not isinstance(data["remote_home"], str) or not data["remote_home"].startswith("/"):
+        raise Rejected("remote home")
+    if not isinstance(data["remote_path_roots"], list) or not data["remote_path_roots"]:
+        raise Rejected("remote path roots")
+    if any(
+        not isinstance(root, str) or not root.startswith("/") or root == "/"
+        for root in data["remote_path_roots"]
+    ):
+        raise Rejected("remote path root")
+    if not isinstance(data["mailcortex_account"], str) or not data["mailcortex_account"]:
+        raise Rejected("mailcortex account")
+    for field in ("local_test_roots", "centre_roots", "dotcortex_roots"):
+        if not isinstance(data[field], list) or not data[field]:
+            raise Rejected(field)
+        roots = []
+        for raw in data[field]:
+            if not isinstance(raw, str) or not raw.startswith("/"):
+                raise Rejected(field)
+            root = Path(raw).resolve(strict=False)
+            if root == Path("/"):
+                raise Rejected(field)
+            roots.append(root)
+        data[field] = roots
+    if not isinstance(data["tmp_roots"], list) or not data["tmp_roots"]:
+        raise Rejected("tmp roots")
+    tmp_roots = []
+    for raw in data["tmp_roots"]:
+        if not isinstance(raw, str) or not raw.startswith("/"):
+            raise Rejected("tmp root")
+        root = Path(raw).resolve(strict=False)
+        if root == Path("/"):
+            raise Rejected("broad tmp root")
+        tmp_roots.append(root)
+    if not isinstance(data["outbound_tools"], list) or not all(
+        isinstance(item, str) and item for item in data["outbound_tools"]
+    ):
+        raise Rejected("outbound tools")
+    classes = data["classes"]
+    if not isinstance(classes, list) or len(classes) != len(CLASS_NAMES):
+        raise Rejected("classes")
+    enabled = {}
+    for expected, item in zip(CLASS_NAMES, classes):
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "enabled"}
+            or item.get("name") != expected
+            or type(item.get("enabled")) is not bool
+        ):
+            raise Rejected("class entry")
+        enabled[expected] = item["enabled"]
+    data["tmp_roots"] = tmp_roots
+    data["enabled"] = enabled
+    return data
+
+
+def _protected_token(token):
+    lowered = token.lower().replace("\\", "/")
+    components = [part for part in lowered.split("/") if part]
+    if "/home/gille" in lowered or "secret vault" in lowered:
+        return True
+    if ".git" in components or ".ssh" in components or ".env" in components:
+        return True
+    if "nexus/keys" in lowered:
+        return True
+    names = {
+        ".netrc",
+        ".authinfo",
+        ".authinfo.gpg",
+        "authorized_keys",
+        "credentials",
+        "credentials.json",
+        "auth.json",
+        "secrets.json",
+        "id_rsa",
+        "id_ed25519",
+    }
+    return any(part in names for part in components)
+
+
+def _hard_never(command):
+    if not isinstance(command, str) or not command or "\x00" in command:
+        return True
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return True
+    lowered = [word.lower() for word in words]
+    joined = " ".join(lowered)
+    if any(_protected_token(word) for word in words):
+        return True
+    if re.search(r"(?:^|[;&|]\s*)git\s+(?:push|reset|revert)(?:\s|$)", joined):
+        return True
+    if re.search(r"(?:^|[;&|]\s*)git\s+worktree\s+prune(?:\s|$)", joined):
+        return True
+    if lowered and lowered[0] == "rm" and any(
+        word == "--recursive" or (word.startswith("-") and "r" in word[1:])
+        for word in lowered[1:]
+    ):
+        return True
+    if any(word in {"sudo", "rc-service", "systemctl", "tailscale", "crontab"} for word in lowered):
+        return True
+    install_pairs = {
+        "apt install",
+        "apt-get install",
+        "apk add",
+        "dnf install",
+        "yum install",
+        "pacman -s",
+        "zypper install",
+        "brew install",
+        "pip install",
+        "pip3 install",
+        "pipx install",
+        "npm install",
+        "npm i",
+        "pnpm install",
+        "yarn add",
+        "cargo install",
+        "guix install",
+        "guix package",
+    }
+    if any(pair in joined for pair in install_pairs):
+        return True
+    if re.search(r"(?:python3|/usr/bin/python3)\s+-m\s+pip\s+install(?:\s|$)", joined):
+        return True
+    return False
+
+
+def _inside(path, root):
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _cwd_and_root(event, roots, exact=False):
+    raw = event.get("cwd")
+    if not isinstance(raw, str) or not raw.startswith("/"):
+        raise Rejected("cwd")
+    cwd = Path(raw).resolve(strict=False)
+    for root in roots:
+        if cwd == root or (not exact and _inside(cwd, root)):
+            return cwd, root
+    raise Rejected("cwd outside roots")
+
+
+def _safe_relative_path(raw):
+    if not raw or raw.startswith("/") or raw.startswith("~") or raw.startswith(":"):
+        return False
+    path = PurePosixPath(raw)
+    if any(part in {"", ".", ".."} for part in path.parts):
+        return False
+    return not _protected_token(raw)
+
+
+REMOTE_DYNAMIC_PATH = re.compile(r"[*?\[\]{}]")
+REMOTE_EXCLUDED_COMPONENTS = {
+    "private",
+    "secrets",
+    ".secrets",
+    "keys",
+    "credentials",
+}
+
+
+def _remote_path(raw, remote_home, base=None):
+    if (
+        not raw
+        or "\x00" in raw
+        or "$" in raw
+        or "`" in raw
+        or REMOTE_DYNAMIC_PATH.search(raw)
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw)
+    ):
+        return None
+    if raw == "~":
+        path = remote_home
+    elif raw.startswith("~/"):
+        path = remote_home.rstrip("/") + raw[1:]
+    elif raw.startswith("~"):
+        return None
+    elif raw.startswith("/"):
+        path = "/" + raw.lstrip("/")
+    else:
+        path = posixpath.join(base or remote_home, raw)
+    normalized = posixpath.normpath(path)
+    return normalized if normalized.startswith("/") else None
+
+
+def _remote_path_excluded(path):
+    components = tuple(part.lower() for part in path.split("/") if part)
+    if (
+        any(part in REMOTE_EXCLUDED_COMPONENTS for part in components)
+        or "palmcortex" in components
+        or any(
+            components[index:index + 3] == ("logs", "telegram", "personal")
+            for index in range(max(0, len(components) - 2))
+        )
+    ):
+        return True
+    basename = components[-1] if components else ""
+    return (
+        basename in {"env", ".env", "auth.json"}
+        or basename.endswith((".env", ".token", ".key", ".pem", ".jar"))
+        or basename.startswith("cookies")
+        or "token" in basename
+        or "secret" in basename
+    )
+
+
+def _remote_paths_allowed(raw_paths, manifest, base=None):
+    roots = tuple(
+        _remote_path(raw, manifest["remote_home"])
+        for raw in manifest["remote_path_roots"]
+    )
+    if any(root is None for root in roots):
+        return None
+    resolved = []
+    for raw in raw_paths:
+        path = _remote_path(raw, manifest["remote_home"], base=base)
+        if (
+            path is None
+            or not any(path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
+            or _remote_path_excluded(path)
+        ):
+            return None
+        resolved.append(path)
+    return resolved
+
+
+def _remote_analysis(paths, realpath_paths=None):
+    return {
+        "paths": list(paths),
+        "realpath_paths": list(paths if realpath_paths is None else realpath_paths),
+    }
+
+
+def _remote_git_paths(args, repo_raw, manifest):
+    repo = _remote_path(repo_raw, manifest["remote_home"])
+    roots = tuple(
+        _remote_path(raw, manifest["remote_home"])
+        for raw in manifest["remote_path_roots"]
+    )
+    if (
+        repo is None
+        or any(root is None for root in roots)
+        or not any(repo == root or repo.startswith(root.rstrip("/") + "/") for root in roots)
+        or _remote_path_excluded(repo)
+    ):
+        return None
+    subcommand = args[0]
+    remainder = list(args[1:])
+    if any(REMOTE_DYNAMIC_PATH.search(token) for token in remainder):
+        return None
+    lexical_paths = [repo]
+    realpath_paths = [repo]
+    if subcommand == "show":
+        if "--" in remainder:
+            return None
+        object_paths = []
+        for token in remainder:
+            if token.startswith("-"):
+                continue
+            if ":" not in token:
+                continue
+            revision, object_path = token.split(":", 1)
+            if not revision or not object_path or object_path.startswith("/"):
+                return None
+            object_paths.append(object_path)
+        resolved_objects = _remote_paths_allowed(object_paths, manifest, base=repo)
+        if resolved_objects is None:
+            return None
+        lexical_paths.extend(resolved_objects)
+        return _remote_analysis(lexical_paths, realpath_paths)
+
+    disk_raw_paths = []
+    if "--" in remainder:
+        if remainder.count("--") != 1:
+            return None
+        separator = remainder.index("--")
+        disk_raw_paths = remainder[separator + 1:]
+        if not disk_raw_paths:
+            return None
+    elif subcommand == "status":
+        disk_raw_paths = [token for token in remainder if not token.startswith("-")]
+    resolved_disk = _remote_paths_allowed(disk_raw_paths, manifest, base=repo)
+    if resolved_disk is None:
+        return None
+    lexical_paths.extend(resolved_disk)
+    realpath_paths.extend(resolved_disk)
+    return _remote_analysis(lexical_paths, realpath_paths)
+
+
+def _reader_segment(segment, manifest):
+    try:
+        words = shlex.split(segment, posix=True)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    command = words[0]
+    if command == "git":
+        args = words[1:]
+        repo_raw = "."
+        if args[:1] == ["-C"]:
+            if len(args) < 3:
+                return None
+            repo_raw = args[1]
+            args = args[2:]
+        if not args or args[0] not in GIT_READERS:
+            return None
+        if any(
+            word in GIT_UNSAFE_READ_OPTIONS or word in {"-C"} or word.startswith(("--output=", "--git-dir=", "--work-tree="))
+            for word in args[1:]
+        ):
+            return None
+        return _remote_git_paths(args, repo_raw, manifest)
+    if command not in READERS:
+        return None
+    args = words[1:]
+    if command == "cat":
+        paths = _remote_paths_allowed(args, manifest) if args and all(not item.startswith("-") for item in args) else None
+        return None if paths is None else _remote_analysis(paths)
+    if command == "mailcortex":
+        if not args or args[0] not in {"inbox", "read"}:
+            return None
+        expected = 2 if args[0] == "inbox" else 3
+        return _remote_analysis([]) if (
+            len(args) == expected
+            and args[1] == manifest["mailcortex_account"]
+            and all(not item.startswith("-") for item in args[1:])
+        ) else None
+    if command == "find":
+        if not args or any(
+            word in FIND_WRITE_ACTIONS or any(word.startswith(item + "=") for item in FIND_WRITE_ACTIONS)
+            for word in args
+        ):
+            return None
+        cursor = 0
+        while cursor < len(args) and not args[cursor].startswith("-") and args[cursor] not in {"!", ","}:
+            cursor += 1
+        starts = args[:cursor]
+        expression = args[cursor:]
+        if not starts or any(REMOTE_DYNAMIC_PATH.search(item) for item in expression):
+            return None
+        for index, item in enumerate(expression):
+            if item in {"-name", "-iname"}:
+                if index + 1 >= len(expression) or _remote_path_excluded("/" + expression[index + 1]):
+                    return None
+        paths = _remote_paths_allowed(starts, manifest)
+        return None if paths is None else _remote_analysis(paths)
+    if command in {"head", "tail"}:
+        if not args or any(item in {"-f", "--follow", "--retry", "--pid"} or item.startswith(("--follow=", "--pid=")) for item in args):
+            return None
+        cursor = 0
+        while cursor < len(args) and args[cursor].startswith("-"):
+            option = args[cursor]
+            if re.fullmatch(r"-\d+", option):
+                cursor += 1
+                continue
+            if option in {"-n", "--lines", "-c", "--bytes"} and cursor + 1 < len(args):
+                cursor += 2
+                continue
+            if option.startswith(("--lines=", "--bytes=")):
+                cursor += 1
+                continue
+            return None
+        if cursor >= len(args):
+            return _remote_analysis([])
+        paths = _remote_paths_allowed(args[cursor:], manifest)
+        return None if paths is None else _remote_analysis(paths)
+    if command == "grep":
+        safe_flags = {"-E", "-F", "-G", "-H", "-h", "-i", "-l", "-n", "-s", "-v", "-w", "-x", "-c"}
+        cursor = 0
+        explicit_pattern = False
+        while cursor < len(args) and args[cursor].startswith("-"):
+            option = args[cursor]
+            if option in safe_flags or option == "--color=never":
+                cursor += 1
+                continue
+            if option in {"-e", "--regexp", "-m", "--max-count"} and cursor + 1 < len(args):
+                explicit_pattern = explicit_pattern or option in {"-e", "--regexp"}
+                cursor += 2
+                continue
+            if option.startswith(("--regexp=", "--max-count=")):
+                explicit_pattern = explicit_pattern or option.startswith("--regexp=")
+                cursor += 1
+                continue
+            return None
+        operands = args[cursor:]
+        if not explicit_pattern:
+            if not operands:
+                return None
+            operands = operands[1:]
+        if any(item.startswith("-") for item in operands):
+            return None
+        if not operands:
+            return _remote_analysis([])
+        paths = _remote_paths_allowed(operands, manifest)
+        return None if paths is None else _remote_analysis(paths)
+    if command == "pgrep":
+        return _remote_analysis([]) if args and all(
+            not item.startswith("-") or item in {"-c", "-l", "-x", "--count", "--exact", "--list-name"}
+            for item in args
+        ) and len([item for item in args if not item.startswith("-")]) == 1 else None
+    if command == "date":
+        return _remote_analysis([]) if all(
+            item in {"-u", "--utc", "-R", "--rfc-email"}
+            or item.startswith(("+", "--iso-8601", "--date="))
+            for item in args
+        ) else None
+    if command == "wc" and any(item == "--files0-from" or item.startswith("--files0-from=") for item in args):
+        return None
+    if command in {"ls", "stat", "wc"}:
+        operands = [item for item in args if not item.startswith("-")]
+        if command in {"ls", "stat"} and not operands:
+            return None
+        if not operands:
+            return _remote_analysis([])
+        paths = _remote_paths_allowed(operands, manifest)
+        return None if paths is None else _remote_analysis(paths)
+    return None
+
+
+def _ssh_readonly(command, manifest):
+    match = SSH_RE.fullmatch(command)
+    if not match or match.group(1) != manifest["readonly_host"]:
+        return False
+    remote = match.group(2)
+    if SHELL_META_RE.search(remote.replace("|", "")):
+        return False
+    if "||" in remote or remote.startswith("|") or remote.endswith("|"):
+        return False
+    if _hard_never(remote):
+        return False
+    parts = [part.strip() for part in remote.split("|")]
+    analyses = [_reader_segment(part, manifest) if part else None for part in parts]
+    if not parts or any(analysis is None for analysis in analyses):
+        return None
+    return {
+        "paths": [path for analysis in analyses for path in analysis["paths"]],
+        "realpath_paths": [
+            path for analysis in analyses for path in analysis["realpath_paths"]
+        ],
+    }
+
+
+def _run_remote_realpath(argv, timeout_seconds):
+    return subprocess.run(
+        list(argv),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+
+
+def _remote_realpath_proven(analysis, manifest, runner):
+    paths = analysis.get("realpath_paths")
+    if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+        return False
+    if not paths:
+        return True
+    argv = (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=3",
+        manifest["readonly_host"],
+        "realpath",
+        "-e",
+        "--",
+        *(shlex.quote(path) for path in paths),
+    )
+    completed = runner(argv, REMOTE_REALPATH_TIMEOUT_SECONDS)
+    if getattr(completed, "returncode", None) != 0:
+        return False
+    stdout = getattr(completed, "stdout", None)
+    if (
+        not isinstance(stdout, str)
+        or not stdout.endswith("\n")
+        or "\r" in stdout
+        or "\x00" in stdout
+    ):
+        return False
+    resolved = stdout[:-1].split("\n")
+    if len(resolved) != len(paths) or any(
+        not path
+        or not path.startswith("/")
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+        for path in resolved
+    ):
+        return False
+    checked = _remote_paths_allowed(resolved, manifest)
+    return checked == resolved
+
+
+def _local_test(command, event, manifest):
+    cwd, root = _cwd_and_root(event, manifest["local_test_roots"])
+    if SHELL_META_RE.search(command):
+        return False
+    if UNITTEST_RE.fullmatch(command):
+        return True
+    match = PYTEST_RE.fullmatch(command)
+    if not match or not _safe_relative_path(match.group(1)):
+        return False
+    target = (cwd / match.group(1)).resolve(strict=False)
+    try:
+        info = target.lstat()
+    except OSError:
+        return False
+    return _inside(target, root) and stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+
+
+def _centre(command, event, manifest):
+    cwd, _root = _cwd_and_root(event, manifest["centre_roots"], exact=True)
+    if command not in CENTRE_COMMANDS:
+        return False
+    script = "FORGE/bin/pokemon-centre" if command.startswith("/usr/bin/python3 ") else command
+    target = (cwd / script).resolve(strict=False)
+    try:
+        info = target.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+
+
+def _safe_commit(command, event, manifest):
+    cwd, root = _cwd_and_root(event, manifest["dotcortex_roots"], exact=True)
+    if cwd != root or SHELL_META_RE.search(command) or _hard_never(command):
+        return False
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if len(words) < 6 or words[:2] != ["git", "commit"] or words[2] != "-F":
+        return False
+    try:
+        separator = words.index("--", 4)
+    except ValueError:
+        return False
+    if separator != 4 or not words[5:]:
+        return False
+    message = Path(words[3])
+    if not message.is_absolute():
+        message = cwd / message
+    try:
+        info = message.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+        return False
+    if info.st_uid != os.getuid() or not any(
+        _inside(message.resolve(strict=False), root) and message.resolve(strict=False) != root
+        for root in manifest["tmp_roots"]
+    ):
+        return False
+    for raw in words[5:]:
+        if not _safe_relative_path(raw):
+            return False
+        target = (cwd / raw).resolve(strict=False)
+        try:
+            target_info = target.lstat()
+        except OSError:
+            return False
+        if (
+            not _inside(target, root)
+            or not stat.S_ISREG(target_info.st_mode)
+            or stat.S_ISLNK(target_info.st_mode)
+        ):
+            return False
+    return True
+
+
+def _protected_tool_input(tool_input):
+    try:
+        raw = json.dumps(tool_input, ensure_ascii=False, sort_keys=True).lower().replace("\\\\", "/")
+    except (TypeError, ValueError):
+        return True
+    return any(
+        marker in raw
+        for marker in (
+            "/home/gille",
+            "secret vault",
+            "nexus/keys",
+            "/.ssh/",
+            "~/.ssh/",
+            "/.env",
+            "auth.json",
+            "credentials.json",
+            "oauth.json",
+        )
+    )
+
+
+def _candidate(event, manifest):
+    tool_name = event.get("tool_name")
+    tool_input = event.get("tool_input")
+    if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
+        raise Rejected("tool event")
+    if tool_name != "Bash":
+        if tool_name in manifest["outbound_tools"] and not _protected_tool_input(tool_input):
+            return "outbound-tool-call", True
+        raise Rejected("unknown tool")
+    if set(tool_input) != {"command"} or not isinstance(tool_input.get("command"), str):
+        raise Rejected("bash input")
+    command = tool_input["command"]
+    if _hard_never(command):
+        raise Rejected("hard never")
+    parsers = (
+        ("ssh-kikin-readonly", lambda: _ssh_readonly(command, manifest)),
+        ("local-test-run", lambda: _local_test(command, event, manifest)),
+        ("centre-render", lambda: _centre(command, event, manifest)),
+        ("dotcortex-safe-commit", lambda: _safe_commit(command, event, manifest)),
+    )
+    matches = []
+    for name, parser in parsers:
+        try:
+            parsed = parser()
+            if parsed:
+                matches.append((name, parsed if name == "ssh-kikin-readonly" else None))
+        except (OSError, Rejected, ValueError):
+            continue
+    if len(matches) != 1:
+        raise Rejected("no unique rule")
+    return matches[0]
+
+
+def evaluate(event, manifest, remote_path_runner=_run_remote_realpath):
+    if not isinstance(event, dict) or event.get("hook_event_name") != "PermissionRequest":
+        raise Rejected("event")
+    rule, analysis = _candidate(event, manifest)
+    if manifest["enabled"].get(rule) is not True:
+        return False
+    if rule == "ssh-kikin-readonly":
+        try:
+            return _remote_realpath_proven(analysis, manifest, remote_path_runner)
+        except Exception:
+            return False
+    return True
+
+
+def _deadline(_signum, _frame):
+    raise TimeoutError("approval deadline")
+
+
+def main():
+    try:
+        previous_handler = signal.signal(signal.SIGALRM, _deadline)
+        signal.setitimer(signal.ITIMER_REAL, HARD_TIMEOUT_SECONDS)
+    except Exception:
+        return 0
+    try:
+        raw = sys.stdin.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise Rejected("input too large")
+        event = json.loads(raw)
+        manifest = _load_manifest()
+        if evaluate(event, manifest):
+            sys.stdout.write(json.dumps(ALLOW_OUTPUT, separators=(",", ":")))
+            sys.stdout.write("\n")
+    except Exception:
+        pass
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+#+END_SRC
+
+* Honey installation — Admiral-gated, not run here
+
+The reviewed 2026-10-09 ruling enables =ssh-kikin-readonly=, =centre-render=,
+and =dotcortex-safe-commit= in the committed manifest.  It does not install the
+hook or edit a live Claude session; Mètsàtron performs this machine-local wiring
+himself.
+
+Honey needs no HelmCortex checkout and no model.  The dedicated Claude account
+needs =/usr/bin/python3=, an OpenSSH =ssh= executable on =PATH=, and working
+BatchMode host-key/key authentication to the reviewed read-only host.  The
+remote host must provide =realpath=.  The engine invokes exactly one proof
+command after lexical class-1 acceptance:
+
+#+BEGIN_EXAMPLE
+ssh -o BatchMode=yes -o ConnectTimeout=3 YOUR_READONLY_HOST realpath -e -- <quoted-path>...
+#+END_EXAMPLE
+
+Each path is a separately shell-quoted argv member.  The local subprocess has a
+2.5-second timeout inside the hook's 3.0-second deadline.  Non-zero exit,
+timeout, missing input, malformed output, count mismatch, or a returned path
+outside the same root/secret/privacy policy produces ASK.  =git show REV:PATH=
+object paths are not filesystem objects, so those paths receive the lexical
+proof only; the repository root still receives the remote realpath proof.
+The reviewed roots include =/home/YOUR_REMOTE_USER/mnt/x230/HelmCortex= for
+the canonical backing path of the remote HelmCortex symlink.
+
+After the reviewed branch reaches the clean Honey checkout, run these steps as
+the dedicated Claude account only after the Admiral's word for live wiring:
+
+1. Tangle the two owning sources from the checkout:
+
+   #+BEGIN_SRC sh
+   cd /home/YOUR_USER/DotCortex
+   git status --short
+   /home/YOUR_USER/DotCortex/all/.local/bin/tangle-one agents-approval.org
+   /home/YOUR_USER/DotCortex/all/.local/bin/tangle-one agents-hooks.org
+   #+END_SRC
+
+   The tangled wrapper is
+   =/home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request=;
+   its engine is
+   =/home/YOUR_USER/DotCortex/all/.local/lib/dotcortex/claude_approval_p3.py=.
+
+2. Create the untracked machine-local manifest:
+
+   #+BEGIN_SRC sh
+   install -d -m 700 /home/YOUR_USER/.config/dotcortex
+   install -m 600 \
+     /home/YOUR_USER/DotCortex/all/.config/dotcortex/claude-approval-p3.json \
+     /home/YOUR_USER/.config/dotcortex/claude-approval-p3.local.json
+   #+END_SRC
+
+   In the private copy only, replace every =YOUR_*= value with the exact
+   Admiral-reviewed account, host, remote-home, seat, and Honey paths recorded
+   in the private System-One ticket.  Preserve the committed class flags
+   exactly: classes 1, 3, and 4 true; classes 2 and 5 false.  Honey has no
+   HelmCortex checkout, so the enabled Centre class cannot satisfy its exact
+   cwd/file proof and remains ASK there.
+
+3. Run the fixture harness before changing Claude settings:
+
+   #+BEGIN_SRC sh
+   /usr/bin/python3 \
+     /home/YOUR_USER/DotCortex/all/.local/share/dotcortex/tests/test-claude-approval-p3-hook.py
+   #+END_SRC
+
+4. Back up =/home/YOUR_USER/.claude/settings.json=, then merge this exact
+   =PermissionRequest= group under its existing top-level =hooks= object.  No
+   =PreToolUse= entry is used by this design:
+
+   #+BEGIN_SRC json
+   "PermissionRequest": [
+     {
+       "hooks": [
+         {
+           "type": "command",
+           "command": "SO_APPROVAL_P3_MANIFEST=/home/YOUR_USER/.config/dotcortex/claude-approval-p3.local.json DOTCORTEX_APPROVAL_ENGINE=/home/YOUR_USER/DotCortex/all/.local/lib/dotcortex/claude_approval_p3.py /home/YOUR_USER/DotCortex/all/.local/bin/claude-hook-permission-request",
+           "timeout": 5
+         }
+       ]
+     }
+   ]
+   #+END_SRC
+
+5. Validate the merged file with =/usr/bin/python3 -m json.tool
+   /home/YOUR_USER/.claude/settings.json= and start a fresh dedicated-Claude
+   session.  Never inject the hook into an already-running session.
+
+* RED/GREEN hook harness
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-claude-approval-p3-hook.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+import json
+import importlib.util
+import inspect
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+
+REPO = Path(__file__).resolve().parents[5]
+HOOK = REPO / "all/.local/bin/claude-hook-permission-request"
+MANIFEST = REPO / "all/.config/dotcortex/claude-approval-p3.json"
+ENGINE = REPO / "all/.local/lib/dotcortex/claude_approval_p3.py"
+ENGINE_SPEC = importlib.util.spec_from_file_location("dotcortex_approval_p3", ENGINE)
+ENGINE_MODULE = importlib.util.module_from_spec(ENGINE_SPEC)
+ENGINE_SPEC.loader.exec_module(ENGINE_MODULE)
+
+
+def event(tool_name, tool_input, cwd=None):
+    payload = {
+        "hook_event_name": "PermissionRequest",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+    }
+    if cwd is not None:
+        payload["cwd"] = str(cwd)
+    return payload
+
+
+def run_hook(payload, manifest=None, cwd=None):
+    env = os.environ.copy()
+    if manifest is not None:
+        env["SO_APPROVAL_P3_MANIFEST"] = str(manifest)
+    completed = subprocess.run(
+        [str(HOOK)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        cwd=cwd or REPO,
+        env=env,
+        timeout=2,
+        check=False,
+    )
+    return completed
+
+
+def decision(stdout):
+    if not stdout.strip():
+        return "ask"
+    parsed = json.loads(stdout)
+    return parsed["hookSpecificOutput"]["decision"]["behavior"]
+
+
+class FakeRemotePathRunner:
+    def __init__(self, *, stdout="", returncode=0, error=None):
+        self.stdout = stdout
+        self.returncode = returncode
+        self.error = error
+        self.calls = []
+
+    def __call__(self, argv, timeout_seconds):
+        self.calls.append((tuple(argv), timeout_seconds))
+        if self.error is not None:
+            raise self.error
+        return subprocess.CompletedProcess(argv, self.returncode, self.stdout, "")
+
+
+def identity_remote_path_runner(argv, timeout_seconds):
+    separator = list(argv).index("--")
+    paths = [shlex.split(item)[0] for item in argv[separator + 1:]]
+    return subprocess.CompletedProcess(argv, 0, "".join(path + "\n" for path in paths), "")
+
+
+def engine_decision(payload, manifest, runner=identity_remote_path_runner):
+    with mock.patch.dict(os.environ, {"SO_APPROVAL_P3_MANIFEST": str(manifest)}):
+        loaded = ENGINE_MODULE._load_manifest()
+    kwargs = {}
+    if "remote_path_runner" in inspect.signature(ENGINE_MODULE.evaluate).parameters:
+        kwargs["remote_path_runner"] = runner
+    try:
+        return "allow" if ENGINE_MODULE.evaluate(payload, loaded, **kwargs) else "ask"
+    except Exception:
+        return "ask"
+
+
+class ApprovalHookHarness(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(HOOK.is_file(), HOOK)
+        self.assertTrue(MANIFEST.is_file(), MANIFEST)
+        self.base = json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+    def enabled_manifest(self, root, *classes):
+        data = json.loads(json.dumps(self.base))
+        data["local_test_roots"] = [str(root)]
+        data["centre_roots"] = [str(root)]
+        data["dotcortex_roots"] = [str(root)]
+        data["readonly_host"] = "YOUR_READONLY_HOST"
+        data["remote_home"] = "/home/metsatron"
+        data["remote_path_roots"] = [
+            "/home/metsatron/HelmCortex",
+            "/home/metsatron/mnt/x230/HelmCortex",
+            "/home/metsatron/DotCortex",
+            "/home/metsatron/HelmCortex-wt-kikin",
+            "/home/metsatron/DotCortex-wt-kikin",
+        ]
+        data["mailcortex_account"] = "bunta@kikin.helm"
+        for item in data["classes"]:
+            item["enabled"] = item["name"] in classes
+        target = Path(self.tempdir.name) / "manifest.json"
+        target.write_text(json.dumps(data), encoding="utf-8")
+        return target
+
+    def make_tree(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        root = Path(self.tempdir.name) / "DotCortex"
+        (root / "tests").mkdir(parents=True)
+        (root / "FORGE/bin").mkdir(parents=True)
+        (root / "tests/test_gate.py").write_text("# synthetic\n", encoding="utf-8")
+        (root / "FORGE/bin/pokemon-centre").write_text("# synthetic\n", encoding="utf-8")
+        (root / "FORGE/bin/clubhouse-bosses-refresh").write_text("# synthetic\n", encoding="utf-8")
+        (root / "message.txt").write_text("subject\n", encoding="utf-8")
+        os.chmod(root / "message.txt", 0o600)
+        return root
+
+    def assert_ask(self, payload, manifest=None, cwd=None):
+        completed = run_hook(payload, manifest=manifest, cwd=cwd)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(decision(completed.stdout), "ask", completed.stdout)
+
+    def assert_allow(self, payload, manifest, cwd=None):
+        completed = run_hook(payload, manifest=manifest, cwd=cwd)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(decision(completed.stdout), "allow", completed.stdout)
+
+    def test_committed_manifest_matches_admiral_enablement_ruling(self):
+        self.assertTrue(self.base["classes"])
+        self.assertEqual(
+            {item["name"]: item["enabled"] for item in self.base["classes"]},
+            {
+                "ssh-kikin-readonly": True,
+                "local-test-run": False,
+                "centre-render": True,
+                "dotcortex-safe-commit": True,
+                "outbound-tool-call": False,
+            },
+        )
+        self.assert_ask(event("Bash", {"command": "python3 -m unittest FORGE.tests.test_gate"}, REPO))
+
+    def test_ssh_readonly_exact_shape_and_smuggling(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
+        for good in (
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'git -C HelmCortex status --short | head -20'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'find HelmCortex/FORGE -maxdepth 2 -type f | grep approval | wc -l'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat /home/metsatron/HelmCortex/README.md'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat ~/HelmCortex/README.md'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat DotCortex/../HelmCortex/README.md'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat //home/metsatron/HelmCortex/./README.md'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'mailcortex inbox bunta@kikin.helm'",
+        ):
+            with self.subTest(good=good):
+                self.assertEqual(
+                    engine_decision(event("Bash", {"command": good}, root), manifest),
+                    "allow",
+                )
+        for command in (
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat /etc/hosts > /tmp/x'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'date; id'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'grep x f && rm f'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat $(date)'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'ssh other date'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'find . -exec cat {} +'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat .ssh/config'",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    engine_decision(event("Bash", {"command": command}, root), manifest),
+                    "ask",
+                )
+
+    def test_ssh_readonly_credential_and_path_boundary(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
+        for leak, commands in {
+            "nanobot_env": (
+                "cat .config/nanobot-telegram/env",
+                "cat /home/metsatron/.config/nanobot-telegram/env",
+                "cat ~/.config/nanobot-telegram/env",
+                "cat HelmCortex/../.config/nanobot-telegram/env",
+            ),
+            "mailcortex_private_token": (
+                "cat .config/mailcortex/private/x.token",
+                "cat /home/metsatron/.config/mailcortex/private/x.token",
+                "cat ~/.config/mailcortex/private/x.token",
+                "cat DotCortex/../.config/mailcortex/private/x.token",
+            ),
+            "nexus_secret_cookie": (
+                "cat NEXUS/.secrets/mistral_cookies.jar",
+                "cat /home/metsatron/HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
+                "cat ~/HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
+                "cat HelmCortex/./NEXUS/.secrets/mistral_cookies.jar",
+                "cat HelmCortex/../HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
+            ),
+            "foreign_mail_inbox": ("mailcortex inbox fable@kikin.helm",),
+            "foreign_mail_read": ("mailcortex read fable@kikin.helm 1",),
+            "path_boundary": (
+                "git show HEAD:NEXUS/.secrets/x",
+                "git -C HelmCortex show HEAD:NEXUS/.secrets/x",
+                "find HelmCortex -name env",
+                'find HelmCortex -name "*.env"',
+                "find -name README.md",
+                "grep TOKEN .config -r",
+                "grep -r TOKEN",
+                "ls",
+                "git status --short",
+                "cat HelmCortex/*.md",
+                "cat HelmCortex/{README.md,AGENTS.md}",
+                "cat HelmCortex/$FILE",
+                "cat HelmCortex/NEXUS/private/x",
+                "cat HelmCortex/NEXUS/secrets/x",
+                "cat HelmCortex/NEXUS/keys/x",
+                "cat HelmCortex/NEXUS/credentials/x",
+                "cat HelmCortex/public/env",
+                "cat HelmCortex/public/.env",
+                "cat HelmCortex/public/dev.env",
+                "cat HelmCortex/public/x.token",
+                "cat HelmCortex/public/x.key",
+                "cat HelmCortex/public/x.pem",
+                "cat HelmCortex/public/auth.json",
+                "cat HelmCortex/public/cookies.sqlite",
+                "cat HelmCortex/public/archive.jar",
+                "cat HelmCortex/public/session-token-cache",
+                "cat HelmCortex/public/secret-notes",
+                "cat /etc/passwd",
+                "cat /proc/self/environ",
+                "cat /var/lib/private/token",
+            ),
+        }.items():
+            for remote in commands:
+                command = f"ssh -o BatchMode=yes YOUR_READONLY_HOST '{remote}'"
+                with self.subTest(leak=leak, command=command):
+                    self.assertEqual(
+                        engine_decision(event("Bash", {"command": command}, root), manifest),
+                        "ask",
+                    )
+
+    def test_ssh_readonly_privacy_boundaries(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
+        privacy_cases = {
+            "personal": {
+                "paths": (
+                    "HelmCortex/LOGS/Telegram/Personal/chat.md",
+                    "/home/metsatron/HelmCortex/LOGS/Telegram/Personal/chat.md",
+                    "~/HelmCortex/LOGS/Telegram/Personal/chat.md",
+                    "HelmCortex/FORGE/../../HelmCortex/LOGS/Telegram/Personal/chat.md",
+                ),
+                "repos": (
+                    "HelmCortex",
+                    "/home/metsatron/HelmCortex",
+                    "~/HelmCortex",
+                    "HelmCortex/FORGE/..",
+                ),
+                "object": "LOGS/Telegram/Personal/chat.md",
+            },
+            "palmcortex": {
+                "paths": (
+                    "HelmCortex/CORTEX/PalmCortex/Diary.md",
+                    "/home/metsatron/HelmCortex/CORTEX/PalmCortex/Diary.md",
+                    "~/HelmCortex/CORTEX/PalmCortex/Diary.md",
+                    "HelmCortex/FORGE/../../HelmCortex/CORTEX/PalmCortex/Diary.md",
+                ),
+                "repos": (
+                    "HelmCortex",
+                    "/home/metsatron/HelmCortex",
+                    "~/HelmCortex",
+                    "HelmCortex/FORGE/..",
+                ),
+                "object": "CORTEX/pAlMcOrTeX/Diary.md",
+            },
+        }
+        for boundary, values in privacy_cases.items():
+            commands = []
+            for path in values["paths"]:
+                commands.extend((
+                    f"cat {path}",
+                    f"grep private {path}",
+                    f"ls {path}",
+                    f"find {path} -maxdepth 1",
+                    f"git -C HelmCortex log -- {path}",
+                    f"git -C HelmCortex diff -- {path}",
+                ))
+            commands.extend(
+                f"git -C {repo} show HEAD:{values['object']}"
+                for repo in values["repos"]
+            )
+            for remote in commands:
+                command = f"ssh -o BatchMode=yes YOUR_READONLY_HOST '{remote}'"
+                with self.subTest(boundary=boundary, command=command):
+                    self.assertEqual(
+                        engine_decision(event("Bash", {"command": command}, root), manifest),
+                        "ask",
+                    )
+
+    def test_ssh_remote_realpath_proof_is_fixed_argv_and_fail_ask(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
+        command = "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'"
+        payload = event("Bash", {"command": command}, root)
+        allowed = "/home/metsatron/HelmCortex/README.md"
+        runner = FakeRemotePathRunner(stdout=allowed + "\n")
+        self.assertEqual(engine_decision(payload, manifest, runner), "allow")
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    (
+                        "ssh",
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "ConnectTimeout=3",
+                        "YOUR_READONLY_HOST",
+                        "realpath",
+                        "-e",
+                        "--",
+                        allowed,
+                    ),
+                    2.5,
+                )
+            ],
+        )
+        failures = (
+            FakeRemotePathRunner(stdout="/home/metsatron/HelmCortex/NEXUS/.secrets/x\n"),
+            FakeRemotePathRunner(stdout="/etc/passwd\n"),
+            FakeRemotePathRunner(stdout="/home/metsatron/HelmCortex/LOGS/Telegram/Personal/chat.md\n"),
+            FakeRemotePathRunner(returncode=1),
+            FakeRemotePathRunner(stdout=allowed + "\n" + allowed + "\n"),
+            FakeRemotePathRunner(stdout="not-an-absolute-path\n"),
+        )
+        for failed_runner in failures:
+            with self.subTest(runner=failed_runner):
+                self.assertEqual(engine_decision(payload, manifest, failed_runner), "ask")
+
+    def test_timeout_budgets_are_pinned_and_remote_timeout_asks(self):
+        self.assertEqual(ENGINE_MODULE.REMOTE_REALPATH_TIMEOUT_SECONDS, 2.5)
+        self.assertEqual(ENGINE_MODULE.HARD_TIMEOUT_SECONDS, 3.0)
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
+        payload = event(
+            "Bash",
+            {"command": "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'"},
+            root,
+        )
+        runner = FakeRemotePathRunner(
+            error=subprocess.TimeoutExpired(["ssh"], 2.5)
+        )
+        self.assertEqual(engine_decision(payload, manifest, runner), "ask")
+        self.assertEqual(runner.calls[0][1], 2.5)
+
+    def test_git_show_object_path_stays_lexical_only(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
+        repo = "/home/metsatron/HelmCortex"
+        runner = FakeRemotePathRunner(stdout=repo + "\n")
+        payload = event(
+            "Bash",
+            {"command": "ssh -o BatchMode=yes YOUR_READONLY_HOST 'git -C HelmCortex show HEAD:README.md'"},
+            root,
+        )
+        self.assertEqual(engine_decision(payload, manifest, runner), "allow")
+        self.assertEqual(runner.calls[0][0][-1:], (repo,))
+
+    def test_remote_realpath_mount_alias_is_allowed_but_privacy_still_asks(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
+        payload = event(
+            "Bash",
+            {"command": "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'"},
+            root,
+        )
+        mounted_readme = "/home/metsatron/mnt/x230/HelmCortex/README.md"
+        allowed_runner = FakeRemotePathRunner(stdout=mounted_readme + "\n")
+        self.assertEqual(engine_decision(payload, manifest, allowed_runner), "allow")
+
+        mounted_personal = (
+            "/home/metsatron/mnt/x230/HelmCortex/"
+            "LOGS/Telegram/Personal/x"
+        )
+        private_runner = FakeRemotePathRunner(stdout=mounted_personal + "\n")
+        self.assertEqual(engine_decision(payload, manifest, private_runner), "ask")
+
+    def test_local_test_run_exact_shapes_and_paths(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "local-test-run")
+        for command in (
+            "python3 -m unittest FORGE.tests.test_gate",
+            "/usr/bin/python3 -m unittest FORGE.tests.test_gate.TestGate.test_one",
+            'pytest tests/test_gate.py -q -m "not live"',
+        ):
+            with self.subTest(command=command):
+                self.assert_allow(event("Bash", {"command": command}, root), manifest, root)
+        for command in (
+            "python3 -m unittest ../../outside.test_gate",
+            "python3 -m unittest FORGE.tests.test_gate; id",
+            'pytest tests/test_gate.py -q -m "not live" > out',
+            "pytest tests/test_gate.py -q",
+        ):
+            with self.subTest(command=command):
+                self.assert_ask(event("Bash", {"command": command}, root), manifest, root)
+
+    def test_centre_render_exact_commands_and_cwd(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "centre-render")
+        for command in (
+            "/usr/bin/python3 FORGE/bin/pokemon-centre render",
+            "FORGE/bin/clubhouse-bosses-refresh",
+        ):
+            with self.subTest(command=command):
+                self.assert_allow(event("Bash", {"command": command}, root), manifest, root)
+        self.assert_ask(
+            event("Bash", {"command": "/usr/bin/python3 FORGE/bin/pokemon-centre render --live"}, root),
+            manifest,
+            root,
+        )
+        self.assert_ask(
+            event("Bash", {"command": "FORGE/bin/clubhouse-bosses-refresh"}, root / "tests"),
+            manifest,
+            root / "tests",
+        )
+
+    def test_safe_commit_requires_message_file_separator_and_safe_paths(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "dotcortex-safe-commit")
+        message = root / "message.txt"
+        good = f"git commit -F {message} -- tests/test_gate.py"
+        self.assert_allow(event("Bash", {"command": good}, root), manifest, root)
+        for command in (
+            "git commit",
+            f"git commit -F {message} tests/test_gate.py",
+            f"git commit -F {message} -- .git/config",
+            f"git commit -F {message} -- NEXUS/keys/token",
+            f"git commit -F {message} -- /home/gille/file",
+            f"git commit -F {message} -- tests/missing.py",
+            f"git commit -F {message} -- tests",
+            f"git commit -F {message} -- tests/test_gate.py && git push",
+        ):
+            with self.subTest(command=command):
+                self.assert_ask(event("Bash", {"command": command}, root), manifest, root)
+
+    def test_outbound_tools_are_name_routed_and_off_by_default(self):
+        root = self.make_tree()
+        telegram = "mcp__plugin_telegram_telegram__reply"
+        mail = "mcp__mailcortex__send"
+        self.assert_ask(event(telegram, {"text": "hello"}, root))
+        manifest = self.enabled_manifest(root, "outbound-tool-call")
+        self.assert_allow(event(telegram, {"text": "hello"}, root), manifest, root)
+        self.assert_allow(event(mail, {"to": "seat", "body": "hello"}, root), manifest, root)
+        self.assert_ask(event(telegram, {"text": "send NEXUS/keys/token"}, root), manifest, root)
+        self.assert_ask(event("mcp__mailcortex__delete", {}, root), manifest, root)
+
+    def test_hard_never_wins_over_enabled_classes(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(
+            root,
+            "ssh-kikin-readonly",
+            "local-test-run",
+            "centre-render",
+            "dotcortex-safe-commit",
+            "outbound-tool-call",
+        )
+        for command in (
+            "git push origin master",
+            "git reset --keep HEAD^",
+            "git revert HEAD",
+            "git worktree prune",
+            "rm -r tests",
+            "sudo true",
+            "systemctl status sshd",
+            "tailscale status",
+            "python3 -m pip install x",
+            "crontab -l",
+            "cat /home/gille/file",
+            "cat 'Secret Vault/file'",
+            "cat .env",
+            "cat ~/.ssh/config",
+            "cat NEXUS/keys/token",
+        ):
+            with self.subTest(command=command):
+                self.assert_ask(event("Bash", {"command": command}, root), manifest, root)
+
+    def test_malformed_and_unknown_ask(self):
+        root = self.make_tree()
+        manifest = self.enabled_manifest(root, "local-test-run")
+        self.assert_ask(event("UnknownTool", {}, root), manifest, root)
+        completed = subprocess.run(
+            [str(HOOK)],
+            input="{not-json",
+            text=True,
+            capture_output=True,
+            env={**os.environ, "SO_APPROVAL_P3_MANIFEST": str(manifest)},
+            timeout=2,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(decision(completed.stdout), "ask")
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+* Kikin local approval gate — separate default-off manifest
+
+Kikin's Claude consorts use a local-only policy surface.  It is deliberately
+separate from the Honey SSH canary: no class below may invoke SSH, and the
+tracked manifest carries placeholders only.  Mètsàtron's machine-local copy
+owns the exact canonical, mount and scratchpad roots.  The four classes remain
+disabled until that local copy is reviewed and the hook is explicitly wired.
+
+#+BEGIN_SRC json :tangle all/.config/dotcortex/claude-approval-canary.kikin.v1.json :comments no
+{
+  "schema": "hc.approval.canary.kikin.manifest.v1",
+  "manifest_version": "claude-approval-canary.kikin.v1",
+  "hard_floor_ids": [
+    "floor.kikin-protected-target.v1",
+    "floor.kikin-private-log.v1",
+    "floor.kikin-palmcortex.v1",
+    "floor.kikin-remote.v1",
+    "floor.kikin-service-control.v1",
+    "floor.kikin-package-install.v1",
+    "floor.kikin-shell-composition.v1",
+    "floor.kikin-writer-option.v1"
+  ],
+  "roots": [
+    "/home/YOUR_USER/HelmCortex",
+    "/home/YOUR_USER/mnt/x230/HelmCortex",
+    "/home/YOUR_USER/HelmCortex-wt-kikin",
+    "/home/YOUR_USER/mnt/x230/HelmCortex-wt-kikin",
+    "/home/YOUR_USER/DotCortex",
+    "/home/YOUR_USER/mnt/x230/DotCortex",
+    "/home/YOUR_USER/DotCortex-wt-kikin",
+    "/home/YOUR_USER/mnt/x230/DotCortex-wt-kikin"
+  ],
+  "scratch_roots": [
+    "/tmp",
+    "/home/YOUR_USER/.claude/scratchpad"
+  ],
+  "classes": [
+    {
+      "name": "local_read",
+      "enabled": false,
+      "tool_names": ["Read", "Glob", "Grep"],
+      "bash_verbs": ["cat", "head", "tail", "grep", "ls", "stat", "wc", "find"]
+    },
+    {
+      "name": "git_observe",
+      "enabled": false,
+      "subcommands": ["status", "log", "diff", "show", "branch"]
+    },
+    {
+      "name": "centre_render",
+      "enabled": false,
+      "commands": [
+        "pokemon-centre render",
+        "FORGE/bin/pokemon-centre render",
+        "/usr/bin/python3 FORGE/bin/pokemon-centre render",
+        "clubhouse-bosses-refresh",
+        "FORGE/bin/clubhouse-bosses-refresh"
+      ]
+    },
+    {
+      "name": "safe_commit",
+      "enabled": false,
+      "commands": ["git commit", "dotcortex-safe-commit"]
+    }
+  ]
+}
+#+END_SRC
+
+#+BEGIN_SRC python :tangle all/.local/lib/dotcortex/claude_approval_kikin.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""Fail-closed local approval engine for Kikin's Claude consorts."""
+
+import json
+import os
+from pathlib import Path
+import posixpath
+import re
+import shlex
+import signal
+import stat
+import sys
+
+
+SCHEMA = "hc.approval.canary.kikin.manifest.v1"
+VERSION = "claude-approval-canary.kikin.v1"
+CLASS_NAMES = ("local_read", "git_observe", "centre_render", "safe_commit")
+ALLOW_OUTPUT = {
+    "hookSpecificOutput": {
+        "hookEventName": "PermissionRequest",
+        "decision": {"behavior": "allow"},
+    }
+}
+SHELL_META = re.compile(r"(?:[\n\r;]|&&|\|\||\$\(|`|[<>]|&|\\)")
+PATH_META = re.compile(r"(?:[*?\[\]{}]|\$|`)")
+REMOTE = {"ssh", "scp", "rsync", "curl", "wget", "nc", "socat", "telnet"}
+SERVICE = {"sudo", "systemctl", "rc-service", "crontab", "tailscale"}
+PACKAGE = {"apt", "apt-get", "apk", "brew", "cargo", "conda", "dnf", "guix", "gem", "mamba", "npm", "pacman", "pip", "pip3", "pipx", "pnpm", "poetry", "uv", "yarn", "yum", "zypper"}
+AUTH = {".authinfo", ".authinfo.gpg", ".netrc", "auth.json", "authorized_keys", "credentials", "credentials.json", "id_ed25519", "id_rsa", "oauth.json", "oauth_creds.json", "secrets.json", "cookies.sqlite", "cookies.jar"}
+READ_OPTIONS = {"-n", "-i", "-v", "-E", "-F", "-h", "-H", "--line-number", "--ignore-case"}
+FIND_OPTIONS = {"-maxdepth", "-mindepth", "-type", "-name", "-iname", "-path", "-ipath", "-print", "-print0", "-mount", "-xdev"}
+BRANCH_OPTIONS = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--show-current", "--no-color"}
+
+
+def _inside(path, root):
+    try:
+        Path(path).relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _protected(value):
+    lowered = str(value).replace("\\", "/").casefold()
+    parts = tuple(part for part in lowered.split("/") if part)
+    if "palmcortex" in parts or any(parts[i:i + 3] == ("logs", "telegram", "personal") for i in range(max(0, len(parts) - 2))):
+        return True
+    if "secret vault" in lowered or "/home/gille" in lowered or "nexus/keys" in lowered:
+        return True
+    if any(part in {".ssh", ".secrets", "private", "secrets", "keys", "credentials"} for part in parts):
+        return True
+    basename = parts[-1] if parts else ""
+    return basename in AUTH or basename.startswith(".env") or basename.endswith((".token", ".key", ".pem", ".kdbx", ".sqlite")) or "token" in basename or "secret" in basename or "cookie" in basename
+
+
+def _hard_floor(event):
+    try:
+        raw = json.dumps(event.get("tool_input", {}), ensure_ascii=False, sort_keys=True).casefold()
+    except (TypeError, ValueError):
+        return True
+    if _protected(raw) or "logs/telegram/personal" in raw or "palmcortex" in raw:
+        return True
+    tool_input = event.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return False
+    if SHELL_META.search(command):
+        return True
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return True
+    lowered = [word.casefold() for word in words]
+    if any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+        return True
+    if any(word in SERVICE or word in {"pkill", "killall"} for word in lowered):
+        return True
+    if lowered and lowered[0] == "kill" and (len(lowered) == 1 or any(word.startswith("-") for word in lowered[1:])):
+        return True
+    if "telegram-agent-host" in lowered and any(word in {"stop", "start", "switch", "bring"} for word in lowered):
+        return True
+    if "nurse-joy" in lowered and "revive" in lowered:
+        return True
+    if "tmux" in lowered and any(word.startswith("kill-") for word in lowered):
+        return True
+    if lowered and lowered[0] == "rm" and any(word == "-r" or word == "--recursive" or (word.startswith("-") and "r" in word[1:]) for word in lowered[1:]):
+        return True
+    for index, word in enumerate(lowered):
+        if word in PACKAGE and any(next_word in {"install", "add", "i", "sync"} for next_word in lowered[index + 1:index + 4]):
+            return True
+    return any(word in {"--output", "--exec", "--execdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"} or word.startswith("--output=") for word in lowered)
+
+
+def _lexical(raw, cwd):
+    if not isinstance(raw, str) or not raw or "\x00" in raw or PATH_META.search(raw):
+        return None
+    if raw == "~":
+        raw = str(Path.home())
+    elif raw.startswith("~/"):
+        raw = str(Path.home()) + raw[1:]
+    elif raw.startswith("~"):
+        return None
+    elif not raw.startswith("/"):
+        raw = posixpath.join(cwd, raw)
+    return posixpath.normpath(raw) if raw.startswith("/") else None
+
+
+def _path(raw, cwd, roots, exists=True):
+    lexical = _lexical(raw, cwd)
+    if lexical is None or _protected(lexical):
+        return None
+    resolved = os.path.realpath(lexical)
+    if not any(_inside(resolved, root) for root in roots):
+        return None
+    if exists and not os.path.exists(resolved):
+        return None
+    return resolved
+
+
+def _scratch(raw, cwd, roots):
+    lexical = _lexical(raw, cwd)
+    if lexical is None:
+        return None
+    resolved = os.path.realpath(lexical)
+    return resolved if any(_inside(resolved, root) and resolved != root for root in roots) else None
+
+
+def _load_manifest():
+    override = os.environ.get("SO_APPROVAL_KIKIN_MANIFEST")
+    path = Path(override) if override else Path(__file__).resolve().parents[3] / ".config/dotcortex/claude-approval-canary.kikin.v1.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or set(data) != {"schema", "manifest_version", "hard_floor_ids", "roots", "scratch_roots", "classes"} or data.get("schema") != SCHEMA or data.get("manifest_version") != VERSION:
+        raise ValueError("invalid Kikin manifest")
+    if not isinstance(data["hard_floor_ids"], list) or not isinstance(data["classes"], list) or len(data["classes"]) != len(CLASS_NAMES):
+        raise ValueError("invalid Kikin manifest classes")
+    roots = tuple(os.path.realpath(item) for item in data["roots"] if isinstance(item, str) and item.startswith("/"))
+    scratch = tuple(os.path.realpath(item) for item in data["scratch_roots"] if isinstance(item, str) and item.startswith("/"))
+    if len(roots) != len(data["roots"]) or len(scratch) != len(data["scratch_roots"]) or any(root == "/" for root in roots + scratch):
+        raise ValueError("invalid Kikin roots")
+    entries = {}
+    for name, entry in zip(CLASS_NAMES, data["classes"]):
+        if not isinstance(entry, dict) or entry.get("name") != name or type(entry.get("enabled")) is not bool:
+            raise ValueError("invalid Kikin class")
+        entries[name] = entry
+    data["roots"] = roots
+    data["scratch_roots"] = scratch
+    data["entries"] = entries
+    return data
+
+
+def _targets(values, cwd, manifest, directories=None):
+    paths = tuple(_path(value, cwd, manifest["roots"]) for value in values)
+    if not paths or any(path is None for path in paths):
+        return None
+    if directories is True and any(not os.path.isdir(path) for path in paths):
+        return None
+    if directories is False and any(not os.path.isfile(path) for path in paths):
+        return None
+    return paths
+
+
+def _repo(raw, cwd, manifest):
+    path = _path(raw, cwd, manifest["roots"])
+    if path is None:
+        return None
+    current = Path(path if os.path.isdir(path) else os.path.dirname(path))
+    while True:
+        if (current / ".git").exists() and any(_inside(str(current), root) for root in manifest["roots"]):
+            return str(current)
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+def _local_match(event, manifest):
+    entry = manifest["entries"].get("local_read")
+    if entry is None:
+        return False
+    name, tool_input, cwd = event.get("tool_name"), event.get("tool_input"), event.get("cwd")
+    if not isinstance(tool_input, dict) or not isinstance(cwd, str):
+        return False
+    cwd = _path(cwd, cwd, manifest["roots"])
+    if cwd is None:
+        return False
+    if name == "Read":
+        return bool(_targets([tool_input.get("file_path", tool_input.get("path"))], cwd, manifest, False))
+    if name in {"Glob", "Grep"}:
+        base = tool_input.get("path") or cwd
+        pattern = tool_input.get("pattern")
+        return bool(_targets([base], cwd, manifest, True) and isinstance(pattern, str) and pattern and ".." not in pattern.split("/"))
+    if name != "Bash" or set(tool_input) != {"command"} or not isinstance(tool_input.get("command"), str) or SHELL_META.search(tool_input["command"]):
+        return False
+    try:
+        words = shlex.split(tool_input["command"], posix=True)
+    except ValueError:
+        return False
+    if not words or words[0] not in entry["bash_verbs"] or words[0] != words[0].rsplit("/", 1)[-1]:
+        return False
+    verb, args = words[0], words[1:]
+    if verb == "grep":
+        if not args or args[0].startswith("-") or any(arg.startswith("-") and arg not in READ_OPTIONS for arg in args[1:]):
+            return False
+        operands = [arg for arg in args[1:] if not arg.startswith("-")]
+    elif verb == "find":
+        split = next((index for index, arg in enumerate(args) if arg.startswith("-")), len(args))
+        operands, expression = args[:split], args[split:]
+        if not operands or any(arg in {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"} for arg in expression):
+            return False
+        if any(arg.startswith("-") and arg not in FIND_OPTIONS for arg in expression):
+            return False
+    else:
+        operands = [arg for arg in args if not arg.startswith("-")]
+        if not operands or any(arg.startswith("-") and arg not in READ_OPTIONS for arg in args):
+            return False
+    return bool(_targets(operands, cwd, manifest))
+
+
+def _git_match(event, manifest):
+    entry = manifest["entries"].get("git_observe")
+    tool_input, cwd = event.get("tool_input"), event.get("cwd")
+    if entry is None or event.get("tool_name") != "Bash" or not isinstance(tool_input, dict) or set(tool_input) != {"command"} or not isinstance(cwd, str):
+        return False
+    try:
+        words = shlex.split(tool_input["command"], posix=True)
+    except ValueError:
+        return False
+    if not words or words[0] != "git":
+        return False
+    args = words[1:]
+    repo_raw = cwd
+    if args[:1] == ["-C"]:
+        if len(args) < 3:
+            return False
+        repo_raw, args = args[1], args[2:]
+    if not args or args[0] not in entry["subcommands"]:
+        return False
+    repo = _repo(repo_raw, cwd, manifest)
+    if repo is None:
+        return False
+    subcommand, remainder = args[0], args[1:]
+    if any(item in {"--exec-path", "--ext-diff", "--textconv", "--paginate", "--output"} or item.startswith(("--exec-path=", "--git-dir=", "--work-tree=", "--output=")) for item in remainder):
+        return False
+    if subcommand == "branch":
+        return all(item in BRANCH_OPTIONS for item in remainder)
+    disk = []
+    if "--" in remainder:
+        if remainder.count("--") != 1:
+            return False
+        index = remainder.index("--")
+        disk, remainder = remainder[index + 1:], remainder[:index]
+        if not disk:
+            return False
+    if subcommand == "show":
+        for item in remainder:
+            if ":" in item:
+                object_path = item.split(":", 1)[1]
+                if not object_path or object_path.startswith("/") or _protected(object_path) or not _inside(posixpath.normpath(posixpath.join(repo, object_path)), repo):
+                    return False
+    if any(PATH_META.search(item) for item in disk) or any(item.startswith("-") for item in disk):
+        return False
+    return bool(_targets(disk or [repo], repo, manifest))
+
+
+def _centre_match(event, manifest):
+    entry = manifest["entries"].get("centre_render")
+    tool_input, cwd = event.get("tool_input"), event.get("cwd")
+    if entry is None or event.get("tool_name") != "Bash" or not isinstance(tool_input, dict) or set(tool_input) != {"command"} or not isinstance(cwd, str):
+        return False
+    try:
+        words = shlex.split(tool_input["command"], posix=True)
+    except ValueError:
+        return False
+    output = None
+    if "--out" in words:
+        index = words.index("--out")
+        if words.count("--out") != 1 or index + 1 >= len(words):
+            return False
+        output = _scratch(words[index + 1], cwd, manifest["scratch_roots"])
+        if output is None:
+            return False
+        del words[index:index + 2]
+    command = " ".join(words)
+    if command not in entry["commands"]:
+        return False
+    root = _repo(cwd, cwd, manifest)
+    if root is None or Path(root).name.casefold() not in {"helmcortex", "dotcortex"}:
+        return False
+    script = "FORGE/bin/pokemon-centre" if "pokemon-centre" in command else "FORGE/bin/clubhouse-bosses-refresh"
+    script_path = _path(script, root, manifest["roots"])
+    return bool(script_path and os.path.isfile(script_path) and (output is None or output.startswith("/")))
+
+
+def _safe_commit(event, manifest):
+    entry = manifest["entries"].get("safe_commit")
+    tool_input, cwd = event.get("tool_input"), event.get("cwd")
+    if entry is None or event.get("tool_name") != "Bash" or not isinstance(tool_input, dict) or set(tool_input) != {"command"} or not isinstance(cwd, str):
+        return False
+    try:
+        words = shlex.split(tool_input["command"], posix=True)
+    except ValueError:
+        return False
+    if not words or words[0] not in {"git", "dotcortex-safe-commit"}:
+        return False
+    command, args = words[0], words[1:]
+    repo_raw = cwd
+    if args[:1] == ["-C"]:
+        if len(args) < 2:
+            return False
+        repo_raw, args = args[1], args[2:]
+    repo = _repo(repo_raw, cwd, manifest)
+    if repo is None or (command == "dotcortex-safe-commit" and Path(repo).name.casefold() != "dotcortex"):
+        return False
+    if command == "git":
+        if len(args) < 4 or args[:2] != ["commit", "-F"]:
+            return False
+        message, args = args[2], args[3:]
+    else:
+        if len(args) < 3 or args[0] != "-F":
+            return False
+        message, args = args[1], args[2:]
+    if args[:1] != ["--"] or len(args) < 2:
+        return False
+    paths = args[1:]
+    if any(not path or path.startswith("/") or path in {".", ".."} or PATH_META.search(path) or path.startswith(":") or ".." in Path(path).parts for path in paths):
+        return False
+    message = _scratch(message, repo, manifest["scratch_roots"])
+    targets = _targets(paths, repo, manifest, False)
+    if message is None or targets is None:
+        return False
+    try:
+        info = os.lstat(message)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid == os.getuid() and not stat.S_IMODE(info.st_mode) & 0o077 and all(not _protected(path) and ".git" not in Path(path).parts for path in targets)
+
+
+def evaluate(event, manifest):
+    if not isinstance(event, dict) or event.get("hook_event_name") != "PermissionRequest" or _hard_floor(event):
+        return False
+    for matcher in (_local_match, _git_match, _centre_match, _safe_commit):
+        if matcher(event, manifest):
+            name = {"_local_match": "local_read", "_git_match": "git_observe", "_centre_match": "centre_render", "_safe_commit": "safe_commit"}[matcher.__name__]
+            return manifest["entries"][name]["enabled"] is True
+    return False
+
+
+def _deadline(_signal, _frame):
+    raise TimeoutError("approval deadline")
+
+
+def main():
+    try:
+        previous = signal.signal(signal.SIGALRM, _deadline)
+        signal.setitimer(signal.ITIMER_REAL, 3.0)
+    except Exception:
+        return 0
+    try:
+        raw = sys.stdin.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("input too large")
+        if evaluate(json.loads(raw), _load_manifest()):
+            sys.stdout.write(json.dumps(ALLOW_OUTPUT, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+#+END_SRC
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-claude-approval-kikin-hook.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+REPO = Path(__file__).resolve().parents[5]
+HOOK = REPO / "all/.local/bin/claude-hook-permission-request-kikin"
+ENGINE = REPO / "all/.local/lib/dotcortex/claude_approval_kikin.py"
+
+
+def event(tool_name, tool_input, cwd):
+    return {"hook_event_name": "PermissionRequest", "tool_name": tool_name, "tool_input": tool_input, "cwd": str(cwd)}
+
+
+def run_hook(payload, manifest):
+    env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest)}
+    return subprocess.run([str(HOOK)], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=2, check=False)
+
+
+def decision(completed):
+    if not completed.stdout.strip():
+        return "ask"
+    return json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"]
+
+
+class KikinApprovalHookTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = json.loads((REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json").read_text())
+        self.root = Path(self.temp.name) / "DotCortex"
+        (self.root / "FORGE/bin").mkdir(parents=True)
+        (self.root / ".git").mkdir()
+        (self.root / "README.md").write_text("synthetic\n")
+        (self.root / "FORGE/bin/pokemon-centre").write_text("synthetic\n")
+        (self.root / "FORGE/bin/clubhouse-bosses-refresh").write_text("synthetic\n")
+        self.scratch = Path(self.temp.name) / "scratch"
+        self.scratch.mkdir()
+        self.message = self.scratch / "message"
+        self.message.write_text("test: synthetic\n")
+        os.chmod(self.message, 0o600)
+
+    def manifest(self, *enabled):
+        data = json.loads(json.dumps(self.base))
+        data["roots"] = [str(self.root)]
+        data["scratch_roots"] = [str(self.scratch)]
+        for item in data["classes"]:
+            item["enabled"] = item["name"] in enabled
+        path = self.scratch / "manifest.json"
+        path.write_text(json.dumps(data))
+        return path
+
+    def assert_decision(self, payload, manifest, expected):
+        completed = run_hook(payload, manifest)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(decision(completed), expected, completed.stdout)
+
+    def test_all_classes_are_default_off(self):
+        manifest = REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json"
+        self.assertTrue(all(not item["enabled"] for item in self.base["classes"]))
+        self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "ask")
+
+    def test_each_class_has_green_and_disabled_paths(self):
+        cases = [
+            ("local_read", event("Read", {"file_path": str(self.root / "README.md")}, self.root)),
+            ("git_observe", event("Bash", {"command": "git status --short"}, self.root)),
+            ("centre_render", event("Bash", {"command": "FORGE/bin/pokemon-centre render"}, self.root)),
+            ("safe_commit", event("Bash", {"command": f"git commit -F {self.message} -- README.md"}, self.root)),
+        ]
+        for class_name, payload in cases:
+            with self.subTest(class_name=class_name):
+                self.assert_decision(payload, self.manifest(class_name), "allow")
+                self.assert_decision(payload, self.manifest(), "ask")
+
+    def test_full_red_corpus_never_allows(self):
+        manifest = self.manifest("local_read", "git_observe", "centre_render", "safe_commit")
+        commands = [
+            "cat .env", "cat NEXUS/keys/token", "cat LOGS/Telegram/Personal/chat.md",
+            "cat CORTEX/PalmCortex/Diary.md", "git show HEAD:NEXUS/.secrets/token",
+            "ssh kikin date", "scp x kikin:/tmp/x", "sudo true", "crontab -l",
+            "telegram-agent-host stop fable", "nurse-joy revive Fable", "tmux kill-server",
+            "pkill python3", "kill -9 123", "kill", "pip install x", "apt install x",
+            "cat README.md > /tmp/copy", "find . -exec cat {} +", "find . -delete",
+            "git push", "git reset --keep HEAD~1", "rm -rf README.md", "cat $(printf README.md)",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "ask")
+
+    def test_mount_symlink_and_scratch_output_boundaries(self):
+        mount = Path(self.temp.name) / "mount"
+        mount.mkdir()
+        (mount / "README.md").write_text("mounted\n")
+        (mount / ".git").mkdir()
+        canonical = Path(self.temp.name) / "HelmCortex"
+        canonical.symlink_to(mount, target_is_directory=True)
+        data = json.loads(self.manifest("local_read").read_text())
+        data["roots"] = [str(canonical)]
+        manifest = self.scratch / "mount.json"
+        manifest.write_text(json.dumps(data))
+        self.assert_decision(event("Read", {"file_path": str(canonical / "README.md")}, canonical), manifest, "allow")
+        data["classes"][-2]["enabled"] = True
+        manifest.write_text(json.dumps(data))
+        self.assert_decision(event("Bash", {"command": "FORGE/bin/pokemon-centre render --out /etc/x"}, canonical), manifest, "ask")
+
+    def test_malformed_input_asks(self):
+        manifest = self.manifest("local_read")
+        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest)}, timeout=2, check=False)
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(decision(completed), "ask")
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC

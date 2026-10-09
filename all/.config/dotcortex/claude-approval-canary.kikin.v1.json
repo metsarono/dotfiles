@@ -1,0 +1,57 @@
+{
+  "schema": "hc.approval.canary.kikin.manifest.v1",
+  "manifest_version": "claude-approval-canary.kikin.v1",
+  "hard_floor_ids": [
+    "floor.kikin-protected-target.v1",
+    "floor.kikin-private-log.v1",
+    "floor.kikin-palmcortex.v1",
+    "floor.kikin-remote.v1",
+    "floor.kikin-service-control.v1",
+    "floor.kikin-package-install.v1",
+    "floor.kikin-shell-composition.v1",
+    "floor.kikin-writer-option.v1"
+  ],
+  "roots": [
+    "/home/YOUR_USER/HelmCortex",
+    "/home/YOUR_USER/mnt/x230/HelmCortex",
+    "/home/YOUR_USER/HelmCortex-wt-kikin",
+    "/home/YOUR_USER/mnt/x230/HelmCortex-wt-kikin",
+    "/home/YOUR_USER/DotCortex",
+    "/home/YOUR_USER/mnt/x230/DotCortex",
+    "/home/YOUR_USER/DotCortex-wt-kikin",
+    "/home/YOUR_USER/mnt/x230/DotCortex-wt-kikin"
+  ],
+  "scratch_roots": [
+    "/tmp",
+    "/home/YOUR_USER/.claude/scratchpad"
+  ],
+  "classes": [
+    {
+      "name": "local_read",
+      "enabled": false,
+      "tool_names": ["Read", "Glob", "Grep"],
+      "bash_verbs": ["cat", "head", "tail", "grep", "ls", "stat", "wc", "find"]
+    },
+    {
+      "name": "git_observe",
+      "enabled": false,
+      "subcommands": ["status", "log", "diff", "show", "branch"]
+    },
+    {
+      "name": "centre_render",
+      "enabled": false,
+      "commands": [
+        "pokemon-centre render",
+        "FORGE/bin/pokemon-centre render",
+        "/usr/bin/python3 FORGE/bin/pokemon-centre render",
+        "clubhouse-bosses-refresh",
+        "FORGE/bin/clubhouse-bosses-refresh"
+      ]
+    },
+    {
+      "name": "safe_commit",
+      "enabled": false,
+      "commands": ["git commit", "dotcortex-safe-commit"]
+    }
+  ]
+}

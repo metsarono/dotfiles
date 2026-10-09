@@ -303,6 +303,21 @@ class WatchdogTests(unittest.TestCase):
         self.run_watchdog()  # tmux probe fails for another reason: still no action
         self.assertEqual(self.revives(), [])
 
+    def test_revive_runs_with_a_runtime_dir_even_from_cron(self) -> None:
+        self.nurse.write_text(FAKE_NURSE.replace('echo "$a" >> "$root/revives"', 'echo "$a:${XDG_RUNTIME_DIR:-MISSING}" >> "$root/revives"'))
+        (self.root / "warm").write_text("Opus\n")
+        self.set_warm({"Opus": "down"})
+        env = {k: v for k, v in os.environ.items() if k != "XDG_RUNTIME_DIR"}
+        subprocess.run(
+            [str(WATCHDOG), "--expected-host", HOST, "--manager", str(self.manager),
+             "--state-dir", str(self.root / "state"), "--intent-dir", str(self.root / "intent"),
+             "--boot-lock", str(self.root / "boot.lock"), "--spool", str(self.root / "spool"),
+             "--pid-dir", str(self.root / "pids"), "--backoff", "0",
+             "--warm-file", str(self.root / "warm"), "--nurse", str(self.nurse), "--tmux", str(self.tmux)],
+            env=dict(env, FAKE_ROOT=str(self.root)), text=True, capture_output=True, timeout=30,
+        )
+        self.assertEqual(self.revives(), ["opus:/run/user/%d" % os.getuid()])
+
     def test_warm_attempt_cap_holds(self) -> None:
         (self.root / "warm").write_text("Opus\n")
         self.set_warm({"Opus": "down"})
