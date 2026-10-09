@@ -55,7 +55,7 @@ import urllib.error
 import urllib.request
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 import termios
@@ -129,6 +129,8 @@ NF = {
     "coin": "\uf155",
     "user": "\uf007",
     "hourglass": "\uf254",
+    "fuel": "\uf1bb",  # battery-three-quarters: reserve fuel gauge
+    "zap": "\uf0e7",   # bolt: active offer alert (duplicates bolt, kept for clarity)
 }
 
 W = 74
@@ -226,7 +228,10 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         "neuralwatt",
         "NeuralWatt",
         "neuralwatt",
-        note="Direct NeuralWatt usage probe (NEURALWATT_API_KEY); /v1/quota by default, override with NEURALWATT_USAGE_URL.",
+        note="NeuralWatt usage probe (NEURALWATT_API_KEY -> /v1/quota; console "
+        "balance/spend via browser session when NEURALWATT_COOKIE_JAR is set, "
+        "from portal.neuralwatt.com/dashboard/api/usage; 7-day burn via "
+        "/v1/usage/summary). Override the quota URL with NEURALWATT_USAGE_URL.",
     ),
     ProviderSpec(
         "fireworks",
@@ -255,9 +260,10 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 # from the default view 2026-09-10 to make room for remote (Gillean) panels; openrouter
 # was unhidden and opencode-go added 2026-09-25 (Go's rolling/weekly/monthly windows
 # belong beside the other fuel gauges). antigravity stays on demand via
-# `--providers antigravity`. mistral moved above openrouter 2026-10-09 so OpenRouter
-# sits directly underneath the Mistral panel (Admiral's requested order).
-DEFAULT_PROVIDER_KEYS: tuple[str, ...] = ("codex", "claude", "mistral", "openrouter", "opencode-go")
+# `--providers antigravity`. 2026-10-09 final (Admiral): subscriptions first
+# (codex, claude, opencode-go, mistral), then the reserve tank (openrouter,
+# neuralwatt) with OpenRouter directly beneath Mistral.
+DEFAULT_PROVIDER_KEYS: tuple[str, ...] = ("codex", "claude", "opencode-go", "mistral", "openrouter", "neuralwatt")
 
 
 def eprint(*args: Any, **kwargs: Any) -> None:
@@ -2210,6 +2216,127 @@ def fetch_openrouter(timeout_seconds: float) -> dict[str, Any]:
     }
 
 
+NEURALWATT_CONSOLE_USAGE_URL = os.environ.get(
+    "NEURALWATT_CONSOLE_USAGE_URL",
+    "https://portal.neuralwatt.com/dashboard/api/usage",
+)
+NEURALWATT_USAGE_SUMMARY_URL = os.environ.get(
+    "NEURALWATT_USAGE_SUMMARY_URL",
+    "https://api.neuralwatt.com/v1/usage/summary",
+)
+# Where ai-usage reads the coordinator's provider-bonuses feed (format
+# centre-provider-bonuses.v1, written by the caddy/centre lane) for active
+# NeuralWatt offers. Private host state: only ever an env var, never a
+# tracked default path.
+BONUS_FEED_ENV = "NEURALWATT_OFFERS_FEED"
+
+
+def _cookie_jar_path(env_name: str) -> str:
+    # Call-time resolution, same rule as the Mistral jar: os.environ first,
+    # then the untracked ~/.env exports (shells stopped exporting ~/.env
+    # 2026-09-25).
+    jar = os.environ.get(env_name, "").strip()
+    if not jar:
+        jar = load_dotenv_exports().get(env_name, "").strip()
+    return os.path.expanduser(jar)
+
+
+def _cookie_header_from_jar(env_name: str) -> str:
+    jar_path = _cookie_jar_path(env_name)
+    if not jar_path or not os.path.exists(jar_path):
+        return ""
+    pairs = []
+    try:
+        with open(jar_path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 7:
+                    pairs.append(f"{parts[5]}={parts[6]}")
+    except OSError:
+        return ""
+    return "; ".join(pairs)
+
+
+def _neuralwatt_console_usage(timeout_seconds: float) -> dict[str, Any] | None:
+    """Console balance/spend from the signed-in browser session. None when the
+    jar is unset or the session fails — callers fall back to API-key numbers."""
+    cookie = _cookie_header_from_jar("NEURALWATT_COOKIE_JAR")
+    if not cookie:
+        return None
+    request = urllib.request.Request(
+        NEURALWATT_CONSOLE_USAGE_URL,
+        headers={
+            "Cookie": cookie,
+            "Accept": "application/json",
+            "User-Agent": _MISTRAL_UA,
+            "Referer": "https://portal.neuralwatt.com/dashboard",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _neuralwatt_seven_day_burn(token: str, timeout_seconds: float) -> float | None:
+    """7-day spend from /v1/usage/summary (API key). None on failure."""
+    start = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    url = f"{NEURALWATT_USAGE_SUMMARY_URL}?start_date={start}&granularity=daily"
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}),
+            timeout=timeout_seconds,
+        ) as response:
+            body = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return None
+    totals = nested_get(body, "totals") if isinstance(body, dict) else None
+    value = totals.get("total_cost_usd") if isinstance(totals, dict) else None
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _neuralwatt_active_offer(timeout_seconds: float) -> dict[str, Any] | None:
+    """Active NeuralWatt offer from the coordinator's provider-bonuses feed
+    (the caddy/centre lane already tracks specials like weekend double
+    inference). Returns one offer row with title/amount/reset, or None."""
+    feed_path = _cookie_jar_path(BONUS_FEED_ENV)
+    if not feed_path or not os.path.exists(feed_path):
+        return None
+    try:
+        with open(feed_path) as fh:
+            feed = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(feed, dict) or feed.get("format") != "centre-provider-bonuses.v1":
+        return None
+    offers = feed.get("offers")
+    if not isinstance(offers, list):
+        return None
+    now = datetime.now(timezone.utc)
+
+    def _parse(stamp: Any) -> datetime | None:
+        if not isinstance(stamp, str):
+            return None
+        try:
+            return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    for offer in offers:
+        if not isinstance(offer, dict) or offer.get("provider") != "neuralwatt":
+            continue
+        start = _parse(offer.get("starts_at"))
+        end = _parse(offer.get("expires_at"))
+        if start and end and start <= now < end:
+            return offer
+    return None
+
+
 def fetch_neuralwatt(timeout_seconds: float) -> dict[str, Any]:
     token, token_source = _env_token("NEURALWATT_API_KEY", "NEURALWATT_TOKEN")
     if not token:
@@ -2223,7 +2350,33 @@ def fetch_neuralwatt(timeout_seconds: float) -> dict[str, Any]:
         }
     url = os.environ.get("NEURALWATT_USAGE_URL", "https://api.neuralwatt.com/v1/quota")
     result = _bearer_json_probe("neuralwatt", "NeuralWatt", url, token, timeout_seconds)
-    return apply_neuralwatt_observation(result, collected_at=datetime.now(timezone.utc))
+    result = apply_neuralwatt_observation(result, collected_at=datetime.now(timezone.utc))
+
+    # Console session (optional): the signed-in browser sees the same balance
+    # and spend the dashboard renders. Unset jar -> API-key numbers, saying so.
+    console = _neuralwatt_console_usage(timeout_seconds)
+    jar_set = bool(_cookie_jar_path("NEURALWATT_COOKIE_JAR"))
+    if console is not None:
+        result["console"] = console
+        result["summary"] += " · console session live"
+    elif jar_set:
+        result["summary"] += " · console session failed (NEURALWATT_COOKIE_JAR set)"
+
+    # 7-day burn from the usage summary (API key, no extra credentials).
+    burn = _neuralwatt_seven_day_burn(token, timeout_seconds)
+    if burn is not None:
+        result["seven_day_burn_usd"] = round(burn, 6)
+
+    # Active offer from the existing coordinator feed, if any.
+    offer = _neuralwatt_active_offer(timeout_seconds)
+    if offer is not None:
+        result["active_offer"] = {
+            "title": offer.get("title"),
+            "amount_wh": offer.get("amount_wh"),
+            "expires_at": offer.get("expires_at"),
+            "next_reset_at": offer.get("next_reset_at"),
+        }
+    return result
 
 
 NEURALWATT_SCHEMA = "neuralwatt.quota.v1"
@@ -2552,13 +2705,11 @@ _MISTRAL_UA = (
 
 
 def _mistral_cookie_jar_path() -> str:
-    # Call-time resolution: os.environ first, then the untracked ~/.env exports.
-    # Interactive shells stopped exporting ~/.env 2026-09-25, so the dotenv
-    # fallback is what makes the TUI/SSH case work (2026-10-09).
-    jar = os.environ.get("MISTRAL_COOKIE_JAR", "").strip()
-    if not jar:
-        jar = load_dotenv_exports().get("MISTRAL_COOKIE_JAR", "").strip()
-    return os.path.expanduser(jar)
+    # Call-time resolution via the generic helper: os.environ first, then the
+    # untracked ~/.env exports. Interactive shells stopped exporting ~/.env
+    # 2026-09-25, so the dotenv fallback is what makes the TUI/SSH case work
+    # (2026-10-09).
+    return _cookie_jar_path("MISTRAL_COOKIE_JAR")
 
 
 def _mistral_cookie_header() -> str:
@@ -2602,6 +2753,26 @@ def _mistral_trpc(endpoint: str, params: dict[str, Any], timeout_seconds: float)
     return nested_get(body, "result", "data", "json")
 
 
+def _mistral_budget_to_quota(budget: dict[str, Any], label: str) -> dict[str, Any]:
+    """Admin-trpc budget dict -> the standard quota shape ({usedPercent,
+    windowMinutes, resetsAt ISO, label}), the same shape _codex_window_to_quota
+    emits for Codex windows so format_compact_quota_line draws the gauge."""
+    initial = budget.get("initial_budget")
+    used_percent = budget.get("usage_percentage")
+    quota: dict[str, Any] = {}
+    if isinstance(used_percent, (int, float)) and not isinstance(used_percent, bool):
+        quota["usedPercent"] = float(used_percent)
+    if isinstance(initial, (int, float)) and not isinstance(initial, bool):
+        quota["limit"] = float(initial)
+    reset_at = budget.get("reset_at")
+    if isinstance(reset_at, str) and reset_at:
+        quota["resetsAt"] = reset_at
+    # Monthly budget window (resets on the 1st): rendered as '30d'.
+    quota["windowMinutes"] = 30 * 24 * 60
+    quota["label"] = label
+    return quota
+
+
 def fetch_mistral(timeout_seconds: float) -> dict[str, Any]:
     result = {
         "provider": "mistral",
@@ -2621,20 +2792,20 @@ def fetch_mistral(timeout_seconds: float) -> dict[str, Any]:
         api_budget = budget.get("api_budget") or budget
         vibe_budget = budget.get("vibe_budget") or {}
         result["state"] = "ok"
-        result["raw"] = budget
         result["identity"] = {"plan_name": "Pro", "plan_type": "chat"}
-        result["usage"] = {
-            "secondary": {
-                "usedPercent": api_budget.get("usage_percentage"),
-                "resetsAt": api_budget.get("reset_at"),
-                "label": "API",
-            },
-            "vibe": {
-                "usedPercent": vibe_budget.get("usage_percentage"),
-                "resetsAt": vibe_budget.get("reset_at"),
-                "label": "Vibe",
-            },
+        # Standard quota shape (2026-10-09, Admiral's pattern conformance): the
+        # Mistral budgets render as gauges exactly like Codex/OpenCode Go —
+        # bars plus reset countdowns through the existing format_compact_quota_line
+        # path. Vibe is the primary gauge ($x/$300), API the secondary ($x/$30);
+        # both are monthly, resetting on the 1st, so windowMinutes=30d.
+        # The quota dicts live inside raw.usage, where the existing renderer and
+        # the remote-panel path expect them (same as codex-native).
+        usage = {
+            "primary": _mistral_budget_to_quota(vibe_budget, "Vibe"),
+            "secondary": _mistral_budget_to_quota(api_budget, "API"),
         }
+        result["raw"] = {**budget, "usage": usage}
+        result["usage"] = usage
         result["summary"] = _mistral_budget_summary(api_budget, vibe_budget)
         return result
     # Fallback: whoami identity only. The budget probe was skipped either because
@@ -3148,13 +3319,35 @@ def render_text(results: list[dict[str, Any]]) -> None:
             if isinstance(openrouter_usage, dict):
                 balance = openrouter_usage.get("balance")
                 key_usage = openrouter_usage.get("keyUsage")
+                total_credits = openrouter_usage.get("totalCredits")
                 parts: list[str] = []
                 if isinstance(balance, (int, float)):
                     parts.append(f"Balance: ${balance:g}")
                 if isinstance(key_usage, (int, float)):
                     parts.append(f"Key usage: ${key_usage:g}")
+                if isinstance(total_credits, (int, float)) and isinstance(key_usage, (int, float)):
+                    # Prepaid reserve: what was bought minus what this key spent.
+                    parts.append(f"burn-to-date: ${key_usage:g} of ${total_credits:g}")
                 if parts:
                     print(f"  {FGY}{' · '.join(parts)}{R}")
+            print(f"  {YL}{NF['fuel']} reserve fuel{R}{FGY} — prepaid balance, used when subscriptions run out{R}")
+
+        elif item["provider"] == "neuralwatt" and isinstance(item.get("observation"), dict):
+            # Balance line first, like the OpenRouter reserve panel: the remaining
+            # prepaid fuel is the number that matters most.
+            summary = item.get("summary")
+            if isinstance(summary, str) and summary:
+                print(f"  {FGY}{summary.replace('; ', ' · ')}{R}")
+            burn = item.get("seven_day_burn_usd")
+            if isinstance(burn, (int, float)):
+                print(f"  {FGY}7-day burn: ${burn:.2f}{R}")
+            offer = item.get("active_offer") if isinstance(item.get("active_offer"), dict) else None
+            if offer:
+                title = offer.get("title") or "active offer"
+                amount = offer.get("amount_wh")
+                amount_text = f" · {amount:g} Wh/day" if isinstance(amount, (int, float)) else ""
+                print(f"  {YL}{NF['zap']} OFFER: {title}{amount_text}{R}")
+            print(f"  {YL}{NF['fuel']} reserve fuel{R}{FGY} — prepaid balance, used when subscriptions run out{R}")
 
         elif item["provider"] == "opencode-go" and isinstance(raw, dict):
             observation = item.get("observation") if isinstance(item.get("observation"), dict) else {}
@@ -3200,6 +3393,19 @@ def render_text(results: list[dict[str, Any]]) -> None:
                     parts.append(f"Org: {org}")
                 if parts:
                     print(f"  {FGY}{' · '.join(parts)}{R}")
+            # Budgets as gauges (2026-10-09): same renderer as Codex/OpenCode Go —
+            # bars plus reset countdowns, no bespoke text path.
+            usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+            primary = usage.get("primary") if isinstance(usage.get("primary"), dict) else {}
+            secondary = usage.get("secondary") if isinstance(usage.get("secondary"), dict) else {}
+            vibe_line = format_compact_quota_line("Vibe", primary)
+            api_line = format_compact_quota_line("API", secondary)
+            if vibe_line:
+                print(vibe_line)
+            if api_line:
+                print(api_line)
+            # The dollar figures ride the summary line, the way other panels
+            # carry extras.
             print_fitted_text(item["summary"], indent="  ", width=width)
 
         else:
@@ -3313,7 +3519,10 @@ def fetch_remote_results(remotes_file: Path, default_timeout: float) -> list[dic
 # outside the list keep their existing relative order after these.
 # mistral moved above openrouter/opencode-go 2026-10-09 so OpenRouter sits
 # directly underneath the Mistral panel (Admiral's requested order).
-PROVIDER_DISPLAY_ORDER = ("codex", "claude", "mistral", "openrouter", "opencode-go")
+# Final panel order (2026-10-09, Admiral): subscriptions first — codex, claude,
+# opencode-go (back where it was), mistral last of them — then the reserve
+# tank: OpenRouter directly beneath Mistral, then NeuralWatt.
+PROVIDER_DISPLAY_ORDER = ("codex", "claude", "opencode-go", "mistral", "openrouter", "neuralwatt")
 
 
 def order_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3858,14 +4067,16 @@ class ResultOrderTests(unittest.TestCase):
             {"provider": "opencode-go", "label": "OpenCode Go"},
             {"provider": "openrouter", "label": "OpenRouter"},
             {"provider": "mistral", "label": "Mistral"},
+            {"provider": "neuralwatt", "label": "NeuralWatt"},
             {"provider": "codex", "label": "Gillean · Codex", "remote": "Gillean"},
             {"provider": "claude", "label": "Gillean · Claude Code", "remote": "Gillean"},
         ]
-        # mistral sits above openrouter since 2026-10-09 (Admiral's panel order).
+        # 2026-10-09: mistral above the reserve tank, which groups openrouter +
+        # neuralwatt beneath the subscription gauges (Admiral's panel order).
         self.assertEqual(
             [item["label"] for item in self.ai_usage.order_results(items)],
             ["Codex", "Gillean · Codex", "Claude Code", "Gillean · Claude Code",
-             "Mistral", "OpenRouter", "OpenCode Go"],
+             "OpenCode Go", "Mistral", "OpenRouter", "NeuralWatt"],
         )
 
     def test_remote_panels_keep_file_order_and_unknowns_go_last(self):
@@ -3972,10 +4183,17 @@ class MistralProbeTests(unittest.TestCase):
         self.assertEqual(result["state"], "ok")
         self.assertEqual(result["source"], "admin-trpc")
         self.assertEqual(result["identity"]["plan_name"], "Pro")
-        # Both budgets surface as real percentages with reset dates.
-        self.assertAlmostEqual(result["usage"]["secondary"]["usedPercent"], 61.051076)
-        self.assertAlmostEqual(result["usage"]["vibe"]["usedPercent"], 0.53698893)
-        self.assertEqual(result["usage"]["secondary"]["resetsAt"], "2026-11-01T00:00:00Z")
+        # Standard quota shape (2026-10-09): budgets render as gauges like every
+        # other panel — primary=Vibe, secondary=API, each with usedPercent,
+        # windowMinutes (30d), resetsAt, label.
+        primary = result["usage"]["primary"]
+        secondary = result["usage"]["secondary"]
+        self.assertAlmostEqual(primary["usedPercent"], 0.53698893)
+        self.assertAlmostEqual(secondary["usedPercent"], 61.051076)
+        self.assertEqual(primary["label"], "Vibe")
+        self.assertEqual(secondary["label"], "API")
+        self.assertEqual(primary["windowMinutes"], 30 * 24 * 60)
+        self.assertEqual(secondary["resetsAt"], "2026-11-01T00:00:00Z")
         self.assertIn("$18.32/$30", result["summary"])
         self.assertIn("61.1%", result["summary"])
         self.assertIn("Vibe", result["summary"])
@@ -4094,6 +4312,30 @@ class MistralProbeTests(unittest.TestCase):
         self.assertEqual(captured["token"], "vibe-key")
         self.assertEqual(result["identity"]["plan_name"], "INDIVIDUAL")
 
+    def test_mistral_budgets_render_as_standard_quotas(self):
+        """Admiral pattern conformance (2026-10-09): the budget dicts must land
+        in raw.usage.primary/secondary in the same shape _codex_window_to_quota
+        emits ({usedPercent, windowMinutes, resetsAt ISO}), so the existing
+        format_compact_quota_line renderer draws bars and countdowns with no
+        bespoke Mistral path."""
+        def fake_trpc(endpoint, params, timeout_seconds):
+            return json.loads(json.dumps(MISTRAL_BUDGET_FIXTURE))
+
+        with patch.object(self.ai_usage, "_mistral_trpc", side_effect=fake_trpc):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        for slot in ("primary", "secondary"):
+            quota = result["usage"][slot]
+            self.assertIn("usedPercent", quota)
+            self.assertIsInstance(quota["windowMinutes"], int)
+            self.assertIn("resetsAt", quota)
+            self.assertIn(quota["resetsAt"], "2026-11-01T00:00:00Z")
+            # The existing renderer must produce a bar line from it.
+            label = quota.get("label") or ("Vibe" if slot == "primary" else "API")
+            line = self.ai_usage.format_compact_quota_line(label, quota)
+            self.assertIsNotNone(line, f"{slot} quota did not render")
+            self.assertIn("%", line)
+
     def test_cookie_jar_resolved_from_dotenv_at_call_time(self):
         """Fix 2026-10-09: the jar path used to be baked in at import time, so a
         MISTRAL_COOKIE_JAR deployed only in ~/.env (untracked env file, not
@@ -4146,6 +4388,133 @@ class OpenRouterProbeTests(unittest.TestCase):
             result = self.ai_usage.fetch_openrouter(1.0)
         self.assertEqual(result["state"], "missing")
         self.assertIn("OPENROUTER_API_KEY", result["summary"])
+
+
+class NeuralWattAddendumTests(unittest.TestCase):
+    """2026-10-09 addendum: console session, 7-day burn, reserve grouping,
+    offer alert from the coordinator feed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ai_usage = load_ai_usage()
+
+    def test_console_session_unset_falls_back_to_api_key(self):
+        """NEURALWATT_COOKIE_JAR unset -> API-key numbers, no console note."""
+        with patch.dict(os.environ, {"NEURALWATT_COOKIE_JAR": ""}, clear=False), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=None):
+            # _env_token must find no key -> patch it too, plus the bearer probe
+            with patch.dict(os.environ, {"NEURALWATT_API_KEY": "nw-key"}), \
+                 patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                     "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                     "source": "api", "summary": "", "raw": NEURALWATT_FIXTURE}):
+                result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertEqual(result["state"], "ok")
+        self.assertNotIn("console session", result["summary"])
+
+    def test_console_session_failure_says_so(self):
+        """Jar set but session fails -> summary says so, numbers stay API-key."""
+        raw = json.loads(json.dumps(NEURALWATT_FIXTURE))
+        with patch.dict(os.environ, {"NEURALWATT_COOKIE_JAR": "/tmp/nw.jar", "NEURALWATT_API_KEY": "nw-key"}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=None), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                 "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                 "source": "api", "summary": "", "raw": raw}):
+            result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertEqual(result["state"], "ok")
+        self.assertIn("console session failed (NEURALWATT_COOKIE_JAR set)", result["summary"])
+
+    def test_console_session_live_is_reported(self):
+        raw = json.loads(json.dumps(NEURALWATT_FIXTURE))
+        console_payload = {"balance_usd": 141.59, "spend_usd": 34.41}
+        with patch.dict(os.environ, {"NEURALWATT_COOKIE_JAR": "/tmp/nw.jar", "NEURALWATT_API_KEY": "nw-key"}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=console_payload), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=None), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                 "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                 "source": "api", "summary": "", "raw": raw}):
+            result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertEqual(result["console"], console_payload)
+        self.assertIn("console session live", result["summary"])
+
+    def test_seven_day_burn_surfaces(self):
+        raw = json.loads(json.dumps(NEURALWATT_FIXTURE))
+        with patch.dict(os.environ, {"NEURALWATT_API_KEY": "nw-key"}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=1.267258), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=None), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                 "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                 "source": "api", "summary": "", "raw": raw}):
+            result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertAlmostEqual(result["seven_day_burn_usd"], 1.267258)
+
+    def test_active_offer_surfaces_from_coordinator_feed(self):
+        raw = json.loads(json.dumps(NEURALWATT_FIXTURE))
+        offer = {
+            "id": "neuralwatt:x:payasyougo", "provider": "neuralwatt",
+            "title": "Free Flash weekend", "starts_at": "2026-10-09T00:00:00Z",
+            "expires_at": "2026-10-12T00:00:00Z", "amount_wh": 250.0,
+            "next_reset_at": "2026-10-10T00:00:00Z",
+        }
+        with patch.dict(os.environ, {"NEURALWATT_API_KEY": "nw-key"}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=offer), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                 "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                 "source": "api", "summary": "", "raw": raw}):
+            result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertEqual(result["active_offer"]["title"], "Free Flash weekend")
+        self.assertEqual(result["active_offer"]["amount_wh"], 250.0)
+
+    ["Codex", "Gillean · Codex", "Claude Code", "Gillean · Claude Code",
+             "OpenCode Go", "Mistral", "OpenRouter", "NeuralWatt"],
+
+    def test_offer_feed_reader_validates_format_and_window(self):
+        """The feed reader only accepts centre-provider-bonuses.v1 offers whose
+        window covers now, from the env-var path only."""
+        import tempfile as _tempfile
+        now_iso = datetime.now(timezone.utc).isoformat()
+        expired = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        feed = {
+            "format": "centre-provider-bonuses.v1",
+            "offers": [
+                {"provider": "neuralwatt", "title": "expired one",
+                 "starts_at": expired, "expires_at": expired, "amount_wh": 1.0},
+                {"provider": "neuralwatt", "title": "live one",
+                 "starts_at": "2026-01-01T00:00:00Z", "expires_at": "2099-01-01T00:00:00Z",
+                 "amount_wh": 250.0},
+                {"provider": "other", "title": "wrong provider",
+                 "starts_at": "2026-01-01T00:00:00Z", "expires_at": "2099-01-01T00:00:00Z"},
+            ],
+        }
+        with _tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(feed, fh)
+            feed_path = fh.name
+        try:
+            with patch.dict(os.environ, {"NEURALWATT_OFFERS_FEED": feed_path}), \
+                 patch.object(self.ai_usage, "load_dotenv_exports", return_value={}):
+                offer = self.ai_usage._neuralwatt_active_offer(1.0)
+        finally:
+            os.unlink(feed_path)
+        self.assertIsNotNone(offer)
+        self.assertEqual(offer["title"], "live one")
+
+    def test_no_host_paths_in_new_console_code(self):
+        """Tracked source may not hardcode jar or feed paths — env only."""
+        script = Path(self.ai_usage.__file__).read_text()
+        self.assertNotIn("NEURALWATT_COOKIE_JAR = os.path.expanduser(", script)
+        self.assertNotIn("NEURALWATT_OFFERS_FEED = os.path.expanduser(", script)
 
 
 if __name__ == "__main__":

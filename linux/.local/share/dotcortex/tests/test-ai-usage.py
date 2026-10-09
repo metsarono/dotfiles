@@ -361,14 +361,16 @@ class ResultOrderTests(unittest.TestCase):
             {"provider": "opencode-go", "label": "OpenCode Go"},
             {"provider": "openrouter", "label": "OpenRouter"},
             {"provider": "mistral", "label": "Mistral"},
+            {"provider": "neuralwatt", "label": "NeuralWatt"},
             {"provider": "codex", "label": "Gillean · Codex", "remote": "Gillean"},
             {"provider": "claude", "label": "Gillean · Claude Code", "remote": "Gillean"},
         ]
-        # mistral sits above openrouter since 2026-10-09 (Admiral's panel order).
+        # 2026-10-09: mistral above the reserve tank, which groups openrouter +
+        # neuralwatt beneath the subscription gauges (Admiral's panel order).
         self.assertEqual(
             [item["label"] for item in self.ai_usage.order_results(items)],
             ["Codex", "Gillean · Codex", "Claude Code", "Gillean · Claude Code",
-             "Mistral", "OpenRouter", "OpenCode Go"],
+             "OpenCode Go", "Mistral", "OpenRouter", "NeuralWatt"],
         )
 
     def test_remote_panels_keep_file_order_and_unknowns_go_last(self):
@@ -475,10 +477,17 @@ class MistralProbeTests(unittest.TestCase):
         self.assertEqual(result["state"], "ok")
         self.assertEqual(result["source"], "admin-trpc")
         self.assertEqual(result["identity"]["plan_name"], "Pro")
-        # Both budgets surface as real percentages with reset dates.
-        self.assertAlmostEqual(result["usage"]["secondary"]["usedPercent"], 61.051076)
-        self.assertAlmostEqual(result["usage"]["vibe"]["usedPercent"], 0.53698893)
-        self.assertEqual(result["usage"]["secondary"]["resetsAt"], "2026-11-01T00:00:00Z")
+        # Standard quota shape (2026-10-09): budgets render as gauges like every
+        # other panel — primary=Vibe, secondary=API, each with usedPercent,
+        # windowMinutes (30d), resetsAt, label.
+        primary = result["usage"]["primary"]
+        secondary = result["usage"]["secondary"]
+        self.assertAlmostEqual(primary["usedPercent"], 0.53698893)
+        self.assertAlmostEqual(secondary["usedPercent"], 61.051076)
+        self.assertEqual(primary["label"], "Vibe")
+        self.assertEqual(secondary["label"], "API")
+        self.assertEqual(primary["windowMinutes"], 30 * 24 * 60)
+        self.assertEqual(secondary["resetsAt"], "2026-11-01T00:00:00Z")
         self.assertIn("$18.32/$30", result["summary"])
         self.assertIn("61.1%", result["summary"])
         self.assertIn("Vibe", result["summary"])
@@ -597,6 +606,30 @@ class MistralProbeTests(unittest.TestCase):
         self.assertEqual(captured["token"], "vibe-key")
         self.assertEqual(result["identity"]["plan_name"], "INDIVIDUAL")
 
+    def test_mistral_budgets_render_as_standard_quotas(self):
+        """Admiral pattern conformance (2026-10-09): the budget dicts must land
+        in raw.usage.primary/secondary in the same shape _codex_window_to_quota
+        emits ({usedPercent, windowMinutes, resetsAt ISO}), so the existing
+        format_compact_quota_line renderer draws bars and countdowns with no
+        bespoke Mistral path."""
+        def fake_trpc(endpoint, params, timeout_seconds):
+            return json.loads(json.dumps(MISTRAL_BUDGET_FIXTURE))
+
+        with patch.object(self.ai_usage, "_mistral_trpc", side_effect=fake_trpc):
+            result = self.ai_usage.fetch_mistral(1.0)
+
+        for slot in ("primary", "secondary"):
+            quota = result["usage"][slot]
+            self.assertIn("usedPercent", quota)
+            self.assertIsInstance(quota["windowMinutes"], int)
+            self.assertIn("resetsAt", quota)
+            self.assertIn(quota["resetsAt"], "2026-11-01T00:00:00Z")
+            # The existing renderer must produce a bar line from it.
+            label = quota.get("label") or ("Vibe" if slot == "primary" else "API")
+            line = self.ai_usage.format_compact_quota_line(label, quota)
+            self.assertIsNotNone(line, f"{slot} quota did not render")
+            self.assertIn("%", line)
+
     def test_cookie_jar_resolved_from_dotenv_at_call_time(self):
         """Fix 2026-10-09: the jar path used to be baked in at import time, so a
         MISTRAL_COOKIE_JAR deployed only in ~/.env (untracked env file, not
@@ -649,6 +682,133 @@ class OpenRouterProbeTests(unittest.TestCase):
             result = self.ai_usage.fetch_openrouter(1.0)
         self.assertEqual(result["state"], "missing")
         self.assertIn("OPENROUTER_API_KEY", result["summary"])
+
+
+class NeuralWattAddendumTests(unittest.TestCase):
+    """2026-10-09 addendum: console session, 7-day burn, reserve grouping,
+    offer alert from the coordinator feed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ai_usage = load_ai_usage()
+
+    def test_console_session_unset_falls_back_to_api_key(self):
+        """NEURALWATT_COOKIE_JAR unset -> API-key numbers, no console note."""
+        with patch.dict(os.environ, {"NEURALWATT_COOKIE_JAR": ""}, clear=False), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=None):
+            # _env_token must find no key -> patch it too, plus the bearer probe
+            with patch.dict(os.environ, {"NEURALWATT_API_KEY": "nw-key"}), \
+                 patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                     "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                     "source": "api", "summary": "", "raw": NEURALWATT_FIXTURE}):
+                result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertEqual(result["state"], "ok")
+        self.assertNotIn("console session", result["summary"])
+
+    def test_console_session_failure_says_so(self):
+        """Jar set but session fails -> summary says so, numbers stay API-key."""
+        raw = json.loads(json.dumps(NEURALWATT_FIXTURE))
+        with patch.dict(os.environ, {"NEURALWATT_COOKIE_JAR": "/tmp/nw.jar", "NEURALWATT_API_KEY": "nw-key"}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=None), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                 "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                 "source": "api", "summary": "", "raw": raw}):
+            result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertEqual(result["state"], "ok")
+        self.assertIn("console session failed (NEURALWATT_COOKIE_JAR set)", result["summary"])
+
+    def test_console_session_live_is_reported(self):
+        raw = json.loads(json.dumps(NEURALWATT_FIXTURE))
+        console_payload = {"balance_usd": 141.59, "spend_usd": 34.41}
+        with patch.dict(os.environ, {"NEURALWATT_COOKIE_JAR": "/tmp/nw.jar", "NEURALWATT_API_KEY": "nw-key"}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=console_payload), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=None), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                 "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                 "source": "api", "summary": "", "raw": raw}):
+            result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertEqual(result["console"], console_payload)
+        self.assertIn("console session live", result["summary"])
+
+    def test_seven_day_burn_surfaces(self):
+        raw = json.loads(json.dumps(NEURALWATT_FIXTURE))
+        with patch.dict(os.environ, {"NEURALWATT_API_KEY": "nw-key"}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=1.267258), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=None), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                 "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                 "source": "api", "summary": "", "raw": raw}):
+            result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertAlmostEqual(result["seven_day_burn_usd"], 1.267258)
+
+    def test_active_offer_surfaces_from_coordinator_feed(self):
+        raw = json.loads(json.dumps(NEURALWATT_FIXTURE))
+        offer = {
+            "id": "neuralwatt:x:payasyougo", "provider": "neuralwatt",
+            "title": "Free Flash weekend", "starts_at": "2026-10-09T00:00:00Z",
+            "expires_at": "2026-10-12T00:00:00Z", "amount_wh": 250.0,
+            "next_reset_at": "2026-10-10T00:00:00Z",
+        }
+        with patch.dict(os.environ, {"NEURALWATT_API_KEY": "nw-key"}), \
+             patch.object(self.ai_usage, "load_dotenv_exports", return_value={}), \
+             patch.object(self.ai_usage, "_neuralwatt_console_usage", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_seven_day_burn", return_value=None), \
+             patch.object(self.ai_usage, "_neuralwatt_active_offer", return_value=offer), \
+             patch.object(self.ai_usage, "_bearer_json_probe", side_effect=lambda *a, **k: {
+                 "provider": "neuralwatt", "label": "NeuralWatt", "state": "ok",
+                 "source": "api", "summary": "", "raw": raw}):
+            result = self.ai_usage.fetch_neuralwatt(1.0)
+        self.assertEqual(result["active_offer"]["title"], "Free Flash weekend")
+        self.assertEqual(result["active_offer"]["amount_wh"], 250.0)
+
+    ["Codex", "Gillean · Codex", "Claude Code", "Gillean · Claude Code",
+             "OpenCode Go", "Mistral", "OpenRouter", "NeuralWatt"],
+
+    def test_offer_feed_reader_validates_format_and_window(self):
+        """The feed reader only accepts centre-provider-bonuses.v1 offers whose
+        window covers now, from the env-var path only."""
+        import tempfile as _tempfile
+        now_iso = datetime.now(timezone.utc).isoformat()
+        expired = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        feed = {
+            "format": "centre-provider-bonuses.v1",
+            "offers": [
+                {"provider": "neuralwatt", "title": "expired one",
+                 "starts_at": expired, "expires_at": expired, "amount_wh": 1.0},
+                {"provider": "neuralwatt", "title": "live one",
+                 "starts_at": "2026-01-01T00:00:00Z", "expires_at": "2099-01-01T00:00:00Z",
+                 "amount_wh": 250.0},
+                {"provider": "other", "title": "wrong provider",
+                 "starts_at": "2026-01-01T00:00:00Z", "expires_at": "2099-01-01T00:00:00Z"},
+            ],
+        }
+        with _tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(feed, fh)
+            feed_path = fh.name
+        try:
+            with patch.dict(os.environ, {"NEURALWATT_OFFERS_FEED": feed_path}), \
+                 patch.object(self.ai_usage, "load_dotenv_exports", return_value={}):
+                offer = self.ai_usage._neuralwatt_active_offer(1.0)
+        finally:
+            os.unlink(feed_path)
+        self.assertIsNotNone(offer)
+        self.assertEqual(offer["title"], "live one")
+
+    def test_no_host_paths_in_new_console_code(self):
+        """Tracked source may not hardcode jar or feed paths — env only."""
+        script = Path(self.ai_usage.__file__).read_text()
+        self.assertNotIn("NEURALWATT_COOKIE_JAR = os.path.expanduser(", script)
+        self.assertNotIn("NEURALWATT_OFFERS_FEED = os.path.expanduser(", script)
 
 
 if __name__ == "__main__":
