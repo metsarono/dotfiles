@@ -3284,32 +3284,33 @@ def render_text(results: list[dict[str, Any]]) -> None:
                 total_credits = openrouter_usage.get("totalCredits")
                 parts: list[str] = []
                 if isinstance(balance, (int, float)):
-                    parts.append(f"Balance: ${balance:g}")
+                    parts.append(f"Balance: ${balance:.2f}")
                 if isinstance(key_usage, (int, float)):
-                    parts.append(f"Key usage: ${key_usage:g}")
-                if isinstance(total_credits, (int, float)) and isinstance(key_usage, (int, float)):
-                    # Prepaid reserve: what was bought minus what this key spent.
-                    parts.append(f"burn-to-date: ${key_usage:g} of ${total_credits:g}")
+                    parts.append(f"Spent: ${key_usage:.2f}")
                 if parts:
                     print(f"  {FGY}{' · '.join(parts)}{R}")
-            print(f"  {YL}{NF['fuel']} reserve fuel{R}{FGY} — prepaid balance, used when subscriptions run out{R}")
 
         elif item["provider"] == "neuralwatt" and isinstance(item.get("observation"), dict):
-            # Balance line first, like the OpenRouter reserve panel: the remaining
-            # prepaid fuel is the number that matters most.
-            summary = item.get("summary")
-            if isinstance(summary, str) and summary:
-                print(f"  {FGY}{summary.replace('; ', ' · ')}{R}")
+            # One balance line, same labels and money format as the OpenRouter panel.
+            observation = item["observation"]
+            balance = nested_get(observation, "balance", "remaining_usd")
+            month = nested_get(observation, "current_month", "cost_usd")
             burn = item.get("seven_day_burn_usd")
+            parts = []
+            if isinstance(balance, (int, float)):
+                parts.append(f"Balance: ${balance:.2f}")
+            if isinstance(month, (int, float)):
+                parts.append(f"Month: ${month:.2f}")
             if isinstance(burn, (int, float)):
-                print(f"  {FGY}7-day burn: ${burn:.2f}{R}")
+                parts.append(f"7-day burn: ${burn:.2f}")
+            if parts:
+                print(f"  {FGY}{' · '.join(parts)}{R}")
             offer = item.get("active_offer") if isinstance(item.get("active_offer"), dict) else None
             if offer:
                 title = offer.get("title") or "active offer"
                 amount = offer.get("amount_wh")
                 amount_text = f" · {amount:g} Wh/day" if isinstance(amount, (int, float)) else ""
                 print(f"  {YL}{NF['zap']} OFFER: {title}{amount_text}{R}")
-            print(f"  {YL}{NF['fuel']} reserve fuel{R}{FGY} — prepaid balance, used when subscriptions run out{R}")
 
         elif item["provider"] == "opencode-go" and isinstance(raw, dict):
             observation = item.get("observation") if isinstance(item.get("observation"), dict) else {}
@@ -3366,9 +3367,18 @@ def render_text(results: list[dict[str, Any]]) -> None:
                 print(vibe_line)
             if api_line:
                 print(api_line)
-            # The dollar figures ride the summary line, the way other panels
-            # carry extras.
-            print_fitted_text(item["summary"], indent="  ", width=width)
+            # Monthly cycle pace, same renderer as OpenCode Go's "30d pace".
+            pace = format_window_left_line(
+                "30d pace",
+                primary.get("resetsAt") if isinstance(primary.get("resetsAt"), str) else None,
+                primary.get("windowMinutes") or 30 * 24 * 60,
+            )
+            if pace:
+                print(pace)
+            if not (vibe_line or api_line):
+                # Whoami-only fallback: no budget windows, so the summary is the
+                # only place the reason (missing console session) can show.
+                print_fitted_text(item["summary"], indent="  ", width=width)
 
         else:
             print_fitted_text(item["summary"], indent="  ", width=width)
