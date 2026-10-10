@@ -59,6 +59,25 @@
       "name": "safe_commit",
       "enabled": false,
       "commands": ["git commit", "dotcortex-safe-commit"]
+    },
+    {
+      "name": "ssh_readonly",
+      "enabled": true,
+      "readonly_hosts": [
+        {
+          "host": "YOUR_HONEY_HOST",
+          "remote_home": "/home/YOUR_HONEY_USER",
+          "remote_path_roots": [
+            "/home/YOUR_HONEY_USER/DotCortex",
+            "/home/YOUR_HONEY_USER/HelmCortex",
+            "/home/YOUR_AGENT_CLAUDE",
+            "/var/tmp",
+            "/etc/init.d",
+            "/var/log"
+          ],
+          "allowed_sudo_targets": ["YOUR_AGENT_CLAUDE"]
+        }
+      ]
     }
   ]
 }

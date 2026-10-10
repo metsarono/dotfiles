@@ -128,7 +128,12 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_all_classes_are_default_off(self):
         manifest = REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json"
-        self.assertTrue(all(not item["enabled"] for item in self.base["classes"]))
+        self.assertTrue(all(
+            not item["enabled"]
+            for item in self.base["classes"]
+            if item["name"] != "ssh_readonly"
+        ))
+        self.assertTrue(next(item for item in self.base["classes"] if item["name"] == "ssh_readonly")["enabled"])
         self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "ask")
 
     def test_each_class_has_green_and_disabled_paths(self):

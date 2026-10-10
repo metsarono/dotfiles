@@ -68,12 +68,22 @@ def _protected(value):
     parts = tuple(part for part in lowered.split("/") if part)
     if "palmcortex" in parts or any(parts[i:i + 3] == ("logs", "telegram", "personal") for i in range(max(0, len(parts) - 2))):
         return True
-    if "secret vault" in lowered or "/home/gille" in lowered or "nexus/keys" in lowered:
+    if "secret vault" in lowered or "nexus/keys" in lowered:
         return True
     if any(part in {".ssh", ".secrets", "private", "secrets", "keys", "credentials"} for part in parts):
         return True
     basename = parts[-1] if parts else ""
-    return basename in AUTH or basename.startswith(".env") or basename.endswith((".token", ".key", ".pem", ".kdbx", ".sqlite")) or "token" in basename or "secret" in basename or "cookie" in basename
+    return (basename in AUTH or basename == ".credentials.json"
+            or basename.startswith((".env", "auth.", "credential"))
+            or basename.startswith("keepass")
+            or basename.endswith((".token", ".key", ".pem", ".kdb", ".kdbx", ".sqlite"))
+            or "token" in basename or "secret" in basename or "cookie" in basename)
+
+
+def _gille_path(value):
+    """The Gille home is floor-protected except for a proven SSH root."""
+    lowered = str(value).replace("\\", "/").casefold()
+    return bool(re.search(r"(?:^|/)home/gille(?:/|$|[\s'\";&|])", lowered))
 
 
 # 2026-10-09 (Fable/SO-APPROVAL-C1 decider-in-the-loop): the old hard floor mixed
@@ -105,6 +115,11 @@ def _true_floor(event, manifest=None):
         words = shlex.split(command, posix=True)
     except ValueError:
         words = None
+    readonly_proven = bool(
+        manifest is not None and _ssh_readonly_proven(event, manifest)
+    )
+    if _gille_path(raw) and not readonly_proven:
+        return True
     # Word-level secret scan, path-like tokens only ('cat .env', 'cat NEXUS/keys/x'):
     # a bare word such as grep 'private' is not a path and must not floor.
     if words is not None and any(_protected(word) for word in words if "/" in word or word.startswith("~") or "." in word):
@@ -117,6 +132,12 @@ def _true_floor(event, manifest=None):
             return True
         if _interpreter_body(event) and not _python_json_read(event, manifest):
             return True
+    # A proven SSH reader is the sole remote carve-out.  It is checked before
+    # the per-segment floor scan so an explicitly allowed sudo reader cannot be
+    # mistaken for service control; the parser has already rejected every
+    # other sudo shape and every writer.
+    if readonly_proven:
+        return False
     # 2026-10-10 (Fable review, replay finding): floor verbs hide inside compound
     # segments ('cd X && kill -TERM 30130', 'rm -f a && make'). Every segment's
     # first word gets the same absolute checks as a standalone command.
@@ -236,7 +257,13 @@ def _floor_verb(lowered):
         return True
     if "nurse-joy" in lowered and "revive" in lowered:
         return True
-    if "tmux" in lowered and any(word.startswith("kill-") for word in lowered):
+    if "tmux" in lowered and any(
+        word.startswith("kill-") or word in {
+            "send-keys", "respawn-pane", "respawn-window", "new-session",
+            "attach-session", "switch-client",
+        }
+        for word in lowered
+    ):
         return True
     if lowered and lowered[0] == "rm" and any(word == "-r" or word == "--recursive" or (word.startswith("-") and "r" in word[1:]) for word in lowered[1:]):
         return True
@@ -859,7 +886,7 @@ UNITTEST_RE = re.compile(r"^/usr/bin/python3(?:\.\d+)?\s+-m\s+unittest\s+[\w.]+$
 REMOTE_REALPATH_TIMEOUT_SECONDS = 2.5
 GIT_READERS = {"status", "log", "diff", "show", "branch", "ls-files", "remote", "tag"}
 GIT_UNSAFE_READ_OPTIONS = {"-C", "--output", "--exec"}
-READERS = {"cat", "head", "tail", "grep", "find", "ls", "stat", "wc", "pgrep", "date", "mailcortex"}
+READERS = {"cat", "head", "tail", "grep", "rg", "find", "ls", "stat", "wc", "pgrep", "ps", "date", "mailcortex", "tmux"}
 FIND_WRITE_ACTIONS = {"-delete", "-exec", "-execdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 REMOTE_EXCLUDED_COMPONENTS = {"private", "secrets", ".secrets", "keys", "credentials", ".git", ".ssh", ".env"}
 
@@ -869,6 +896,55 @@ def _class_config(manifest, name):
     if not isinstance(entry, dict) or entry.get("enabled") is not True:
         return None
     return entry
+
+
+def _readonly_host_configs(config):
+    """Normalize the v2 host list while retaining the original p3 shape."""
+    hosts = config.get("readonly_hosts")
+    if hosts is None:
+        host = config.get("readonly_host")
+        if not isinstance(host, str):
+            return []
+        hosts = [{
+            "host": host,
+            "remote_home": config.get("remote_home"),
+            "remote_path_roots": config.get("remote_path_roots"),
+            "allowed_sudo_targets": config.get("allowed_sudo_targets", []),
+        }]
+    if not isinstance(hosts, list):
+        return []
+    normalized = []
+    for host in hosts:
+        if not isinstance(host, dict):
+            continue
+        allowed = host.get("allowed_sudo_targets", [])
+        if (
+            not isinstance(host.get("host"), str)
+            or not re.fullmatch(r"[A-Za-z0-9_.@-]+", host["host"])
+            or not isinstance(host.get("remote_home"), str)
+            or not host["remote_home"].startswith("/")
+            or host["remote_home"] == "/"
+            or not isinstance(host.get("remote_path_roots"), list)
+            or not host["remote_path_roots"]
+            or any(
+                not isinstance(root, str) or not root.startswith("/") or root == "/"
+                for root in host["remote_path_roots"]
+            )
+            or not isinstance(allowed, list)
+            or any(not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", target) for target in allowed)
+        ):
+            continue
+        normalized.append({
+            "host": host["host"],
+            "remote_home": host["remote_home"],
+            "remote_path_roots": list(host["remote_path_roots"]),
+            "allowed_sudo_targets": list(allowed),
+        })
+    return normalized
+
+
+def _readonly_host_config(config, host):
+    return next((item for item in _readonly_host_configs(config) if item["host"] == host), None)
 
 
 def _protected_token_p3(token):
@@ -903,7 +979,7 @@ def _remote_path_p3(raw, remote_home, base=None):
 
 def _remote_path_excluded_p3(path):
     components = tuple(part.lower() for part in path.split("/") if part)
-    return any(part in REMOTE_EXCLUDED_COMPONENTS for part in components)
+    return any(part in REMOTE_EXCLUDED_COMPONENTS for part in components) or _protected(path)
 
 
 def _remote_paths_allowed_p3(raw_paths, config, base=None):
@@ -937,12 +1013,38 @@ def _remote_git_paths_p3(args, repo_raw, config):
     return out
 
 
+def _reader_result(paths, *, lexical_only=False):
+    return {
+        "paths": list(paths),
+        "realpath_paths": [] if lexical_only else list(paths),
+        "uses_sudo": lexical_only,
+    }
+
+
+def _sudo_reader(words, config):
+    """Strip exactly one approved sudo prefix, or reject the segment."""
+    if not words or words[0] != "sudo":
+        return words, False
+    if len(words) < 5 or words[1:3] != ["-n", "-u"]:
+        return None, False
+    target = words[3]
+    if target not in config["allowed_sudo_targets"]:
+        return None, False
+    reader = words[4:]
+    if "sudo" in reader:
+        return None, False
+    return reader, True
+
+
 def _reader_segment_p3(segment, config):
     try:
         words = shlex.split(segment, posix=True)
     except ValueError:
         return None
     if not words:
+        return None
+    words, sudo = _sudo_reader(words, config)
+    if words is None:
         return None
     command = words[0]
     if command == "git":
@@ -957,7 +1059,11 @@ def _reader_segment_p3(segment, config):
             return None
         if any(word in GIT_UNSAFE_READ_OPTIONS or word.startswith(("--output=", "--git-dir=", "--work-tree=")) for word in args[1:]):
             return None
-        return _remote_git_paths_p3(args, repo_raw, config)
+        result = _remote_git_paths_p3(args, repo_raw, config)
+        if result is not None and sudo:
+            result["realpath_paths"] = []
+            result["uses_sudo"] = True
+        return result
     if command not in READERS:
         return None
     args = words[1:]
@@ -965,51 +1071,97 @@ def _reader_segment_p3(segment, config):
         if not args or any(item.startswith("-") for item in args):
             return None
         paths = _remote_paths_allowed_p3(args, config)
-        return None if paths is None else {"paths": paths, "realpath_paths": paths}
+        return None if paths is None else _reader_result(paths, lexical_only=sudo)
     if command in {"ls", "stat", "wc"}:
         operands = [item for item in args if not item.startswith("-")]
         if command in {"ls", "stat"} and not operands:
             return None
         if not operands:
-            return {"paths": [], "realpath_paths": []}
+            return _reader_result([], lexical_only=sudo)
         paths = _remote_paths_allowed_p3(operands, config)
-        return None if paths is None else {"paths": paths, "realpath_paths": paths}
-    if command in {"head", "tail", "grep", "find", "pgrep", "date", "mailcortex"}:
+        return None if paths is None else _reader_result(paths, lexical_only=sudo)
+    if command in {"head", "tail", "grep", "rg", "find", "pgrep", "ps", "date", "mailcortex", "tmux"}:
         # Simplified p3 readers: flags then operands, no write actions.
         if command == "find" and any(word in FIND_WRITE_ACTIONS for word in args):
             return None
-        if command == "grep" and "-r" in [w.lower() for w in args]:
+        if command in {"grep", "rg"} and any(w.lower() in {"-r", "-R", "--recursive"} for w in args):
             return None  # recursion walks past per-path protection
+        if command in {"pgrep", "ps", "date"}:
+            return _reader_result([], lexical_only=sudo)
+        if command == "tmux":
+            if len(args) < 2 or args[0] != "-S" or args[1] != "/tmp/tmux-2002/default":
+                return None
+            subcommand = args[2] if len(args) > 2 else ""
+            remainder = args[3:]
+            if subcommand == "capture-pane":
+                index = 0
+                while index < len(remainder):
+                    if remainder[index] == "-p":
+                        index += 1
+                    elif remainder[index] == "-t" and index + 1 < len(remainder) and not remainder[index + 1].startswith("-"):
+                        index += 2
+                    else:
+                        return None
+                return _reader_result([], lexical_only=sudo)
+            if subcommand.startswith("list-"):
+                index = 0
+                while index < len(remainder):
+                    if remainder[index] == "-t" and index + 1 < len(remainder) and not remainder[index + 1].startswith("-"):
+                        index += 2
+                    else:
+                        return None
+                return _reader_result([], lexical_only=sudo)
+            return None
+        if command in {"head", "tail"}:
+            if any(word in {"-f", "--follow", "--retry", "--pid"} or word.startswith(("--follow=", "--pid=")) for word in args):
+                return None
         operands = [item for item in args if not item.startswith("-")]
-        if command in {"pgrep", "date"}:
-            return {"paths": [], "realpath_paths": []}
+        if command in {"grep", "rg"}:
+            if not operands:
+                return None
+            # One non-option operand is a stdin pattern; later operands are files.
+            operands = operands[1:]
+        if command in {"head", "tail", "grep", "rg"} and not operands:
+            return _reader_result([], lexical_only=sudo)
         if command == "mailcortex":
             if not args or args[0] not in {"inbox", "read"}:
                 return None
-            return {"paths": [], "realpath_paths": []}
+            return _reader_result([], lexical_only=sudo)
         if not operands:
             return None
-        paths = _remote_paths_allowed_p3([operands[-1]] if command == "grep" else operands, config)
-        return None if paths is None else {"paths": paths, "realpath_paths": paths}
+        paths = _remote_paths_allowed_p3(operands, config)
+        return None if paths is None else _reader_result(paths, lexical_only=sudo)
     return None
 
 
 def _ssh_readonly_analysis(command, config):
     match = SSH_RE.fullmatch(command)
-    if not match or match.group(1) != config["readonly_host"]:
+    if not match:
+        return None
+    host_config = _readonly_host_config(config, match.group(1))
+    if host_config is None:
         return None
     remote = match.group(2)
+    if remote[:1] in {"'", '"'}:
+        if len(remote) < 2 or remote[-1] != remote[0]:
+            return None
+        remote = remote[1:-1]
+    elif remote[-1:] in {"'", '"'}:
+        return None
     if SHELL_META_RE.search(remote.replace("|", "")):
         return None
     if "||" in remote or remote.startswith("|") or remote.endswith("|"):
         return None
     parts = [part.strip() for part in remote.split("|")]
-    analyses = [_reader_segment_p3(part, config) if part else None for part in parts]
+    analyses = [_reader_segment_p3(part, host_config) if part else None for part in parts]
     if not parts or any(analysis is None for analysis in analyses):
+        return None
+    if sum(bool(analysis.get("uses_sudo")) for analysis in analyses) > 1:
         return None
     return {
         "paths": [p for a in analyses for p in a["paths"]],
         "realpath_paths": [p for a in analyses for p in a["realpath_paths"]],
+        "host_config": host_config,
     }
 
 
@@ -1017,17 +1169,17 @@ def _ssh_readonly_proven(event, manifest):
     """Floor carve-out helper: prove the event is a readonly ssh command to the
     reviewed host, INCLUDING the remote realpath proof. Runs only when the
     ssh_readonly class is enabled; any failure means not proven (floors)."""
-    config = _class_config(manifest, "ssh_readonly")
-    if config is None:
+    class_config = _class_config(manifest, "ssh_readonly")
+    if class_config is None:
         return False
     tool_input = event.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return False
-    analysis = _ssh_readonly_analysis(command, config)
+    analysis = _ssh_readonly_analysis(command, class_config)
     if analysis is None:
         return False
-    return _remote_realpath_proven_p3(analysis, config)
+    return _remote_realpath_proven_p3(analysis, analysis["host_config"])
 
 
 def _remote_realpath_proven_p3(analysis, config):
@@ -1037,7 +1189,7 @@ def _remote_realpath_proven_p3(analysis, config):
     if not paths:
         return True
     argv = ("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
-            config["readonly_host"], "realpath", "-e", "--",
+            config["host"], "realpath", "-e", "--",
             *(shlex.quote(p) for p in paths))
     try:
         completed = subprocess.run(list(argv), stdin=subprocess.DEVNULL,
@@ -1059,17 +1211,17 @@ def _remote_realpath_proven_p3(analysis, config):
 
 
 def _ssh_readonly_match(event, manifest):
-    config = _class_config(manifest, "ssh_readonly")
-    if config is None:
+    class_config = _class_config(manifest, "ssh_readonly")
+    if class_config is None:
         return False
     tool_input = event.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return False
-    analysis = _ssh_readonly_analysis(command, config)
+    analysis = _ssh_readonly_analysis(command, class_config)
     if analysis is None:
         return False
-    return _remote_realpath_proven_p3(analysis, config)
+    return _remote_realpath_proven_p3(analysis, analysis["host_config"])
 
 
 def _local_test_match(event, manifest):
