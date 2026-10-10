@@ -1,6 +1,6 @@
 {
   "schema": "hc.approval.canary.kikin.manifest.v1",
-  "manifest_version": "claude-approval-canary.kikin.v1",
+  "manifest_version": "claude-approval-canary.kikin.v2",
   "hard_floor_ids": [
     "floor.kikin-protected-target.v1",
     "floor.kikin-private-log.v1",
@@ -8,9 +8,16 @@
     "floor.kikin-remote.v1",
     "floor.kikin-service-control.v1",
     "floor.kikin-package-install.v1",
-    "floor.kikin-shell-composition.v1",
     "floor.kikin-writer-option.v1"
   ],
+  "decider": {
+    "enabled": false,
+    "honey_url": null,
+    "kikin_url": "http://127.0.0.1:8098/v1/systemone",
+    "timeout_ms": 2200,
+    "min_allow_confidence": 0.95,
+    "questions": "single"
+  },
   "roots": [
     "/home/YOUR_USER/HelmCortex",
     "/home/YOUR_USER/mnt/x230/HelmCortex",
@@ -30,7 +37,7 @@
       "name": "local_read",
       "enabled": false,
       "tool_names": ["Read", "Glob", "Grep"],
-      "bash_verbs": ["cat", "head", "tail", "grep", "ls", "stat", "wc", "find"]
+      "bash_verbs": ["cat", "head", "tail", "grep", "ls", "stat", "wc", "find", "sed"]
     },
     {
       "name": "git_observe",

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Supervisor: filebrowser-supervise
+
+# Mirrors herdr-web-tailnet's autostart loop (the correct daemon-owning shape): flock singleton supervisor that respawns the foreground launcher forever. NOT the agentify bounded-attempts shape — that one probes an idempotent owner; a daemon needs a persistent owner loop or the service dies with every supervisor exit. Nothing in it is machine-specific except the host guard — the launcher owns config/port, the cron-apply owns the contract.
+
+
+# [[file:../../../app.org::*Supervisor: filebrowser-supervise][Supervisor: filebrowser-supervise:1]]
+set -euo pipefail
+
+TAG="filebrowser-supervise"
+EXPECTED_HOST=""
+DELAY=15
+RETRY_SECONDS=5
+LAUNCHER="${FILEBROWSER_SUPERVISE_LAUNCHER:-$HOME/.local/bin/filebrowser-serve}"
+HOSTNAME_BIN="${FILEBROWSER_SUPERVISE_HOSTNAME_BIN:-hostname}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --expected-host) [ "$#" -ge 2 ] || { echo "$TAG: --expected-host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --delay) [ "$#" -ge 2 ] || { echo "$TAG: --delay requires a value" >&2; exit 2; }; DELAY="$2"; shift ;;
+    --retry-seconds) [ "$#" -ge 2 ] || { echo "$TAG: --retry-seconds requires a value" >&2; exit 2; }; RETRY_SECONDS="$2"; shift ;;
+    -h|--help|help) echo "Usage: $TAG --expected-host HOST [--delay N] [--retry-seconds N]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -n "$EXPECTED_HOST" ] || { echo "$TAG: --expected-host is required" >&2; exit 2; }
+CURRENT_HOST="$($HOSTNAME_BIN -s)"
+[ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: wrong host ($CURRENT_HOST != $EXPECTED_HOST), nothing to do" >&2; exit 1; }
+[ -x "$LAUNCHER" ] || { echo "$TAG: launcher is not executable: $LAUNCHER" >&2; exit 69; }
+
+LOG_DIR="$HOME/.local/state/filebrowser"
+mkdir -p "$LOG_DIR"
+exec 9>"$LOG_DIR/supervisor.lock"
+if ! flock -n 9; then
+  # Boot watchdog and liveness poll may meet; only one supervisor owns the service.
+  exit 0
+fi
+
+log() { printf '%s %s %s\n' "$(date -Is)" "$TAG" "$*" >> "$LOG_DIR/supervisor.log"; }
+
+log "supervisor starting (host=$CURRENT_HOST, launcher=$LAUNCHER)"
+
+# Boot path: give the machine a moment, then own the daemon forever,
+# respawning on death — herdr-web-tailnet --autostart shape.
+sleep "$DELAY"
+while :; do
+  "$LAUNCHER" >> "$LOG_DIR/service.log" 2>&1 || true
+  log "service exited, respawning in ${RETRY_SECONDS}s"
+  sleep "$RETRY_SECONDS"
+done
+# Supervisor: filebrowser-supervise:1 ends here

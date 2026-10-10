@@ -18,7 +18,7 @@ Columns: NAME METHOD URL ROOT BIN_DIR LINK_MODE NOTE R1
   - all   = symlink all executables from BIN_DIR into ~/.local/bin
   - main:NAME = symlink only that executable name from BIN_DIR
   - none  = do not create symlinks (for odd cases)
-- NOTE/R1: method-specific extras; =tar_gz= accepts =sha256=<digest>= or =sha512=<digest>=; prefix a field with =env:= to pass an environment assignment to curl-based installers
+- NOTE/R1: method-specific extras; =tar_gz= and =curl_bin= accept =sha256=<digest>= or =sha512=<digest>= (verified on install; always pin one); prefix a field with =env:= to pass an environment assignment to curl-based installers
 
 #+BEGIN_SRC text :tangle all/.app/manifest/apps.ssv
 # ~/DotCortex/all/.app/manifest/apps.ssv
@@ -64,6 +64,16 @@ seamonkey      tar_gz     https://archive.seamonkey-project.org/releases/2.53.23
 # (./ + dist + versioned-dir) lands `spf` in ROOT and main:spf links it. Version-pinned; bump URL + sha256
 # together on upgrade (sha256 from superfile-vVERSION-checksums.txt).
 superfile      tar_gz     https://github.com/yorukot/superfile/releases/download/v1.6.0/superfile-linux-v1.6.0-amd64.tar.gz  ~/.local/superfile.app  .  main:spf  sha256=d45b0e95072629a6aa7983a84eedca9cd7a98861e67ef91be1415496e3dda309 strip=3  ""
+# filebrowser: FileBrowser Quantum (gtsteffaniak fork), Apache-2.0 — static Go binary, the same app
+# Honey (beelink) serves at :9090. Pinned to the upstream v1.5.6-stable release (Honey runs a custom
+# edb3681 build; Kikin runs the canonical upstream binary). NOTE: unlike herdr, upstream filebrowser
+# asset names use GOARCH, not uname -m — the {arch} token is NOT usable here. Upstream publishes
+# separate linux-amd64/linux-arm64/linux-armv6/linux-armv7 assets; this line pins the amd64 asset
+# (all fleet hosts serving it are x86_64; an aarch64 host would need its own line). sha256 is the
+# published asset digest for linux-amd64, verified locally 2026-10-09 (downloaded bytes match
+# febf1de...). curl_bin lands it directly in ~/.local/bin/filebrowser.
+# Version-pinned: bump URL + sha256 together on upgrade.
+filebrowser    curl_bin   https://github.com/gtsteffaniak/filebrowser/releases/download/v1.5.6-stable/linux-amd64-filebrowser  ""   ""   none   sha256=febf1ded3368eac1f13481f413db272c57678b70f09e74f5513d5e25e0bfb0e5   ""
 #+END_SRC
 
 * Kitty desktop launcher
@@ -789,6 +799,391 @@ exec caddy run --config "$config" --adapter caddyfile
 chmod +x ~/DotCortex/all/.local/bin/obsidian-web-gate
 #+END_SRC
 
+* FileBrowser Quantum tailnet file manager (kikin-kushi)
+
+Serves FileBrowser Quantum (gtsteffaniak fork, v1.5.x) from kikin-kushi so Mètsàtron can browse and download fleet files from any tailnet device. The binary comes from the app manifest (=curl_bin=, sha256-pinned). The service binds loopback only; the existing kikin Caddy TLS front (port 1996, =kikin-kushi.sphinx-draco.ts.net=) reverse-proxies to it, so FileBrowser itself never listens on a tailnet or LAN interface.
+
+** Why loopback + Caddy rather than tailnet-direct
+
+Unlike herdr-web (no auth at all), FileBrowser Quantum has its own password auth (=auth.methods.password=). Loopback-bind + Caddy TLS still wins: one TLS front already lives on the machine, the hostname gets a real certificate, and the service stays invisible off-tailnet. Same law as obsidian-web: the gate is the sole listener with a tailnet/lAN presence.
+
+** Config (machine-local, NEVER in DotCortex)
+
+FileBrowser Quantum config is YAML at =$HOME/.config/filebrowser/config.yaml=. It holds no secrets (passwords are created in-app and stored in its own DB), but it IS machine-specific — kikin's source list has no business on other hosts, and the admin password lives in KeePass (provision on first run, stop-point for Fable). DotCortex is PUBLIC: the template below uses =$HOME= placeholders only; the provisioning step renders real paths into the machine-local copy.
+
+#+BEGIN_EXAMPLE
+server:
+  # Loopback only; Caddy TLS front (caddy-serve :9090) is the tailnet listener.
+  port: 9091
+  listen: 127.0.0.1
+  # Machine-local SQLite DB (users, settings). Provisioned beside the config;
+  # keep it out of any DotCortex-synced path.
+  database: $HOME/.local/share/filebrowser/database.db
+  # Absolute cache path: the default "tmp" is RELATIVE to the cwd — running the
+  # binary from a worktree litters it with cache dirs (observed 2026-10-09).
+  cacheDir: $HOME/.local/state/filebrowser/cache
+  sources:
+    # Hard drive root: read-only whole-filesystem view. The Admiral's
+    # 'hard drive' icon opens here. readOnly is a real per-source flag
+    # (v1.5.6 config.generated.yaml) — UI, WebDAV, and API writes are all
+    # disabled for this source.
+    - name: root
+      path: /
+      config:
+        defaultEnabled: true
+        readOnly: true
+        private: true   # no shares from this source
+        rules:
+          - folderPath: "/NEXUS"                    # KeePass vaults + repo mirrors
+          - folderPath: "/home/RENDERED_USER/.ssh"   # rendered at provisioning
+          - folderPath: "/root/.ssh"
+          - folderName: ".ssh"
+          - folderPath: "/etc/caddy"
+          - folderPath: "/etc/ssl/private"
+          - folderPath: "/etc/letsencrypt/live"
+          - fileName: ".env"
+          - fileEndsWith: ".env"
+          - folderName: "node_modules"
+          - fileEndsWith: ".kdbx"
+          - fileEndsWith: ".kdbx.key"
+    # Home: the writable working source.
+    - name: home
+      path: $HOME
+      config:
+        defaultEnabled: true
+        private: true   # no shares — tailnet-only by policy (sovereignty rule)
+        rules:
+          - folderPath: "NEXUS"
+          - folderPath: ".ssh"
+          - folderPath: ".config/filebrowser"
+          - folderPath: ".local/share/dotcortex/tests"
+          - fileName: ".env"
+          - fileEndsWith: ".env"
+          - fileEndsWith: ".kdbx"
+          - fileEndsWith: ".kdbx.key"
+    # Mounted fleet shares.
+    - name: mnt
+      path: $HOME/mnt
+      config:
+        defaultEnabled: true
+        private: true
+    # Pictures gallery.
+    - name: pictures
+      path: $HOME/Pictures
+      config:
+        defaultEnabled: true
+        private: true
+    # Sanctuary Cortex guest home (deep-linked from the Centre desktop icons).
+    - name: sanctuary-cortex
+      path: $HOME/.local/share/dotcortex/guests/sanctuary-cortex/home
+      config:
+        defaultEnabled: true
+        private: true
+auth:
+  methods:
+    password:
+      enabled: true
+      signup: false
+#+END_EXAMPLE
+
+Notes on rules: Quantum rules are OR-based; each entry is an exclude filter (verified against the v1.5.6-stable =config.generated.yaml=, fetched from the pinned tag 2026-10-09). Key corrections from that reference, Fable's review round: =listen:= is the bind-address key (=host:= does not exist); there is no =frontend.disableShares= — shares are gated per-source with =private: true=; per-source =readOnly: true= exists and covers UI, WebDAV, and API writes. On the root source, ignoreHidden is deliberately NOT set: hidden dot-directories under / are system entries Mètsàtron expects to see in a hard-drive view; the explicit deny rules above carry the security weight. Every source is =private= — no off-tailnet share links, per the sovereignty rule (sealed 2026-08-26).
+
+The folderPath excludes are relative to each source root (leading-slash-optional; Quantum matches the path under the source). The provisioning step renders =$HOME= and =RENDERED_USER= into the machine-local copy — nothing absolute and user-specific stays in this public repo.
+
+** TLS front: caddy-serve :9090 (DECIDED, per Fable's card)
+
+Fable's ruling: pick the wiring, name the tailnet port. Decision: a third Caddy instance in the caddy-serve pattern — tailnet HTTPS on =kikin-kushi.sphinx-draco.ts.net:9090= terminating at the kikin-kushi cert, reverse-proxying to the app's loopback =127.0.0.1:9091=. A dedicated port (not a /files/* path under :1996) because the Centre's 1996 Caddyfile is generated by pokemon-centre and a path mount would need baseURL surgery inside the app config; a sibling instance is the shape caddy-serve already owns (1996/1997 run side by side with admin off). 9090 matches Honey's FileBrowser convention and is free on kikin (verified 2026-10-09; listeners were 22 25 111 139 445 631 1716 1995-1997 1999 2049 3003 3004 3080 4000 4096 5222 5281 5347 6566 8073 8098 8384 8642 8741 8765 8799 9119 9222 — no 9090/9091).
+
+The Caddyfile lives beside the HelmCortex lane that owns it (caddy-serve writes =$root/.Caddyfile=), machine-local, NOT in DotCortex. Site block for the caddy-serve 9090 case:
+
+#+BEGIN_EXAMPLE
+{
+	admin off
+}
+
+kikin-kushi.sphinx-draco.ts.net:9090 {
+	tls $HOME/.local/share/caddy/kikin-kushi.crt $HOME/.local/share/caddy/kikin-kushi.key
+	reverse_proxy 127.0.0.1:9091
+}
+#+END_EXAMPLE
+
+The app binds loopback 9091 (not 9090) so the tailnet port number and the app's internal port stay distinct — the URL the Admiral bookmarks is =https://kikin-kushi.sphinx-draco.ts.net:9090=, and nothing but Caddy ever owns a non-loopback listener.
+
+** Launcher: filebrowser-serve
+
+Mirrors herdr-web-tailnet: derives nothing from source, binds loopback, no secrets. No =--autostart= loop here — supervision is owned by the cron contract (below), the launcher is a plain foreground =exec= for the supervisor to own.
+
+#+BEGIN_SRC bash :tangle all/.local/bin/filebrowser-serve :shebang "#!/usr/bin/env bash"
+# ~/DotCortex/all/.local/bin/filebrowser-serve
+set -euo pipefail
+
+# FileBrowser Quantum foreground launcher: loopback-bind only, config from
+# the machine-local config dir. The tailnet Caddy TLS front (caddy-serve
+# :9090 -> 127.0.0.1:9091) is the sole external listener; this process never
+# binds a tailnet or LAN address. The config carries listen: 127.0.0.1 and
+# port: 9091 itself — FILEBROWSER_PORT exists only for sandboxed tests.
+
+port="${FILEBROWSER_PORT:-9091}"
+config_dir="${FILEBROWSER_CONFIG:-$HOME/.config/filebrowser}"
+bin="${FILEBROWSER_BIN:-$HOME/.local/bin/filebrowser}"
+
+[ -x "$bin" ] || { echo "filebrowser-serve: missing $bin (run app-apply)" >&2; exit 1; }
+[ -f "$config_dir/config.yaml" ] || { echo "filebrowser-serve: missing $config_dir/config.yaml (machine-local template in DotCortex app.org)" >&2; exit 1; }
+
+echo "filebrowser-serve: config $config_dir/config.yaml (bind/port live in the config; loopback only)"
+exec "$bin" -c "$config_dir/config.yaml"
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/all/.local/bin/filebrowser-serve
+#+END_SRC
+
+** Config provisioning: filebrowser-provision
+
+Renders the machine-local config.yaml from the public-repo template. The template (above) carries =$HOME= placeholders only; this script expands them on the serving machine and writes =$HOME/.config/filebrowser/config.yaml=. Idempotent: refuses to overwrite an existing config unless =--force=. No secrets pass through it — the admin password is created in-app on first run and filed in KeePass (Fable's stop-point).
+
+#+BEGIN_SRC bash :tangle linux/.local/bin/filebrowser-provision :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
+set -euo pipefail
+
+TAG="filebrowser-provision"
+FORCE=0
+# The template lives beside this script in the stowed DotCortex tree. It is
+# the EXAMPLE block above, extracted verbatim — the single source of truth.
+# The provisioning operator (Fable) copies it here on apply; a fresh
+# checkout renders from app.org directly.
+TEMPLATE="${FILEBROWSER_TEMPLATE:-$HOME/DotCortex/linux/.local/share/filebrowser/config.template.yaml}"
+DEST="${FILEBROWSER_CONFIG:-$HOME/.config/filebrowser/config.yaml}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=1 ;;
+    -h|--help|help) echo "Usage: $TAG [--force]"; echo "  renders $TEMPLATE -> $DEST (refuses to overwrite without --force)"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -f "$TEMPLATE" ] || { echo "$TAG: missing template $TEMPLATE (extract the EXAMPLE block from DotCortex app.org, FileBrowser Quantum section)" >&2; exit 1; }
+
+if [ -f "$DEST" ] && [ "$FORCE" -ne 1 ]; then
+  echo "$TAG: $DEST already exists — refusing to overwrite (use --force after review)" >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$DEST")"
+# Render: expand $HOME and the RENDERED_USER token. The template's YAML is
+# plain substitution — no shell evaluation, so sed is the honest tool.
+sed -e "s|\$HOME|$HOME|g" -e "s|RENDERED_USER|$(id -un)|g" "$TEMPLATE" > "$DEST"
+chmod 600 "$DEST"
+
+echo "$TAG: rendered $DEST from $TEMPLATE"
+echo "$TAG: verify sources exist, then create the admin password in-app on first run and file it in KeePass"
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/linux/.local/bin/filebrowser-provision
+#+END_SRC
+
+The template file ships in the repo as a plain data file (not a tangle block — the EXAMPLE above IS the template; this SRC block writes the consumer copy so provisioning does not depend on reading org markup):
+
+#+BEGIN_SRC yaml :tangle linux/.local/share/filebrowser/config.template.yaml
+# Verbatim copy of the EXAMPLE template above — keep the two in lockstep; the
+# EXAMPLE is canonical. filebrowser-provision renders this into the machine-local
+# $HOME/.config/filebrowser/config.yaml (placeholders expanded there, never here).
+server:
+  # Loopback only; Caddy TLS front (caddy-serve :9090) is the tailnet listener.
+  port: 9091
+  listen: 127.0.0.1
+  # Machine-local SQLite DB (users, settings). Provisioned beside the config;
+  # keep it out of any DotCortex-synced path.
+  database: $HOME/.local/share/filebrowser/database.db
+  # Absolute cache path: the default "tmp" is RELATIVE to the cwd — running the
+  # binary from a worktree litters it with cache dirs (observed 2026-10-09).
+  cacheDir: $HOME/.local/state/filebrowser/cache
+  sources:
+    # Hard drive root: read-only whole-filesystem view. The Admiral's
+    # 'hard drive' icon opens here. readOnly is a real per-source flag
+    # (v1.5.6 config.generated.yaml) — UI, WebDAV, and API writes are all
+    # disabled for this source.
+    - name: root
+      path: /
+      config:
+        defaultEnabled: true
+        readOnly: true
+        private: true   # no shares from this source
+        rules:
+          - folderPath: "/NEXUS"                    # KeePass vaults + repo mirrors
+          - folderPath: "/home/RENDERED_USER/.ssh"   # rendered at provisioning
+          - folderPath: "/root/.ssh"
+          - folderName: ".ssh"
+          - folderPath: "/etc/caddy"
+          - folderPath: "/etc/ssl/private"
+          - folderPath: "/etc/letsencrypt/live"
+          - fileName: ".env"
+          - fileEndsWith: ".env"
+          - folderName: "node_modules"
+          - fileEndsWith: ".kdbx"
+          - fileEndsWith: ".kdbx.key"
+    # Home: the writable working source.
+    - name: home
+      path: $HOME
+      config:
+        defaultEnabled: true
+        private: true   # no shares — tailnet-only by policy (sovereignty rule)
+        rules:
+          - folderPath: "NEXUS"
+          - folderPath: ".ssh"
+          - folderPath: ".config/filebrowser"
+          - folderPath: ".local/share/dotcortex/tests"
+          - fileName: ".env"
+          - fileEndsWith: ".env"
+          - fileEndsWith: ".kdbx"
+          - fileEndsWith: ".kdbx.key"
+    # Mounted fleet shares.
+    - name: mnt
+      path: $HOME/mnt
+      config:
+        defaultEnabled: true
+        private: true
+    # Pictures gallery.
+    - name: pictures
+      path: $HOME/Pictures
+      config:
+        defaultEnabled: true
+        private: true
+    # Sanctuary Cortex guest home (deep-linked from the Centre desktop icons).
+    - name: sanctuary-cortex
+      path: $HOME/.local/share/dotcortex/guests/sanctuary-cortex/home
+      config:
+        defaultEnabled: true
+        private: true
+auth:
+  methods:
+    password:
+      enabled: true
+      signup: false
+#+END_SRC
+
+** Cron supervision: filebrowser-cron-apply
+
+Mirrors agentify-cortex-supervise-cron-apply: expected-host guard, dry-run/remove modes, atomic root-owned receipt. The cron contract starts at boot and liveness-checks every 2 minutes; the supervisor body (filebrowser-supervise) holds the flock singleton.
+
+#+BEGIN_SRC bash :tangle linux/.local/bin/filebrowser-cron-apply :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
+set -euo pipefail
+
+TAG="filebrowser-cron-apply"
+TARGET="/etc/cron.d/dotcortex-filebrowser"
+EXPECTED_HOST=""
+DRY=0
+REMOVE=0
+HOSTNAME_BIN="${FILEBROWSER_CRON_HOSTNAME_BIN:-hostname}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "$TAG: --host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --dry-run) DRY=1 ;;
+    --remove) REMOVE=1 ;;
+    -h|--help|help) echo "Usage: $TAG --host EXACT_HOST [--dry-run] [--remove]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+run_priv() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
+
+if [ "$REMOVE" = 1 ]; then
+  if [ "$DRY" = 1 ]; then echo "remove $TARGET"; else run_priv rm -f "$TARGET"; echo "$TAG: removed $TARGET"; fi
+  exit 0
+fi
+
+[ -n "$EXPECTED_HOST" ] || { echo "$TAG: --host EXACT_HOST is required" >&2; exit 2; }
+CURRENT_HOST="$($HOSTNAME_BIN -s)"
+[ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: refusing installation on $CURRENT_HOST; expected $EXPECTED_HOST" >&2; exit 1; }
+
+USER_NAME="$(id -un)"
+USER_ID="$(id -u)"
+TARGET_HOME="$HOME"
+SUPERVISOR="$TARGET_HOME/.local/bin/filebrowser-supervise"
+[ "$DRY" = 1 ] || [ -x "$SUPERVISOR" ] || { echo "$TAG: missing $SUPERVISOR; tangle and stow first" >&2; exit 1; }
+
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+cat >"$TMP" <<EOF
+# DotCortex FileBrowser Quantum owner; managed by $TAG.
+@reboot $USER_NAME HOME=$TARGET_HOME PATH=$TARGET_HOME/.guix-extra-profiles/core/core/bin:$TARGET_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$USER_ID $SUPERVISOR --expected-host $EXPECTED_HOST --delay 15 --retry-seconds 15
+*/2 * * * * $USER_NAME HOME=$TARGET_HOME PATH=$TARGET_HOME/.guix-extra-profiles/core/core/bin:$TARGET_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$USER_ID $SUPERVISOR --expected-host $EXPECTED_HOST
+EOF
+
+if [ "$DRY" = 1 ]; then
+  cat "$TMP"
+else
+  run_priv install -o root -g root -m 0644 "$TMP" "$TARGET"
+  echo "$TAG: installed $TARGET"
+fi
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/linux/.local/bin/filebrowser-cron-apply
+#+END_SRC
+
+** Supervisor: filebrowser-supervise
+
+Mirrors herdr-web-tailnet's autostart loop (the correct daemon-owning shape): flock singleton supervisor that respawns the foreground launcher forever. NOT the agentify bounded-attempts shape — that one probes an idempotent owner; a daemon needs a persistent owner loop or the service dies with every supervisor exit. Nothing in it is machine-specific except the host guard — the launcher owns config/port, the cron-apply owns the contract.
+
+#+BEGIN_SRC bash :tangle linux/.local/bin/filebrowser-supervise :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
+set -euo pipefail
+
+TAG="filebrowser-supervise"
+EXPECTED_HOST=""
+DELAY=15
+RETRY_SECONDS=5
+LAUNCHER="${FILEBROWSER_SUPERVISE_LAUNCHER:-$HOME/.local/bin/filebrowser-serve}"
+HOSTNAME_BIN="${FILEBROWSER_SUPERVISE_HOSTNAME_BIN:-hostname}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --expected-host) [ "$#" -ge 2 ] || { echo "$TAG: --expected-host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --delay) [ "$#" -ge 2 ] || { echo "$TAG: --delay requires a value" >&2; exit 2; }; DELAY="$2"; shift ;;
+    --retry-seconds) [ "$#" -ge 2 ] || { echo "$TAG: --retry-seconds requires a value" >&2; exit 2; }; RETRY_SECONDS="$2"; shift ;;
+    -h|--help|help) echo "Usage: $TAG --expected-host HOST [--delay N] [--retry-seconds N]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -n "$EXPECTED_HOST" ] || { echo "$TAG: --expected-host is required" >&2; exit 2; }
+CURRENT_HOST="$($HOSTNAME_BIN -s)"
+[ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: wrong host ($CURRENT_HOST != $EXPECTED_HOST), nothing to do" >&2; exit 1; }
+[ -x "$LAUNCHER" ] || { echo "$TAG: launcher is not executable: $LAUNCHER" >&2; exit 69; }
+
+LOG_DIR="$HOME/.local/state/filebrowser"
+mkdir -p "$LOG_DIR"
+exec 9>"$LOG_DIR/supervisor.lock"
+if ! flock -n 9; then
+  # Boot watchdog and liveness poll may meet; only one supervisor owns the service.
+  exit 0
+fi
+
+log() { printf '%s %s %s\n' "$(date -Is)" "$TAG" "$*" >> "$LOG_DIR/supervisor.log"; }
+
+log "supervisor starting (host=$CURRENT_HOST, launcher=$LAUNCHER)"
+
+# Boot path: give the machine a moment, then own the daemon forever,
+# respawning on death — herdr-web-tailnet --autostart shape.
+sleep "$DELAY"
+while :; do
+  "$LAUNCHER" >> "$LOG_DIR/service.log" 2>&1 || true
+  log "service exited, respawning in ${RETRY_SECONDS}s"
+  sleep "$RETRY_SECONDS"
+done
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/linux/.local/bin/filebrowser-supervise
+#+END_SRC
+
+The infinite respawn loop means the supervisor never exits while the service contract holds; the cron liveness poll just re-enters, hits the flock, and exits clean — same singleton law as herdr-web-tailnet.
+
 * Apply manifest
 #+BEGIN_SRC bash :tangle all/.local/bin/app-apply :shebang "#!/usr/bin/env bash"
 # ~/DotCortex/all/.local/bin/app-apply
@@ -1271,8 +1666,32 @@ do
         # daemon (herdr, 2026-07-11); rename is atomic and always lands.
         tmp_dest="$dest.tmp.$$"
         if curl -fsSL "$resolved_url" -o "$tmp_dest"; then
-          chmod +x "$tmp_dest"
-          mv -f "$tmp_dest" "$dest"
+          # Checksum gate (same law as tar_gz): sha512= preferred, sha256= fallback.
+          # A curl_bin line without a digest installs UNVERIFIED — always pin one.
+          expected_sha="$(meta_value sha512 "$note" "$r1" || true)"
+          hash_alg="sha512"
+          if [ -z "$expected_sha" ]; then
+            expected_sha="$(meta_value sha256 "$note" "$r1" || true)"
+            hash_alg="sha256"
+          fi
+          if [ -n "$expected_sha" ]; then
+            if [ "$hash_alg" = "sha512" ]; then
+              actual_sha="$(sha512_file "$tmp_dest")"
+            else
+              actual_sha="$(sha256_file "$tmp_dest")"
+            fi
+            if [ "$actual_sha" != "$expected_sha" ]; then
+              echo "!! [$name] $hash_alg mismatch: expected $expected_sha, got $actual_sha" >&2
+              rm -f "$tmp_dest"
+              echo "!! [$name] install failed"
+            else
+              chmod +x "$tmp_dest"
+              mv -f "$tmp_dest" "$dest"
+            fi
+          else
+            chmod +x "$tmp_dest"
+            mv -f "$tmp_dest" "$dest"
+          fi
         else
           rm -f "$tmp_dest"
           echo "!! [$name] install failed"

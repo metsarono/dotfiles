@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Config provisioning: filebrowser-provision
+
+# Renders the machine-local config.yaml from the public-repo template. The template (above) carries =$HOME= placeholders only; this script expands them on the serving machine and writes =$HOME/.config/filebrowser/config.yaml=. Idempotent: refuses to overwrite an existing config unless =--force=. No secrets pass through it — the admin password is created in-app on first run and filed in KeePass (Fable's stop-point).
+
+
+# [[file:../../../app.org::*Config provisioning: filebrowser-provision][Config provisioning: filebrowser-provision:1]]
+set -euo pipefail
+
+TAG="filebrowser-provision"
+FORCE=0
+# The template lives beside this script in the stowed DotCortex tree. It is
+# the EXAMPLE block above, extracted verbatim — the single source of truth.
+# The provisioning operator (Fable) copies it here on apply; a fresh
+# checkout renders from app.org directly.
+TEMPLATE="${FILEBROWSER_TEMPLATE:-$HOME/DotCortex/linux/.local/share/filebrowser/config.template.yaml}"
+DEST="${FILEBROWSER_CONFIG:-$HOME/.config/filebrowser/config.yaml}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=1 ;;
+    -h|--help|help) echo "Usage: $TAG [--force]"; echo "  renders $TEMPLATE -> $DEST (refuses to overwrite without --force)"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -f "$TEMPLATE" ] || { echo "$TAG: missing template $TEMPLATE (extract the EXAMPLE block from DotCortex app.org, FileBrowser Quantum section)" >&2; exit 1; }
+
+if [ -f "$DEST" ] && [ "$FORCE" -ne 1 ]; then
+  echo "$TAG: $DEST already exists — refusing to overwrite (use --force after review)" >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$DEST")"
+# Render: expand $HOME and the RENDERED_USER token. The template's YAML is
+# plain substitution — no shell evaluation, so sed is the honest tool.
+sed -e "s|\$HOME|$HOME|g" -e "s|RENDERED_USER|$(id -un)|g" "$TEMPLATE" > "$DEST"
+chmod 600 "$DEST"
+
+echo "$TAG: rendered $DEST from $TEMPLATE"
+echo "$TAG: verify sources exist, then create the admin password in-app on first run and file it in KeePass"
+# Config provisioning: filebrowser-provision:1 ends here

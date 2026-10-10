@@ -41,3 +41,13 @@ seamonkey      tar_gz     https://archive.seamonkey-project.org/releases/2.53.23
 # (./ + dist + versioned-dir) lands `spf` in ROOT and main:spf links it. Version-pinned; bump URL + sha256
 # together on upgrade (sha256 from superfile-vVERSION-checksums.txt).
 superfile      tar_gz     https://github.com/yorukot/superfile/releases/download/v1.6.0/superfile-linux-v1.6.0-amd64.tar.gz  ~/.local/superfile.app  .  main:spf  sha256=d45b0e95072629a6aa7983a84eedca9cd7a98861e67ef91be1415496e3dda309 strip=3  ""
+# filebrowser: FileBrowser Quantum (gtsteffaniak fork), Apache-2.0 — static Go binary, the same app
+# Honey (beelink) serves at :9090. Pinned to the upstream v1.5.6-stable release (Honey runs a custom
+# edb3681 build; Kikin runs the canonical upstream binary). NOTE: unlike herdr, upstream filebrowser
+# asset names use GOARCH, not uname -m — the {arch} token is NOT usable here. Upstream publishes
+# separate linux-amd64/linux-arm64/linux-armv6/linux-armv7 assets; this line pins the amd64 asset
+# (all fleet hosts serving it are x86_64; an aarch64 host would need its own line). sha256 is the
+# published asset digest for linux-amd64, verified locally 2026-10-09 (downloaded bytes match
+# febf1de...). curl_bin lands it directly in ~/.local/bin/filebrowser.
+# Version-pinned: bump URL + sha256 together on upgrade.
+filebrowser    curl_bin   https://github.com/gtsteffaniak/filebrowser/releases/download/v1.5.6-stable/linux-amd64-filebrowser  ""   ""   none   sha256=febf1ded3368eac1f13481f413db272c57678b70f09e74f5513d5e25e0bfb0e5   ""

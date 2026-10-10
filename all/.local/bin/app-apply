@@ -482,8 +482,32 @@ do
         # daemon (herdr, 2026-07-11); rename is atomic and always lands.
         tmp_dest="$dest.tmp.$$"
         if curl -fsSL "$resolved_url" -o "$tmp_dest"; then
-          chmod +x "$tmp_dest"
-          mv -f "$tmp_dest" "$dest"
+          # Checksum gate (same law as tar_gz): sha512= preferred, sha256= fallback.
+          # A curl_bin line without a digest installs UNVERIFIED — always pin one.
+          expected_sha="$(meta_value sha512 "$note" "$r1" || true)"
+          hash_alg="sha512"
+          if [ -z "$expected_sha" ]; then
+            expected_sha="$(meta_value sha256 "$note" "$r1" || true)"
+            hash_alg="sha256"
+          fi
+          if [ -n "$expected_sha" ]; then
+            if [ "$hash_alg" = "sha512" ]; then
+              actual_sha="$(sha512_file "$tmp_dest")"
+            else
+              actual_sha="$(sha256_file "$tmp_dest")"
+            fi
+            if [ "$actual_sha" != "$expected_sha" ]; then
+              echo "!! [$name] $hash_alg mismatch: expected $expected_sha, got $actual_sha" >&2
+              rm -f "$tmp_dest"
+              echo "!! [$name] install failed"
+            else
+              chmod +x "$tmp_dest"
+              mv -f "$tmp_dest" "$dest"
+            fi
+          else
+            chmod +x "$tmp_dest"
+            mv -f "$tmp_dest" "$dest"
+          fi
         else
           rm -f "$tmp_dest"
           echo "!! [$name] install failed"

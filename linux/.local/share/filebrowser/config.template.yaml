@@ -1,0 +1,75 @@
+# Verbatim copy of the EXAMPLE template above — keep the two in lockstep; the
+# EXAMPLE is canonical. filebrowser-provision renders this into the machine-local
+# $HOME/.config/filebrowser/config.yaml (placeholders expanded there, never here).
+server:
+  # Loopback only; Caddy TLS front (caddy-serve :9090) is the tailnet listener.
+  port: 9091
+  listen: 127.0.0.1
+  # Machine-local SQLite DB (users, settings). Provisioned beside the config;
+  # keep it out of any DotCortex-synced path.
+  database: $HOME/.local/share/filebrowser/database.db
+  # Absolute cache path: the default "tmp" is RELATIVE to the cwd — running the
+  # binary from a worktree litters it with cache dirs (observed 2026-10-09).
+  cacheDir: $HOME/.local/state/filebrowser/cache
+  sources:
+    # Hard drive root: read-only whole-filesystem view. The Admiral's
+    # 'hard drive' icon opens here. readOnly is a real per-source flag
+    # (v1.5.6 config.generated.yaml) — UI, WebDAV, and API writes are all
+    # disabled for this source.
+    - name: root
+      path: /
+      config:
+        defaultEnabled: true
+        readOnly: true
+        private: true   # no shares from this source
+        rules:
+          - folderPath: "/NEXUS"                    # KeePass vaults + repo mirrors
+          - folderPath: "/home/RENDERED_USER/.ssh"   # rendered at provisioning
+          - folderPath: "/root/.ssh"
+          - folderName: ".ssh"
+          - folderPath: "/etc/caddy"
+          - folderPath: "/etc/ssl/private"
+          - folderPath: "/etc/letsencrypt/live"
+          - fileName: ".env"
+          - fileEndsWith: ".env"
+          - folderName: "node_modules"
+          - fileEndsWith: ".kdbx"
+          - fileEndsWith: ".kdbx.key"
+    # Home: the writable working source.
+    - name: home
+      path: $HOME
+      config:
+        defaultEnabled: true
+        private: true   # no shares — tailnet-only by policy (sovereignty rule)
+        rules:
+          - folderPath: "NEXUS"
+          - folderPath: ".ssh"
+          - folderPath: ".config/filebrowser"
+          - folderPath: ".local/share/dotcortex/tests"
+          - fileName: ".env"
+          - fileEndsWith: ".env"
+          - fileEndsWith: ".kdbx"
+          - fileEndsWith: ".kdbx.key"
+    # Mounted fleet shares.
+    - name: mnt
+      path: $HOME/mnt
+      config:
+        defaultEnabled: true
+        private: true
+    # Pictures gallery.
+    - name: pictures
+      path: $HOME/Pictures
+      config:
+        defaultEnabled: true
+        private: true
+    # Sanctuary Cortex guest home (deep-linked from the Centre desktop icons).
+    - name: sanctuary-cortex
+      path: $HOME/.local/share/dotcortex/guests/sanctuary-cortex/home
+      config:
+        defaultEnabled: true
+        private: true
+auth:
+  methods:
+    password:
+      enabled: true
+      signup: false

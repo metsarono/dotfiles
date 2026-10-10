@@ -3363,10 +3363,11 @@ def render_text(results: list[dict[str, Any]]) -> None:
             secondary = usage.get("secondary") if isinstance(usage.get("secondary"), dict) else {}
             vibe_line = format_compact_quota_line("Vibe", primary)
             api_line = format_compact_quota_line("API", secondary)
-            if vibe_line:
-                print(vibe_line)
+            # API above Vibe (Admiral, 2026-10-09).
             if api_line:
                 print(api_line)
+            if vibe_line:
+                print(vibe_line)
             # Monthly cycle pace, same renderer as OpenCode Go's "30d pace".
             pace = format_window_left_line(
                 "30d pace",
