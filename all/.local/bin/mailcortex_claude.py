@@ -646,10 +646,9 @@ def launch(argv):
         def _mailcortex_classify_screen(self):
             visible = self.screen_classifier._visible_text()
             self.screen_state = self.screen_classifier._classify(visible)
-            prompts = list(self.screen_classifier.PROMPT_RE.finditer(visible))
-            # The base classifier permits a draft. Admission requires an EMPTY
-            # final prompt and refuses blockers even alongside a prompt glyph.
-            if (not prompts or visible[prompts[-1].start():].strip() != "❯"
+            # The shared attributed model distinguishes display hints from
+            # drafts. Local-input tracking remains the first admission veto.
+            if (self.screen_classifier.prompt_input_state() != "empty"
                     or any(marker in visible.lower() for marker in self.screen_classifier.STRONG_BLOCKERS)
                     or (self.completed_turn_epoch == 0 and self.last_normal_stop is None
                         and warm.DevelopmentChannelPromptMatcher.TITLE.lower() in visible.lower())):
@@ -685,6 +684,10 @@ def launch(argv):
             with self.mailcortex_admission_lock:
                 result = super()._read_master()
                 if result:
+                    previous = self.screen_state
+                    self._mailcortex_classify_screen()
+                    if self.screen_state != previous:
+                        self._write_state()
                     self._mailcortex_finish_startup()
                 return result
 
@@ -731,6 +734,7 @@ def launch(argv):
         def _mailcortex_control(self, message):
             if message.get("command") in {"mailcortex-status", "mailcortex-admit"}:
                 self._mailcortex_finish_startup()
+                self._mailcortex_classify_screen()
                 return owner_control(self, message, types.SimpleNamespace(now=warm.now, write_all=write_wake))
             return super()._handle_control(message)
 

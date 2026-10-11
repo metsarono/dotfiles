@@ -184,6 +184,7 @@ writing to the PTY.
 
 from __future__ import annotations
 
+import codecs
 import ctypes
 import datetime
 import errno
@@ -208,6 +209,7 @@ import threading
 import time
 import tty
 import uuid
+import unicodedata
 
 
 CHANNEL_RE = re.compile(r"^claude-[0-9a-f]{32}$")
@@ -867,6 +869,207 @@ class HerdrReporter:
 HERDR_SCREEN_BYTES = 128 * 1024
 
 
+class TerminalScreenModel:
+    """Bounded attributed cells for the PTY owner's prompt-box checks.
+
+    This mirrors cursor/erase operations used by Ink, including redraws that
+    omit the prompt glyph. It never changes the proxied bytes. Unsupported
+    mutations fail closed until a full screen clear; incomplete UTF-8/escapes
+    cannot establish an empty prompt.
+    """
+
+    MAX_ROWS = 256
+    MAX_COLUMNS = 1024
+    ESCAPE_RE = re.compile(
+        r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|"
+        r"[P^_].*?\x1b\\|[()][0-2A-Z]|[78]|[@-OQ-Za-z\\])", re.DOTALL
+    )
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.cells = {}
+        self.row = self.column = 0
+        self.saved_cursor = (0, 0)
+        self.faint = self.bold = self.inverse = False
+        self.foreground = None
+        self.pending = ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.uncertain = False
+
+    def _sgr(self, body):
+        try:
+            values = [int(value or "0") for value in body.split(";")]
+        except ValueError:
+            self.uncertain = True
+            return
+        index = 0
+        while index < len(values):
+            code = values[index]
+            index += 1
+            if code == 0:
+                self.faint = self.bold = self.inverse = False
+                self.foreground = None
+            elif code == 1:
+                self.bold = True
+            elif code == 2:
+                self.faint = True
+            elif code == 22:
+                self.faint = self.bold = False
+            elif code in {7, 27}:
+                self.inverse = code == 7
+            elif code == 39:
+                self.foreground = None
+            elif 30 <= code <= 37 or 90 <= code <= 97:
+                self.foreground = ("ansi", code)
+            elif code in {38, 48, 58}:
+                # Consume the WHOLE colour payload: RGB/index values of 2
+                # are colours, never a faint-intensity toggle.
+                mode = values[index] if index < len(values) else None
+                size = 1 if mode == 5 else 3 if mode == 2 else 0
+                if not size or index + size >= len(values):
+                    self.uncertain = True
+                    return
+                components = values[index + 1:index + size + 1]
+                if any(not 0 <= value <= 255 for value in components):
+                    self.uncertain = True
+                    return
+                if code == 38:
+                    self.foreground = ("indexed", *components) if mode == 5 else ("rgb", *components)
+                index += size + 1
+
+    def _erase(self, predicate):
+        self.cells = {position: cell for position, cell in self.cells.items()
+                      if not predicate(*position)}
+
+    def _escape(self, sequence):
+        if not sequence.startswith("\x1b["):
+            if sequence == "\x1b7":
+                self.saved_cursor = (self.row, self.column)
+            elif sequence == "\x1b8":
+                self.row, self.column = self.saved_cursor
+            elif not sequence.startswith(("\x1b]", "\x1b(", "\x1b)")):
+                # OSC metadata and charset selection do not paint cells.
+                # Unknown non-CSI mutations (e.g. reverse index) must veto.
+                self.uncertain = True
+            return
+        body, final = sequence[2:-1], sequence[-1]
+        if final == "m":
+            # Private keyboard negotiation (>4m) is not SGR.
+            if not body.startswith((">", "?")):
+                self._sgr(body)
+            return
+        if body.startswith(("?", ">", "<", "=")) or final in {"h", "l", "n", "c", "q", "t", "r"}:
+            return
+        try:
+            values = [int(value or "0") for value in body.split(";")]
+        except ValueError:
+            self.uncertain = True
+            return
+        amount = values[0] or 1
+        if final in {"H", "f"}:
+            self.row = amount - 1
+            self.column = (values[1] or 1) - 1 if len(values) > 1 else 0
+        elif final in {"G", "`"}:
+            self.column = amount - 1
+        elif final == "d":
+            self.row = amount - 1
+        elif final in {"A", "B", "C", "D", "E", "F"}:
+            if final in {"A", "F"}: self.row -= amount
+            if final in {"B", "E"}: self.row += amount
+            if final == "C": self.column += amount
+            if final == "D": self.column -= amount
+            if final in {"E", "F"}: self.column = 0
+        elif final == "K":
+            mode = values[0]
+            self._erase(lambda row, column: row == self.row and (
+                mode == 2 or mode == 0 and column >= self.column
+                or mode == 1 and column <= self.column))
+        elif final == "J":
+            mode = values[0]
+            if mode in {2, 3}:
+                self.cells.clear()
+                self.uncertain = False
+            else:
+                self._erase(lambda row, column: (
+                    mode == 0 and (row, column) >= (self.row, self.column)
+                    or mode == 1 and (row, column) <= (self.row, self.column)))
+        elif final == "s":
+            self.saved_cursor = (self.row, self.column)
+        elif final == "u":
+            self.row, self.column = self.saved_cursor
+        else:
+            self.uncertain = True
+        self.row = max(0, self.row)
+        self.column = max(0, self.column)
+        if self.row >= self.MAX_ROWS or self.column >= self.MAX_COLUMNS:
+            self.uncertain = True
+            self.row = min(self.row, self.MAX_ROWS - 1)
+            self.column = min(self.column, self.MAX_COLUMNS - 1)
+
+    def feed(self, data):
+        text = self.pending + self.decoder.decode(data)
+        self.pending = ""
+        index = 0
+        while index < len(text):
+            character = text[index]
+            if character == "\x1b":
+                match = self.ESCAPE_RE.match(text, index)
+                if match is None:
+                    self.pending = text[index:]
+                    if len(self.pending) > 2048:
+                        self.pending = ""
+                        self.uncertain = True
+                    break
+                self._escape(match.group())
+                index = match.end()
+                continue
+            index += 1
+            if character == "\r":
+                self.column = 0
+            elif character == "\n":
+                self.row += 1
+                if self.row == self.MAX_ROWS:
+                    self.cells = {(row - 1, column): cell
+                                  for (row, column), cell in self.cells.items() if row > 0}
+                    self.row -= 1
+            elif character == "\t":
+                self.column = min(self.MAX_COLUMNS - 1, (self.column // 8 + 1) * 8)
+            elif character == "\b":
+                self.column = max(0, self.column - 1)
+            elif ord(character) >= 0x20:
+                width = 0 if unicodedata.combining(character) else (
+                    2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1)
+                if width == 0:
+                    previous = self.cells.get((self.row, self.column - 1))
+                    if previous:
+                        self.cells[self.row, self.column - 1] = (previous[0] + character, *previous[1:])
+                    continue
+                self.cells[self.row, self.column] = (
+                    character, self.faint, self.bold, self.inverse, self.foreground)
+                for offset in range(1, width):
+                    self.cells[self.row, self.column + offset] = ("", False, False, False, None)
+                self.column += width
+                if self.column >= self.MAX_COLUMNS:
+                    self.uncertain = True
+                    self.column = self.MAX_COLUMNS - 1
+
+    def lines(self):
+        rows = {}
+        for (row, column), cell in self.cells.items():
+            rows.setdefault(row, {})[column] = cell
+        blank = (" ", False, False, False, None)
+        return [(row, [columns.get(column, blank) for column in range(max(columns) + 1)])
+                for row, columns in sorted(rows.items())]
+
+    def visible_text(self):
+        return "\n".join("".join(cell[0] for cell in cells) for _row, cells in self.lines())
+
+    def complete(self):
+        return not self.uncertain and not self.pending and not self.decoder.getstate()[0]
+
+
 class ClaudeScreenClassifier:
     """Classify visible Claude PTY output without consuming or rewriting it."""
 
@@ -877,7 +1080,7 @@ class ClaudeScreenClassifier:
         r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])"
     )
     WORKING_RE = re.compile(
-        r"^[✻✳✽✶✷]\s+Working(?:…|\.\.\.)?(?:\s|$)", re.MULTILINE
+        r"^[ \t]*[✻✳✽✶✷]\s+Working(?:…|\.\.\.)?(?:\s|$)", re.MULTILINE
     )
     PROMPT_RE = re.compile(r"^\s*❯(?:\s.*)?$", re.MULTILINE)
     STRONG_BLOCKERS = (
@@ -890,24 +1093,72 @@ class ClaudeScreenClassifier:
         "allow command?",
     )
 
-    def __init__(self) -> None:
+    # Attribute values are a renderer profile, never suggestion wording.
+    GHOST_FOREGROUNDS = frozenset({("ansi", 90), ("indexed", 8), ("rgb", 153, 153, 153)})
+
+    def __init__(self, *, prompt_glyph="❯", ghost_foregrounds=None, prompt_border="─") -> None:
         self.raw = bytearray()
         self.osc_title = ""
         self.state: str | None = None
+        self.screen = TerminalScreenModel()
+        self.prompt_glyph = prompt_glyph
+        self.prompt_border = prompt_border
+        self.ghost_foregrounds = (self.GHOST_FOREGROUNDS if ghost_foregrounds is None
+                                  else frozenset(ghost_foregrounds))
+        self.PROMPT_RE = re.compile(r"^\s*" + re.escape(prompt_glyph) + r"(?:\s.*)?$", re.MULTILINE)
 
     def reset(self) -> None:
         """Forget the previous screen when Claude binds a new session."""
         self.raw.clear()
         self.osc_title = ""
         self.state = None
+        self.screen.reset()
 
     def _visible_text(self) -> str:
-        text = self.ANSI_RE.sub("", bytes(self.raw).decode("utf-8", "replace"))
-        return "".join(
-            character
-            for character in text
-            if character in "\n\r\t" or ord(character) >= 0x20
-        )
+        return self.screen.visible_text()
+
+    def prompt_input_state(self) -> str:
+        """Return empty/typed/unknown for the final rendered prompt box.
+
+        Faint or profile-grey text is a display hint. Normal-intensity cells
+        always constitute input, regardless of their words. A software cursor
+        may invert the first hint cell without faint: recognize that captured
+        shape only at the actual cursor, with an otherwise wholly muted hint.
+        The owner must still veto observed local input before using this hint.
+        """
+        if not self.screen.complete():
+            return "unknown"
+        lines = self.screen.lines()
+        prompts = [index for index, (_row, cells) in enumerate(lines)
+                   if self.PROMPT_RE.fullmatch("".join(cell[0] for cell in cells))]
+        if not prompts:
+            return "unknown"
+        at = prompts[-1]
+        row, cells = lines[at]
+        glyph_at = next(index for index, cell in enumerate(cells) if cell[0] == self.prompt_glyph)
+        content = [(row, column, cell) for column, cell in enumerate(cells)
+                   if column > glyph_at and cell[0].strip()]
+        for next_row, next_cells in lines[at + 1:]:
+            text = "".join(cell[0] for cell in next_cells).strip()
+            if len(text) >= 3 and set(text) == {self.prompt_border}:
+                # Only the painted input box ends the prompt; arbitrary dim
+                # transcript/footer text cannot excuse a normal draft cell.
+                break
+            content.extend((next_row, column, cell) for column, cell in enumerate(next_cells)
+                           if cell[0].strip())
+        if not content:
+            return "empty"
+        def muted(cell):
+            _text, faint, bold, _inverse, foreground = cell
+            return not bold and (faint or foreground in self.ghost_foregrounds)
+        if all(muted(cell) for _row, _column, cell in content):
+            return "empty"
+        first_row, first_column, first = content[0]
+        if (len(content) > 1 and first[3] and not first[2]
+                and (self.screen.row, self.screen.column) == (first_row, first_column)
+                and all(muted(cell) for _row, _column, cell in content[1:])):
+            return "empty"
+        return "typed"
 
     def _classify(self, visible: str) -> str:
         recent = visible[-HERDR_SCREEN_BYTES:]
@@ -944,6 +1195,7 @@ class ClaudeScreenClassifier:
         """Consume a bounded copy for classification and return state changes."""
         if not data:
             return None
+        self.screen.feed(data)
         self.raw.extend(data)
         if len(self.raw) > HERDR_SCREEN_BYTES:
             del self.raw[:-HERDR_SCREEN_BYTES]

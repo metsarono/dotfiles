@@ -18,7 +18,9 @@ terminal bytes, permission screens, any local input since the last idle boundary
 transcript uncertainty, compaction and recovery refuse. The owner serializes admission with input, screen and lifecycle handling using
 one lock. A pidfd guardian pauses its child process tree and acknowledges all
 stopped threads before draining and reclassifying the screen. Any activity during
-acquisition refuses the wake. The final gate requires an empty prompt and no
+acquisition refuses the wake. Faint/profile-grey placeholder and suggestion
+cells count as empty; any normal draft cell or observed local input refuses.
+The final gate requires an empty prompt and no
 permission marker; it claims the turn before one bounded ASCII write plus Enter.
 The guardian resumes the tree on release or supervisor crash. It never
 uses =tmux send-keys=. This seam needs an approved relaunch; an older supervisor
@@ -742,10 +744,9 @@ def launch(argv):
         def _mailcortex_classify_screen(self):
             visible = self.screen_classifier._visible_text()
             self.screen_state = self.screen_classifier._classify(visible)
-            prompts = list(self.screen_classifier.PROMPT_RE.finditer(visible))
-            # The base classifier permits a draft. Admission requires an EMPTY
-            # final prompt and refuses blockers even alongside a prompt glyph.
-            if (not prompts or visible[prompts[-1].start():].strip() != "❯"
+            # The shared attributed model distinguishes display hints from
+            # drafts. Local-input tracking remains the first admission veto.
+            if (self.screen_classifier.prompt_input_state() != "empty"
                     or any(marker in visible.lower() for marker in self.screen_classifier.STRONG_BLOCKERS)
                     or (self.completed_turn_epoch == 0 and self.last_normal_stop is None
                         and warm.DevelopmentChannelPromptMatcher.TITLE.lower() in visible.lower())):
@@ -781,6 +782,10 @@ def launch(argv):
             with self.mailcortex_admission_lock:
                 result = super()._read_master()
                 if result:
+                    previous = self.screen_state
+                    self._mailcortex_classify_screen()
+                    if self.screen_state != previous:
+                        self._write_state()
                     self._mailcortex_finish_startup()
                 return result
 
@@ -827,6 +832,7 @@ def launch(argv):
         def _mailcortex_control(self, message):
             if message.get("command") in {"mailcortex-status", "mailcortex-admit"}:
                 self._mailcortex_finish_startup()
+                self._mailcortex_classify_screen()
                 return owner_control(self, message, types.SimpleNamespace(now=warm.now, write_all=write_wake))
             return super()._handle_control(message)
 
@@ -896,6 +902,112 @@ def load(name, path):
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+# Claude Code 2.1.296, dark theme, 100 columns, real isolated PTY capture.
+# A local API fixture supplied public text; native cursor mode was enabled.
+# Preserve the real SGR, column positioning, footer and incremental redraws.
+CAPTURED_PLACEHOLDER = '❯\xa0\x1b[2mTry\x1b[7G"refactor\x1b[17G<filepath>"\x1b[22m\r\r\n\x1b[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────\x1b[39m\r\r\n\x1b[3G\x1b[38;2;153;153;153m⏸\x1b[5Gmanual\x1b[12Gmode\x1b[17Gon\x1b[20G·\x1b[22G?\x1b[24Gfor\x1b[28Gshortcuts\x1b[38G·\x1b[40G←\x1b[42Gfor\x1b[46Gagents\x1b[81G◐\x1b[83Gmedium\x1b[90G·\x1b[92G/effort\x1b[39m\r\r\n\x1b[2C\x1b[3A\x1b[?25h\x1b[>0q\x1b[c'.encode("utf-8")
+CAPTURED_SUGGESTION = '❯\xa0\r\r\n\x1b[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────\x1b[39m\r\r\n\x1b[3G\x1b[38;2;153;153;153m⏸\x1b[5Gmanual\x1b[12Gmode\x1b[17Gon\x1b[20G·\x1b[22G?\x1b[24Gfor\x1b[28Gshortcuts\x1b[38G·\x1b[40G←\x1b[42Gfor\x1b[46Gagents\x1b[81G◐\x1b[83Gmedium\x1b[90G·\x1b[92G/effort\x1b[39m\r\r\n\x1b[2C\x1b[3A\x1b[?25h\x1b[>0q\x1b[c\x1b[?25l\x1b[2D\x1b[3B\r\x1b[2C\x1b[3A\x1b[2mread the fixture\x1b[22m\r\r\n\r\n\r\n\x1b[2C\x1b[3A\x1b[?25h'.encode("utf-8")
+CAPTURED_TYPED = '❯\xa0\r\r\n\x1b[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────\x1b[39m\r\r\n\x1b[3G\x1b[38;2;153;153;153m⏸\x1b[5Gmanual\x1b[12Gmode\x1b[17Gon\x1b[20G·\x1b[22G?\x1b[24Gfor\x1b[28Gshortcuts\x1b[38G·\x1b[40G←\x1b[42Gfor\x1b[46Gagents\x1b[81G◐\x1b[83Gmedium\x1b[90G·\x1b[92G/effort\x1b[39m\r\r\n\x1b[2C\x1b[3A\x1b[?25h\x1b[>0q\x1b[c\x1b[?25l\x1b[2D\x1b[3B\r\x1b[2C\x1b[3A\x1b[2mread the fixture\x1b[22m\r\r\n\r\n\r\n\x1b[2C\x1b[3A\x1b[?25h\x1b(B\x0f\x1b[?2004h\x1b[?25l\x1b[2D\x1b[3B\r\x1b[2C\x1b[3Aread the fixture\r\x1b[18C\x1b[2B\x1b[K\r\r\n\x1b[18C\x1b[3A\x1b[?25h'.encode("utf-8")
+
+
+CAPTURED_CURSOR_PLACEHOLDER = '❯\xa0\x1b[7mT\x1b[27m\x1b[2mry\x1b[7G"how\x1b[12Gdo\x1b[15GI\x1b[17Glog\x1b[21Gan\x1b[24Gerror?"\x1b[22m\r\r\n\x1b[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────\x1b[39m\r\r\n\x1b[3G\x1b[38;2;153;153;153m⏸\x1b[5Gmanual\x1b[12Gmode\x1b[17Gon\x1b[20G·\x1b[22G?\x1b[24Gfor\x1b[28Gshortcuts\x1b[38G·\x1b[40G←\x1b[42Gfor\x1b[46Gagents\x1b[81G◐\x1b[83Gmedium\x1b[90G·\x1b[92G/effort\x1b[39m\r\r\n\x1b[2C\x1b[3A\x1b[>0q\x1b[c'.encode("utf-8")
+CAPTURED_CURSOR_SUGGESTION_DELTA = '\x1b[2D\x1b[3B\r\x1b[2C\x1b[3A\x1b[7mr\x1b[27m\x1b[2mead the fixture\x1b[22m\r\r\n\r\n\r\n\x1b[2C\x1b[3A'.encode("utf-8")
+
+
+class PromptScreenTests(unittest.TestCase):
+    def classifier(self, screen):
+        warm = load("fixture_screen_owner", BIN / "claude-warm")
+        classifier = warm.ClaudeScreenClassifier()
+        classifier.feed(screen)
+        return classifier
+
+    def test_captured_suggestion_only_is_empty(self):
+        c = self.classifier(CAPTURED_SUGGESTION)
+        self.assertEqual(c.state, "idle")
+        self.assertEqual(c.prompt_input_state(), "empty")
+
+    def test_captured_fresh_placeholder_is_empty(self):
+        c = self.classifier(CAPTURED_PLACEHOLDER)
+        self.assertEqual(c.state, "idle")
+        self.assertEqual(c.prompt_input_state(), "empty")
+
+    def test_captured_software_cursor_placeholder_and_suggestion_are_empty(self):
+        c = self.classifier(CAPTURED_CURSOR_PLACEHOLDER)
+        self.assertEqual(c.prompt_input_state(), "empty")
+        c = self.classifier(CAPTURED_SUGGESTION)
+        c.feed(CAPTURED_CURSOR_SUGGESTION_DELTA)
+        self.assertEqual(c.prompt_input_state(), "empty")
+
+    def test_profile_can_specialize_another_prompt_renderer(self):
+        warm = load("fixture_profile_owner", BIN / "claude-warm")
+        c = warm.ClaudeScreenClassifier(prompt_glyph=">", ghost_foregrounds={("rgb", 120, 120, 120)})
+        c.feed(b"> \x1b[38;2;120;120;120mpublic hint\x1b[39m")
+        self.assertEqual(c.prompt_input_state(), "empty")
+        c.feed(b"\r> \x1b[38;2;153;153;153mpublic hint\x1b[39m")
+        self.assertEqual(c.prompt_input_state(), "typed")
+
+    def test_foreground_reset_bold_and_permission_markers_refuse(self):
+        for text in ("❯ \x1b[90mhint\x1b[39m draft", "❯ \x1b[1;90mdraft",
+                     "❯ \x1b[2mhint\x1b[22m\nEnter to confirm"):
+            with self.subTest(text=text):
+                c = self.classifier(text.encode())
+                self.assertEqual(c.prompt_input_state(), "typed")
+        self.assertEqual(c.state, "blocked")
+
+    def test_captured_normal_typed_suggestion_string_refuses(self):
+        self.assertEqual(self.classifier(CAPTURED_TYPED).prompt_input_state(), "typed")
+
+    def test_typed_and_mixed_input_refuse(self):
+        for screen in ("❯ fixture draft", "❯ read the fixture",
+                       "❯ read\x1b[2m the fixture\x1b[22m",
+                       "❯ \x1b[2mread\x1b[22m the fixture",
+                       "❯ \x1b[2mghost\x1b[22m\n  normal continuation"):
+            with self.subTest(screen=screen):
+                self.assertEqual(self.classifier(screen.encode()).prompt_input_state(), "typed")
+
+    def test_sgr_resets_and_extended_colours_do_not_leak_faint(self):
+        for sgr in ("0", "22", "38;2;2;2;2", "48;2;2;2;2"):
+            with self.subTest(sgr=sgr):
+                prefix = "\x1b[2m" if sgr in {"0", "22"} else ""
+                screen = f"❯ {prefix}\x1b[{sgr}mread the fixture"
+                self.assertEqual(self.classifier(screen.encode()).prompt_input_state(), "typed")
+
+    def test_profile_foregrounds_and_chunked_capture(self):
+        for sgr in ("2", "90", "38;5;8", "38;2;153;153;153"):
+            with self.subTest(sgr=sgr):
+                c = self.classifier(f"❯ \x1b[{sgr}mpublic suggestion\x1b[0m".encode())
+                self.assertEqual(c.prompt_input_state(), "empty")
+        c = self.classifier(b"")
+        for byte in CAPTURED_SUGGESTION:
+            c.feed(bytes([byte]))
+        self.assertEqual(c.state, "idle")
+        self.assertEqual(c.prompt_input_state(), "empty")
+
+    def test_erase_and_redraw_replace_attributes(self):
+        c = self.classifier("❯ \x1b[2mghost\x1b[22m".encode())
+        c.feed(b"\r\x1b[2Ctyped\x1b[K")
+        self.assertEqual(c.prompt_input_state(), "typed")
+        c.feed("\r\x1b[2K❯ \x1b[2mghost\x1b[22m".encode())
+        self.assertEqual(c.prompt_input_state(), "empty")
+        c.reset()
+        self.assertEqual(c.prompt_input_state(), "unknown")
+
+    def test_unsupported_mutations_refuse_until_full_clear(self):
+        for escape in (b"\x1bM", b"\x1bD", b"\x1bc", b"\x1b[1P"):
+            with self.subTest(escape=escape):
+                c = self.classifier("❯ \x1b[2mghost\x1b[22m".encode())
+                c.feed(escape)
+                self.assertEqual(c.prompt_input_state(), "unknown")
+                c.feed("\x1b[2J\x1b[H❯ \x1b[2mghost\x1b[22m".encode())
+                self.assertEqual(c.prompt_input_state(), "empty")
+
+    def test_partial_escape_refuses_until_completed(self):
+        c = self.classifier("❯ \x1b[2".encode())
+        self.assertEqual(c.prompt_input_state(), "unknown")
+        c.feed(b"mghost\x1b[22m")
+        self.assertEqual(c.prompt_input_state(), "empty")
 
 
 class ClaudeWakeTests(unittest.TestCase):
@@ -1420,7 +1532,7 @@ class ClaudeWakeTests(unittest.TestCase):
         fake = self.base / "fake-claude"
         fake.write_text("#!/usr/bin/env python3\nimport os,sys,signal\n"
                         "signal.signal(signal.SIGUSR1, lambda *a: print('Do you want to proceed?', flush=True))\n"
-                        "signal.signal(signal.SIGUSR2, lambda *a: print(" + repr(startup_screen) + ", flush=True))\n"
+                        "signal.signal(signal.SIGUSR2, lambda *a: print(" + repr(startup_screen) + ", end='', flush=True))\n"
                         "print('\\u276f ', flush=True)\n"
                         "for line in sys.stdin: print('RECEIVED:' + line.strip(), flush=True)\n")
         fake.chmod(0o755)
@@ -1504,6 +1616,36 @@ class ClaudeWakeTests(unittest.TestCase):
             if status()['status'] == expected_status: break
         self.assertEqual(status()['status'], expected_status, output.decode(errors='replace'))
         return control, request, event, master, output, drain, path
+
+    def test_real_pty_captured_suggestion_admits_once(self):
+        control, request, event, master, output, drain, path = self.start_pty(
+            startup_screen=CAPTURED_SUGGESTION.decode())
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'accepted')
+        drain(0.2)
+        self.assertIn(b'RECEIVED:short wake', output)
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+
+    def test_real_pty_captured_placeholder_fresh_admits(self):
+        control, request, event, master, output, drain, path = self.start_pty(
+            fresh=True, startup_screen=CAPTURED_PLACEHOLDER.decode())
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'accepted')
+        drain(0.2)
+        self.assertIn(b'RECEIVED:short wake', output)
+        self.assertEqual(json.loads(path.read_text())['completed_turn_epoch'], 0)
+
+    def test_real_pty_captured_normal_suggestion_string_refuses(self):
+        control, request, event, master, output, drain, path = self.start_pty(
+            startup_screen=CAPTURED_TYPED.decode(), expected_status='busy')
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+        self.assertNotIn(b'RECEIVED:short wake', output)
+
+    def test_real_pty_suggestion_never_overrides_local_input(self):
+        control, request, event, master, output, drain, path = self.start_pty(
+            startup_screen=(CAPTURED_SUGGESTION + CAPTURED_CURSOR_SUGGESTION_DELTA).decode())
+        os.write(master, b'x')
+        drain(0.2)
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+        self.assertNotIn(b'RECEIVED:short wake', output)
 
     def test_real_pty_fresh_idle_seat_admits_without_a_stop(self):
         control, request, event, master, output, drain, path = self.start_pty(fresh=True)
