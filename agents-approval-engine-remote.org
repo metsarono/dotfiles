@@ -767,7 +767,11 @@ def _policy_roots(manifest):
     config = _coordinator_config(manifest)
     if config is not None and _inversion_enabled(manifest):
         roots += tuple(config['repo_roots'] + config['worktree_roots'] + config['scratch_roots'])
-    return tuple(os.path.realpath(root) for root in roots if isinstance(root, str) and root.startswith('/') and root != '/')
+    # Keep each root's lexical spelling as well as its realpath: a symlinked
+    # root (e.g. ~/HelmCortex -> an NFS mount) must still match the paths
+    # agents actually type, which the lexical home-path floor compares.
+    kept = [root for root in roots if isinstance(root, str) and root.startswith('/') and root != '/']
+    return tuple(dict.fromkeys([posixpath.normpath(root) for root in kept] + [os.path.realpath(root) for root in kept]))
 
 
 def _inversion_scope(event, manifest):
