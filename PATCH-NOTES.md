@@ -21,9 +21,11 @@ durable session origin, resolves its authorized delivery adapter, and calls
 `all/.bots/patches/hermes-mailcortex-idle-prompt.patch` exposes a narrow,
 authenticated conditional endpoint around that platform path.  It accepts only
 an existing Telegram DM key, refuses any observed work or pending adapter input,
-and returns `accepted` only after the adapter's real session guard accepts the
-event.  Therefore the injected turn and its adapter-delivered reply occupy the
-Telegram lane the Admiral watches.
+and returns `accepted` only after the target session's turn, lease, admission,
+and pending-input state is clear and the adapter's real session guard accepts
+the event.  Permanent gateway infrastructure tasks and unrelated sessions do
+not block it.  Therefore the injected turn and its adapter-delivered reply
+occupy the Telegram lane the Admiral watches.
 
 ## DeepSeek finding
 

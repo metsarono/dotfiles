@@ -29,6 +29,7 @@ import importlib.machinery
 import importlib.util
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 LOADER = importlib.machinery.SourceFileLoader("mailcortex", str(HERE / "mailcortex"))
 SPEC = importlib.util.spec_from_loader("mailcortex", LOADER)
 MAILCORTEX = importlib.util.module_from_spec(SPEC)
@@ -37,7 +38,7 @@ SPEC.loader.exec_module(MAILCORTEX)
 
 SAFE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 PANE = re.compile(r"w[0-9A-Za-z]+:p[0-9A-Za-z]+\Z")
-TRANSPORTS = {"herdr", "hermes", "nanobot", "ductor", "deepseek"}
+TRANSPORTS = {"herdr", "hermes", "nanobot", "ductor", "deepseek", "claude-ssh"}
 
 
 class WatcherError(Exception):
@@ -52,6 +53,15 @@ class PromptNotAdmittedError(WatcherError):
     def __init__(self, reason: str):
         self.reason = reason if reason == "busy" else "transport_unavailable"
         super().__init__(f"{self.transport} prompt not admitted: {self.reason}")
+
+
+def claude_wake():
+    # Existing transports still load when the optional Claude seam is absent.
+    try:
+        import mailcortex_claude
+        return mailcortex_claude
+    except ImportError as error:
+        raise WatcherError("Claude wake seam is not installed") from error
 
 
 def load_registry(path: Path, host: str) -> dict:
@@ -80,6 +90,7 @@ def load_registry(path: Path, host: str) -> dict:
             "nanobot": {"nanobot_url", "nanobot_api_token_file", "nanobot_target"},
             "ductor": {"ductor_config"},
             "deepseek": {"deepseek_url", "deepseek_cookie_file", "deepseek_session"},
+            "claude-ssh": {"ssh_target", "remote_user", "claude_target", "coalesce_seconds"},
         }[transport]
         if set(record) != required:
             raise WatcherError("seat registry fields are not exact")
@@ -95,6 +106,11 @@ def load_registry(path: Path, host: str) -> dict:
                 raise WatcherError("seat registry ownership or transport mismatch")
             if not all(isinstance(record[key], str) and record[key] and len(record[key]) <= 128 for key in ("herdr_session", "herdr_target")):
                 raise WatcherError("invalid Herdr target")
+        elif transport == "claude-ssh":
+            try:
+                claude_wake().validate_record(record)
+            except (ValueError, TypeError, KeyError) as error:
+                raise WatcherError("invalid Claude SSH target") from error
         elif transport == "hermes":
             if record["harness"] != "hermes":
                 raise WatcherError("seat registry ownership or transport mismatch")
@@ -169,6 +185,9 @@ def wake_prompt(record: dict, path: Path, mailback_error: str | None = None) -> 
         f"Sender: {message.get('From', '')}\n"
         f"Message-ID: {message.get('Message-ID', '')}\n"
     )
+    if record["transport"] == "claude-ssh":
+        return (f"MailCortex: new mail is waiting in {record['mailbox']} on {record['host']}. "
+                "Open /inbox, read all pending mail, and handle it with your harness tools.")
     if record["transport"] == "herdr":
         return preamble + "\nOpen the mailbox now with: /inbox"
     if record["transport"] in {"hermes", "nanobot"}:
@@ -782,6 +801,9 @@ class TransportAdapters:
         }
 
     def for_record(self, record: dict) -> object:
+        if record["transport"] == "claude-ssh":
+            return claude_wake().ClaudeSSHAdapter(
+                error_type=WatcherError, refusal_type=PromptNotAdmittedError)
         try:
             return self.adapters[record["transport"]]
         except KeyError as error:
@@ -882,6 +904,9 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
         if any(item.is_symlink() for item in components) or not all(item.is_dir() for item in components) or not (mailbox / "new").is_dir():
             raise WatcherError("canonical mailbox is absent or unsafe")
         transport_adapter = record_adapter(adapter, record)
+        if record["transport"] == "claude-ssh":
+            count += claude_wake().scan_batch(globals(), seat, record, transport_adapter, now)
+            continue
         pending_reply = (reconcile_replies(seat, record, transport_adapter, now)
                          if record["transport"] == "deepseek" else False)
         last_injected = latest_injection(seat)
@@ -976,7 +1001,7 @@ def scan_once(registry: dict, adapter: object, now: float | None = None) -> int:
         try:
             count += scan_seats({"seats": {seat: record}}, adapter, now=now)
         except Exception as error:
-            if record.get("transport") not in {"deepseek", "ductor", "hermes", "nanobot"}:
+            if record.get("transport") not in {"deepseek", "ductor", "hermes", "nanobot", "claude-ssh"}:
                 raise
             report_error(seat, "scan", error)
     return count

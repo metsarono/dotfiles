@@ -528,6 +528,14 @@ Telegram transport exactly as it does for an owner-originated turn.  The
 watcher requires a `telegram-...` target and mints an unguessable ID in that
 namespace; it does not call the Bot API.
 
+The remaining live defect was a cold-start ordering race.  Restoring a session
+called `adopt()` before reinstalling its durable chat binding.  Adoption can
+synchronously replay the queued MailCortex `user/message`, so the Bridge
+dropped that event as unbound.  The later assistant event arrived after the
+session became live: pvox spoke it, but the feed had no pending Telegram
+inbound and sent nothing.  The patch now binds the validated persisted session
+before adoption, preserving the wake event without changing pvox behavior.
+
 ## Ductor finding
 
 The v1 `ductor_bot.api.idle_prompt::_run_turn` returned final text only on the
@@ -596,8 +604,21 @@ routes to Nano's existing health listener.
 ## Review and activation order
 
 1. Preflight the complete dsh patch series against a pristine copy of its pinned
-   revision, build it, and run its full suite.  With explicit approval, apply
-   the series and restart only dsh; require its readiness check to pass.
+   revision, build it, and run its full suite.  On the approved DotCortex
+   checkout, the coordinator applies it with:
+
+   ```bash
+   cd ~/DotCortex
+   tangle-one package-bun.org
+   BUN_BUILD_ONLY=dsh-telegram bun-apply
+   cd ~/HelmCortex/NEXUS/git/dsh-telegram
+   npm run check
+   ```
+
+   Do not pass `--help` to `bun-apply`.  After the check passes, restart only
+   Orca through the verified local service owner, and only after the Admiral's
+   explicit approval.  Require the existing readiness check to pass before
+   releasing queued MailCortex work.
 2. Run `ductor-seam-apply --site YOUR_DISPOSABLE_SITE` against a pristine Ductor
    0.20.1 copy, then repeat with `--check`.  The complete series, including
    `idle_prompt_telegram.patch`, must apply with zero fuzz and compile.  With
@@ -630,6 +651,16 @@ the persisted receipt prevents automatic resend.
   Telegram-delivery assertion failing before the seam.
 - DeepSeek follow-up GREEN: watcher 39/39 and the pristine, fully patched dsh
   suite 75/75.  Cumulative relevant GREEN count at this point: 159/159.
+- Orca restart-race RED: the real bridge/feed fixture passed the already-bound
+  case but failed the adopt-before-bind restart case, 1/2; the expected final
+  Telegram send list was empty while the later assistant event remained
+  routable.
+- Orca restart-race GREEN: generated patch applies cleanly to both the exact
+  staged pvox-bearing runtime shape and the pristine pinned ordered patch
+  series.  Focused suites pass 25/25 bridge-final-answer and 6/6 chat-bindings.
+  The official process-isolated package check passes 75/75 test files; running
+  those files individually to expose case totals passes exactly 697/697, up
+  from the previous 694/694 by the three requested integration regressions.
 - Ductor follow-up RED: focused encrypted-router fixture 0/1; the admitted final
   result did not reach the fake Telegram transport.  The first complete-series
   preflight also refused the incompatible combined v1/v2 patch before mutation;
@@ -675,6 +706,7 @@ import importlib.machinery
 import importlib.util
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 LOADER = importlib.machinery.SourceFileLoader("mailcortex", str(HERE / "mailcortex"))
 SPEC = importlib.util.spec_from_loader("mailcortex", LOADER)
 MAILCORTEX = importlib.util.module_from_spec(SPEC)
@@ -683,7 +715,7 @@ SPEC.loader.exec_module(MAILCORTEX)
 
 SAFE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 PANE = re.compile(r"w[0-9A-Za-z]+:p[0-9A-Za-z]+\Z")
-TRANSPORTS = {"herdr", "hermes", "nanobot", "ductor", "deepseek"}
+TRANSPORTS = {"herdr", "hermes", "nanobot", "ductor", "deepseek", "claude-ssh"}
 
 
 class WatcherError(Exception):
@@ -698,6 +730,15 @@ class PromptNotAdmittedError(WatcherError):
     def __init__(self, reason: str):
         self.reason = reason if reason == "busy" else "transport_unavailable"
         super().__init__(f"{self.transport} prompt not admitted: {self.reason}")
+
+
+def claude_wake():
+    # Existing transports still load when the optional Claude seam is absent.
+    try:
+        import mailcortex_claude
+        return mailcortex_claude
+    except ImportError as error:
+        raise WatcherError("Claude wake seam is not installed") from error
 
 
 def load_registry(path: Path, host: str) -> dict:
@@ -726,6 +767,7 @@ def load_registry(path: Path, host: str) -> dict:
             "nanobot": {"nanobot_url", "nanobot_api_token_file", "nanobot_target"},
             "ductor": {"ductor_config"},
             "deepseek": {"deepseek_url", "deepseek_cookie_file", "deepseek_session"},
+            "claude-ssh": {"ssh_target", "remote_user", "claude_target", "coalesce_seconds"},
         }[transport]
         if set(record) != required:
             raise WatcherError("seat registry fields are not exact")
@@ -741,6 +783,11 @@ def load_registry(path: Path, host: str) -> dict:
                 raise WatcherError("seat registry ownership or transport mismatch")
             if not all(isinstance(record[key], str) and record[key] and len(record[key]) <= 128 for key in ("herdr_session", "herdr_target")):
                 raise WatcherError("invalid Herdr target")
+        elif transport == "claude-ssh":
+            try:
+                claude_wake().validate_record(record)
+            except (ValueError, TypeError, KeyError) as error:
+                raise WatcherError("invalid Claude SSH target") from error
         elif transport == "hermes":
             if record["harness"] != "hermes":
                 raise WatcherError("seat registry ownership or transport mismatch")
@@ -815,6 +862,9 @@ def wake_prompt(record: dict, path: Path, mailback_error: str | None = None) -> 
         f"Sender: {message.get('From', '')}\n"
         f"Message-ID: {message.get('Message-ID', '')}\n"
     )
+    if record["transport"] == "claude-ssh":
+        return (f"MailCortex: new mail is waiting in {record['mailbox']} on {record['host']}. "
+                "Open /inbox, read all pending mail, and handle it with your harness tools.")
     if record["transport"] == "herdr":
         return preamble + "\nOpen the mailbox now with: /inbox"
     if record["transport"] in {"hermes", "nanobot"}:
@@ -1428,6 +1478,9 @@ class TransportAdapters:
         }
 
     def for_record(self, record: dict) -> object:
+        if record["transport"] == "claude-ssh":
+            return claude_wake().ClaudeSSHAdapter(
+                error_type=WatcherError, refusal_type=PromptNotAdmittedError)
         try:
             return self.adapters[record["transport"]]
         except KeyError as error:
@@ -1528,6 +1581,9 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
         if any(item.is_symlink() for item in components) or not all(item.is_dir() for item in components) or not (mailbox / "new").is_dir():
             raise WatcherError("canonical mailbox is absent or unsafe")
         transport_adapter = record_adapter(adapter, record)
+        if record["transport"] == "claude-ssh":
+            count += claude_wake().scan_batch(globals(), seat, record, transport_adapter, now)
+            continue
         pending_reply = (reconcile_replies(seat, record, transport_adapter, now)
                          if record["transport"] == "deepseek" else False)
         last_injected = latest_injection(seat)
@@ -1622,7 +1678,7 @@ def scan_once(registry: dict, adapter: object, now: float | None = None) -> int:
         try:
             count += scan_seats({"seats": {seat: record}}, adapter, now=now)
         except Exception as error:
-            if record.get("transport") not in {"deepseek", "ductor", "hermes", "nanobot"}:
+            if record.get("transport") not in {"deepseek", "ductor", "hermes", "nanobot", "claude-ssh"}:
                 raise
             report_error(seat, "scan", error)
     return count

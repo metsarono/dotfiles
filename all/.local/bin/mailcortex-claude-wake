@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import json
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mailcortex_claude import remote_request
+if __name__ == "__main__":
+    try:
+        raw = sys.stdin.buffer.readline(16385)
+        if len(raw) > 16384 or not raw.endswith(b"\n"):
+            raise ValueError("request size")
+        request = json.loads(raw)
+        if not isinstance(request, dict):
+            raise ValueError("request shape")
+        print(json.dumps(remote_request(request)))
+    except (ValueError, OSError, TypeError):
+        print(json.dumps({"status": "invalid"}))
+        raise SystemExit(2)
