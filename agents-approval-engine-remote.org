@@ -542,6 +542,31 @@ def _coordinator_path(raw, roots, *, regular=False, exists=True):
     return path
 
 
+def _coordinator_regular_input(raw, config, manifest):
+    if _coordinator_path(raw, config['scratch_roots'], regular=True):
+        return True
+    # Only the internal compound walker supplies this proof. _load_manifest
+    # rejects the key in external policy files; request data cannot grant it.
+    planned = manifest.get('_compound_created_files', ())
+    path = _coordinator_path(raw, config['scratch_roots'], exists=False)
+    return bool(path in planned and not os.path.lexists(raw) and os.path.isdir(os.path.dirname(raw)))
+
+
+def _heredoc_scratch_output(event, manifest):
+    layout = _heredoc_layout(event['tool_input']['command'])
+    config = _coordinator_config(manifest)
+    if layout is None or not layout[1] or config is None:
+        return None
+    stages = _shell_stages(layout[0])
+    if not stages or len(stages) != 1:
+        return None
+    words = _without_heredoc_markers(stages[0])
+    raw = (words[2] if len(words) == 3 and words[:2] == ['cat', '>']
+           else words[1] if len(words) == 2 and words[0] == 'tee' else None)
+    raw = _lexical(raw, event['cwd']) if raw is not None else None
+    return _coordinator_path(raw, config['scratch_roots'], exists=False) if raw is not None else None
+
+
 def _coordinator_git(repo, *args):
     """Read-only bounded probes; no shell, hooks, prompts, or optional locks."""
     env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
@@ -675,7 +700,7 @@ def _coordinator_match(event, manifest):
     if words[:2] == ['mailcortex', 'send'] and flags['mail_send'] and not SHELL_META.search(command):
         if (len(words) == 10 and words[2::2] == ['--from', '--to', '--subject', '--body-file']
                 and words[3] == config['seat_account'] and re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', words[5])
-                and words[7] and _coordinator_path(words[9], config['scratch_roots'], regular=True)):
+                and words[7] and _coordinator_regular_input(words[9], config, manifest)):
             return 'coordinator_mail_send'
         return None
     dispatch = DISPATCH_RE.fullmatch(command)
@@ -743,11 +768,14 @@ def _coordinator_match(event, manifest):
     if args == ['push', 'origin', 'master'] and flags['integrate'] and repo in canonical and _coordinator_push(repo):
         return 'coordinator_integrate'
     if args[:1] == ['commit'] and flags['commit']:
-        if len(args) < 5 or args[1] not in {'-m', '-F'} or not args[2] or args[3] != '--':
+        commit_args = args[1:]
+        if commit_args[:1] == ['-q']:
+            commit_args = commit_args[1:]
+        if len(commit_args) < 4 or commit_args[0] not in {'-m', '-F'} or not commit_args[1] or commit_args[2] != '--':
             return None
-        if args[1] == '-F' and not _coordinator_path(args[2], config['scratch_roots'], regular=True):
+        if commit_args[0] == '-F' and not _coordinator_regular_input(commit_args[1], config, manifest):
             return None
-        for raw in args[4:]:
+        for raw in commit_args[3:]:
             if (not raw or raw.startswith(('/', '~', ':', '-')) or raw in {'.', '..'}
                     or not COORDINATOR_ATOM.fullmatch(raw) or '..' in Path(raw).parts
                     or not _coordinator_path(posixpath.join(repo, raw), [repo], exists=False)
@@ -796,11 +824,14 @@ def _inversion_scope(event, manifest):
     command = payload.get('command')
     if not isinstance(command, str) or not command.strip() or not set(payload) <= TOOL_INPUT_KEYS:
         return False
+    command = _strip_heredoc_bodies(command)
+    if command is None:
+        return False
     stages = _shell_stages(command)
     if not stages:
         return False
     for stage in stages:
-        words = _unwrap_words(stage)
+        words = _without_heredoc_markers(_unwrap_words(stage))
         for index, word in enumerate(words):
             if index == 0:
                 continue  # executable paths do not expand the data scope
@@ -818,7 +849,7 @@ def _inversion_scope(event, manifest):
     return True
 
 
-def classify(event, manifest):
+def _classify_single(event, manifest):
     """Return (allow, reason). The reason names the class that matched, or why none did.
 
     2026-10-09 decider-in-the-loop: reasons 'true_floor' stay absolute. 'no_match',
@@ -839,8 +870,20 @@ def classify(event, manifest):
         return True, coordinator
     if readonly_proven:
         return True, 'ssh_readonly'
+    payload = event.get('tool_input')
+    command = payload.get('command') if isinstance(payload, dict) else None
+    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS:
+        try:
+            cd_words = shlex.split(command)
+        except ValueError:
+            cd_words = []
+        if (len(cd_words) == 2 and cd_words[0] == 'cd' and not SHELL_META.search(command)
+                and any(manifest['entries'][name]['enabled'] for name in ('local_read', 'git_observe'))):
+            target = _path(cd_words[1], event.get('cwd'), _policy_roots(manifest))
+            if target is not None and os.path.isdir(target):
+                return True, 'cwd_change'
     tool_input = event.get("tool_input")
-    if event.get("tool_name") == "Bash" and isinstance(tool_input, dict) and set(tool_input) <= TOOL_INPUT_KEYS and isinstance(tool_input.get("command"), str) and _routes_compound(tool_input["command"]):
+    if event.get("tool_name") == "Bash" and isinstance(tool_input, dict) and set(tool_input) <= TOOL_INPUT_KEYS and isinstance(tool_input.get("command"), str) and (_routes_compound(tool_input["command"]) or re.match(r"^timeout [0-9]+(?:\.[0-9]+)?[smh]? ", tool_input["command"])):
         allow, reason = _compound(event, manifest)
         if allow:
             return True, reason
@@ -864,6 +907,165 @@ def classify(event, manifest):
     if _syntax_refusal(event):
         return False, "syntax"
     return False, "no_match_decider"
+
+
+def _hard_refusal(reason):
+    return reason in {'true_floor', 'not_permission_request', 'coordinator_refused'} or reason.startswith(('compound_refused:', 'substitution_refused:'))
+
+
+def _compound_segment_reason(index, text, reason):
+    try:
+        words = _unwrap_words(shlex.split(text, posix=True))
+    except ValueError:
+        words = []
+    verb = words[0].rsplit('/', 1)[-1] if words else ''
+    known = READERS | WRITE_VERBS | REMOTE | SERVICE | PACKAGE | INTERPRETER_WORDS | {'git', 'cd', 'echo', 'printf', 'make', 'true', 'codex', 'nohup'}
+    return f"compound_refused:segment_{index}:{verb if verb in known else 'command'}:{reason}"
+
+
+def _classify_scoped(event, manifest):
+    allow, reason = classify(event, manifest)
+    if not allow and not _hard_refusal(reason) and _inversion_scope(event, manifest):
+        return True, 'root_default_allow'
+    return allow, reason
+
+
+def _compound_approval(event, manifest, judge=None):
+    """Preflight every segment's floor, then apply its standalone decision.
+
+    Deterministic callers retain their historical hard reasons. The hook
+    labels every refusal with its segment, including a Decider veto. No
+    compound-level grant can be repaired by a whole-command Decider call.
+    """
+    if not isinstance(event, dict) or event.get('hook_event_name') != 'PermissionRequest':
+        return None
+    payload = event.get('tool_input')
+    command = payload.get('command') if isinstance(payload, dict) else None
+    if event.get('tool_name') != 'Bash' or not isinstance(command, str):
+        return None
+    segments = _split_approval_compound(command)
+    if segments is None or len(segments) < 2:
+        return None
+    if not set(payload) <= TOOL_INPUT_KEYS or not isinstance(event.get('cwd'), str):
+        return False, 'true_floor'
+    current = event['cwd']
+    created = set(manifest.get('_compound_created_files', ()))
+    stages = []
+    for index, (separator, text) in enumerate(segments, 1):
+        stage_manifest = {**manifest, '_compound_created_files': frozenset(created)}
+        stage = {**event, 'cwd': current, 'tool_input': {**payload, 'command': text}}
+        result = classify(stage, stage_manifest)
+        allow, reason = result
+        if not allow and _hard_refusal(reason):
+            return False, _compound_segment_reason(index, text, reason) if judge else reason
+        try:
+            words = _unwrap_words(shlex.split(text, posix=True))
+        except ValueError:
+            words = []
+        cd = words[:1] == ['cd']
+        if cd:
+            # cd must be a simple command and its success must gate the next
+            # command. Pipelines do not change the parent shell's cwd.
+            target = _path(words[1], current, _policy_roots(manifest)) if len(words) == 2 else None
+            if (separator not in {None, '&&'} or target is None or not os.path.isdir(target)
+                    or index < len(segments) and segments[index][0] != '&&'):
+                reason = 'true_floor'
+                return False, _compound_segment_reason(index, text, reason) if judge else reason
+            current = target
+        stages.append((index, text, stage, stage_manifest, cd))
+        output = _heredoc_scratch_output(stage, stage_manifest)
+        if output is not None:
+            created.add(output)
+        elif _write_capable(stage):
+            created.clear()
+    used = []
+    for index, text, stage, stage_manifest, cd in stages:
+        try:
+            allow, reason = judge(stage, stage_manifest) if judge else _classify_scoped(stage, stage_manifest)
+        except TimeoutError:
+            return False, _compound_segment_reason(index, text, 'error:TimeoutError')
+        if not allow:
+            return False, _compound_segment_reason(index, text, reason) if judge else reason
+        if not cd:
+            used.append(reason)
+    return True, 'compound:' + '+'.join(sorted(set(used or ['cd'])))
+
+
+def _substitutions_approval(event, manifest, judge):
+    payload = event.get('tool_input')
+    command = payload.get('command') if isinstance(payload, dict) else None
+    if event.get('tool_name') != 'Bash' or not isinstance(command, str):
+        return None
+    # The existing exact dispatch proof already validates its sole cat of a
+    # regular reviewed scratch file, including when ordinary reads are disabled.
+    if _coordinator_match(event, manifest) == 'coordinator_codex_dispatch':
+        return None
+    stripped = _strip_heredoc_bodies(command)
+    substitutions = _shell_substitutions(stripped) if stripped is not None else None
+    if substitutions is None:
+        return False, 'true_floor'
+    for index, (_start, _end, body) in enumerate(substitutions, 1):
+        nested = {**event, 'tool_input': {**payload, 'command': body}}
+        allow, reason = judge(nested, manifest)
+        if not allow:
+            return False, f'substitution_refused:substitution_{index}:{reason}'
+    return None
+
+
+def classify(event, manifest):
+    if not isinstance(event, dict) or event.get('hook_event_name') != 'PermissionRequest':
+        return False, 'not_permission_request'
+    compound = _compound_approval(event, manifest)
+    if compound is not None:
+        return compound
+    nested = _substitutions_approval(event, manifest, _classify_scoped)
+    if nested is not None:
+        return nested
+    return _classify_single(event, manifest)
+
+
+_approval_deadline = None
+
+
+def _decide_request(event, manifest):
+    """Apply the complete gate recursively; main owns the single final ledger."""
+    compound = _compound_approval(event, manifest, judge=_decide_request)
+    if compound is not None:
+        return compound
+    allow, reason = classify(event, manifest)
+    if _hard_refusal(reason):
+        return allow, reason
+    nested = _substitutions_approval(event, manifest, _decide_request) if isinstance(event, dict) else None
+    if nested is not None:
+        return nested
+    inverted = not allow and _inversion_scope(event, manifest)
+    if inverted or not allow and reason in {'no_match_decider', 'syntax'}:
+        config = _decider_config(manifest)
+        if config is not None and _approval_deadline is not None:
+            remaining = int((_approval_deadline - __import__('time').monotonic()) * 1000)
+            config = {**config, 'timeout_ms': min(config['timeout_ms'], max(0, remaining))}
+        if inverted:
+            allow, reason = True, 'root_default_allow'
+            if config is not None:
+                config = {**config, 'danger_veto': True}
+                advisory = {**event, '_approval_roots': list(_policy_roots(manifest))}
+                try:
+                    _decider_allow, status, latency_ms, verdict = _decider_decide(advisory, config)
+                except Exception:
+                    if _approval_deadline is not None and __import__('time').monotonic() >= _approval_deadline:
+                        raise
+                    _decider_allow, status, latency_ms, verdict = True, 'unavailable', 0, 'allow'
+                _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
+                if verdict == 'risky':
+                    allow, reason = False, 'decider_risky'
+        elif config is not None:
+            if config['mode'] == 'single' and _write_capable(event):
+                config = {**config, 'mode': 'dual'}
+            decider_allow, status, latency_ms, verdict = _decider_decide(event, config)
+            _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
+            if decider_allow:
+                allow, reason = True, 'decider_allow'
+    return allow, reason
 
 
 def evaluate(event, manifest):
@@ -1485,12 +1687,14 @@ def _deadline(_signal, _frame):
 
 
 def main():
+    global _approval_deadline
     event, manifest, allow, reason = None, {}, False, 'error:initialization'
     away, away_reason = _away_status(manifest)
     _log_decision.extras = {}
     previous = None
     try:
         previous = signal.signal(signal.SIGALRM, _deadline)
+        _approval_deadline = __import__('time').monotonic() + 3.0
         signal.setitimer(signal.ITIMER_REAL, 3.0)
         # Capture the request even if the manifest fails. Determine away
         # before policy validation/classification so deadlines still defer.
@@ -1506,32 +1710,11 @@ def main():
         if len(raw) > 1024 * 1024 or not parsed:
             raise ValueError('invalid or oversized input')
         manifest = _load_manifest(manifest)
-        allow, reason = classify(event, manifest)
-        inverted = not allow and reason not in {'true_floor', 'not_permission_request', 'coordinator_refused'} and _inversion_scope(event, manifest)
-        if inverted or not allow and reason in ('no_match_decider', 'syntax'):
-            config = _decider_config(manifest)
-            if inverted:
-                allow, reason = True, 'root_default_allow'
-                if config is not None:
-                    config = {**config, 'danger_veto': True}
-                    advisory = {**event, '_approval_roots': list(_policy_roots(manifest))}
-                    try:
-                        decider_allow, status, latency_ms, verdict = _decider_decide(advisory, config)
-                    except Exception:
-                        decider_allow, status, latency_ms, verdict = True, 'unavailable', 0, 'allow'
-                    _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
-                    if verdict == 'risky':
-                        allow, reason = False, 'decider_risky'
-            elif config is not None:
-                if config['mode'] == 'single' and _write_capable(event):
-                    config = {**config, 'mode': 'dual'}
-                decider_allow, status, latency_ms, verdict = _decider_decide(event, config)
-                _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
-                if decider_allow:
-                    allow, reason = True, 'decider_allow'
+        allow, reason = _decide_request(event, manifest)
     except Exception as exc:
         allow, reason = False, f'error:{type(exc).__name__}'
     finally:
+        _approval_deadline = None
         if previous is not None:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous)

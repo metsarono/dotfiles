@@ -223,6 +223,57 @@ class UnattendedCoordinatorTests(unittest.TestCase):
                     self.mail() + '; rm README.org']:
             self.ask(bad)
 
+    def test_compound_heredoc_coordinator_chain_allows_each_segment(self):
+        self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
+        command = (
+            f"cat > {self.prompt} <<'EOF'\n"
+            "synthetic coordinator brief\n"
+            "EOF\n"
+            f"git -C {self.repo} commit -q -m 'test: compound' -- README.org\n"
+            f"mailcortex send --from YOUR_SEAT@YOUR_HOST.helm --to YOUR_REVIEWER@YOUR_REVIEW_HOST.helm "
+            f"--subject 'review ready' --body-file {self.prompt}"
+        )
+        result = e.classify(self.event(command), self.loaded())
+        self.assertTrue(result[0], result)
+        self.assertIn('compound', result[1])
+        self.assertEqual(self.run_hook(command)['behavior'], 'allow')
+
+    def test_compound_floor_refusal_names_the_failing_segment(self):
+        self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
+        command = (
+            f"git status\n"
+            f"git -C {self.repo} commit -q -m 'test: compound' -- README.org\n"
+            "rm -rf README.org"
+        )
+        result = e.classify(self.event(command), self.loaded())
+        self.assertFalse(result[0], result)
+        self.assertEqual(result[1], 'true_floor')
+        self.assertEqual(self.run_hook(command)['behavior'], 'deny')
+        record = json.loads(self.ledger.read_text().splitlines()[-1])
+        self.assertIn('segment_3', record['reason'])
+
+    def test_heredoc_body_is_data_not_a_command(self):
+        self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
+        command = (
+            f"cat > {self.prompt} <<'EOF'\n"
+            "rm -rf README.org\n"
+            "git push --force origin master\n"
+            "EOF\n"
+            "git status"
+        )
+        result = e.classify(self.event(command), self.loaded())
+        self.assertTrue(result[0], result)
+        self.assertEqual(self.run_hook(command)['behavior'], 'allow')
+
+    def test_command_substitution_must_not_hide_a_floor_segment(self):
+        self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
+        self.assertEqual(self.run_hook('printf "%s" "$(git status)"')['behavior'], 'allow')
+        dangerous = 'printf "%s" "$(rm -rf README.org)"'
+        result = e.classify(self.event(dangerous), self.loaded())
+        self.assertFalse(result[0], result)
+        self.assertIn('true_floor', result[1])
+        self.assertEqual(self.run_hook(dangerous)['behavior'], 'deny')
+
     def test_worktree_add_exact_and_deviations(self):
         command = f'git worktree add {self.wt}/worker -b worker master'
         self.allow(command)
