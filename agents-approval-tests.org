@@ -1,0 +1,1682 @@
+#+TITLE: Shared approval regression suites
+#+LANGUAGE: en
+#+PROPERTY: header-args :mkdirp yes :results silent :comments both
+
+* Kikin hook suite
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-claude-approval-kikin-hook.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+import unittest
+
+
+REPO = Path(__file__).resolve().parents[5]
+HOOK = REPO / "all/.local/bin/claude-hook-permission-request-kikin"
+ENGINE = REPO / "all/.local/lib/dotcortex/claude_approval_kikin.py"
+
+
+def event(tool_name, tool_input, cwd):
+    return {"hook_event_name": "PermissionRequest", "tool_name": tool_name, "tool_input": tool_input, "cwd": str(cwd)}
+
+
+def run_hook(payload, manifest, log=os.devnull):
+    # Never let a test write the real decision ledger; os.devnull unless a test reads it.
+    env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(Path(manifest).parent / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}
+    return subprocess.run([str(HOOK)], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=2, check=False)
+
+
+def decision(completed):
+    if not completed.stdout.strip():
+        return "deny"
+    return json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"]
+
+
+def unavailable_decider_url():
+    import socket
+    with socket.socket() as listener:
+        listener.bind(("localhost", 0))
+        port = listener.getsockname()[1]
+    return f"http://localhost:{port}/v1/systemone"
+
+
+class KikinApprovalHookTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = json.loads((REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json").read_text())
+        self.root = Path(self.temp.name) / "DotCortex"
+        (self.root / "FORGE/bin").mkdir(parents=True)
+        (self.root / ".git").mkdir()
+        (self.root / "README.md").write_text("synthetic\n")
+        (self.root / "FORGE/bin/pokemon-centre").write_text("synthetic\n")
+        (self.root / "FORGE/bin/clubhouse-bosses-refresh").write_text("synthetic\n")
+        self.scratch = Path(self.temp.name) / "scratch"
+        self.scratch.mkdir()
+        self.message = self.scratch / "message"
+        self.message.write_text("test: synthetic\n")
+        os.chmod(self.message, 0o600)
+
+    def manifest(self, *enabled):
+        data = json.loads(json.dumps(self.base))
+        data["gate_inversion"] = {"enabled": False}
+        data["roots"] = [str(self.root)]
+        data["scratch_roots"] = [str(self.scratch)]
+        for item in data["classes"]:
+            item["enabled"] = item["name"] in enabled
+        path = self.scratch / "manifest.json"
+        path.write_text(json.dumps(data))
+        return path
+
+    def assert_decision(self, payload, manifest, expected):
+        completed = run_hook(payload, manifest)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(decision(completed), expected, completed.stdout)
+
+    def test_decision_ledger_records_reason_without_tool_input(self):
+        log = self.scratch / "decisions.jsonl"
+        secret_path = str(self.root / "README.md")
+        run_hook(event("Read", {"file_path": secret_path}, self.root), self.manifest("local_read"), log)
+        run_hook(event("Read", {"file_path": secret_path}, self.root), self.manifest(), log)
+        run_hook("not json", self.manifest(), log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([(r["decision"], r["reason"]) for r in records],
+                         [("allow", "local_read"), ("deny", "local_read_disabled"), ("deny", "not_permission_request")])
+        self.assertNotIn(secret_path, log.read_text())
+        self.assertEqual(oct(log.stat().st_mode & 0o777), "0o600")
+
+    def test_compound_reads_allow_and_anything_else_asks(self):
+        manifest = self.manifest("local_read", "git_observe")
+        root = str(self.root)
+        allow = [
+            f"cd {root} && cat README.md",
+            f"cd {root} && sed -n 1,2p README.md | cut -c1-200",
+            "grep -n synthetic README.md | head -n 5",
+            "cat README.md | wc -l",
+            "git status --short && git log --oneline -1",
+            "head -n 3 README.md; tail -1 README.md",
+            "grep -n 'a|b' README.md | sort -n | uniq -c",
+            "grep -n -i -E 'synth\\.etic|x' README.md 2>/dev/null | head -5",
+            "timeout 30 grep -n synthetic README.md; echo === ; cat README.md 2>&1 | wc -l",
+            "cat README.md 2>/dev/null || true",
+            f"cd {root} && ls -la FORGE/bin | grep -iE 'poke|club'",
+            "grep -il synthetic README.md",
+        ]
+        for command in allow:
+            with self.subTest(allow=command):
+                self.assert_decision(event("Bash", {"command": command, "description": "read"}, self.root), manifest, "allow")
+        ask = [
+            "cat README.md > copy",
+            "cat README.md | tee copy",
+            "cat README.md | sh",
+            "git status | xargs rm",
+            "cat README.md; rm README.md",
+            "cat README.md && curl https://example.invalid",
+            "cat README.md | sort -o copy",
+            "cat README.md & ls",
+            "cat $(echo README.md) | head",
+            "cd / && cat etc/passwd",
+            f"cat README.md || cd {root}",
+            f"cd {root} && sed -n '1p;w copy' README.md",
+            "sed -n 1p README.md | sed -i s/a/b/ README.md",
+            "cat README.md | head -n 5 README.md",
+            "cat README.md |",
+            "cat 'README.md && ls",
+            "printf x && cat README.md",
+            'grep -n "$(id)" README.md',
+            'grep -n "a\\$b" README.md | head',
+            "cat README.md 2>/tmp/err",
+            "cat README.md >/dev/null; cat README.md > copy",
+            "timeout 30 rm README.md && cat README.md",
+            "echo x | sh",
+            "grep -rn synthetic . | head",
+            "ls -la / && cat README.md",
+        ]
+        for command in ask:
+            with self.subTest(ask=command):
+                self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "deny")
+        # A compound read still respects a disabled class.
+        self.assert_decision(event("Bash", {"command": "cat README.md | wc -l"}, self.root), self.manifest(), "deny")
+
+    def test_class_flags_do_not_block_the_new_scoped_default(self):
+        manifest = REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json"
+        self.assertTrue(all(
+            not item["enabled"]
+            for item in self.base["classes"]
+            if item["name"] != "ssh_readonly"
+        ))
+        self.assertTrue(next(item for item in self.base["classes"] if item["name"] == "ssh_readonly")["enabled"])
+        self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "allow")
+
+    def test_each_class_has_green_and_disabled_paths(self):
+        cases = [
+            ("local_read", event("Read", {"file_path": str(self.root / "README.md")}, self.root)),
+            ("git_observe", event("Bash", {"command": "git status --short"}, self.root)),
+            ("centre_render", event("Bash", {"command": "FORGE/bin/pokemon-centre render"}, self.root)),
+            ("safe_commit", event("Bash", {"command": f"git commit -F {self.message} -- README.md"}, self.root)),
+        ]
+        for class_name, payload in cases:
+            with self.subTest(class_name=class_name):
+                self.assert_decision(payload, self.manifest(class_name), "allow")
+                self.assert_decision(payload, self.manifest(), "deny")
+
+    def test_full_red_corpus_never_allows(self):
+        manifest = self.manifest("local_read", "git_observe", "centre_render", "safe_commit")
+        commands = [
+            "cat .env", "cat NEXUS/keys/token", "cat LOGS/Telegram/Personal/chat.md",
+            "cat CORTEX/PalmCortex/Diary.md", "git show HEAD:NEXUS/.secrets/token",
+            "ssh kikin date", "scp x kikin:/tmp/x", "sudo true", "crontab -l",
+            "telegram-agent-host stop fable", "nurse-joy revive Fable", "tmux kill-server",
+            "pkill python3", "kill -9 123", "kill", "pip install x", "apt install x",
+            "cat README.md > /tmp/copy", "find . -exec cat {} +", "find . -delete",
+            "git push", "git reset --keep HEAD~1", "rm -rf README.md", "cat $(printf README.md)",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "deny")
+
+    def test_mount_symlink_and_scratch_output_boundaries(self):
+        mount = Path(self.temp.name) / "mount"
+        mount.mkdir()
+        (mount / "README.md").write_text("mounted\n")
+        (mount / ".git").mkdir()
+        canonical = Path(self.temp.name) / "HelmCortex"
+        canonical.symlink_to(mount, target_is_directory=True)
+        data = json.loads(self.manifest("local_read").read_text())
+        data["roots"] = [str(canonical)]
+        manifest = self.scratch / "mount.json"
+        manifest.write_text(json.dumps(data))
+        self.assert_decision(event("Read", {"file_path": str(canonical / "README.md")}, canonical), manifest, "allow")
+        data["classes"][-2]["enabled"] = True
+        manifest.write_text(json.dumps(data))
+        self.assert_decision(event("Bash", {"command": "FORGE/bin/pokemon-centre render --out /etc/x"}, canonical), manifest, "deny")
+
+    def _decider_manifest(self, *, honey=None, kikin=None, enabled=True, honey_api=None):
+        data = json.loads(self.manifest("local_read", "git_observe").read_text())
+        data["manifest_version"] = "claude-approval-canary.kikin.v2"
+        data["decider"] = {
+            "enabled": enabled,
+            "honey_url": honey,
+            "kikin_url": kikin,
+            "timeout_ms": 800,
+            "min_allow_confidence": 0.95,
+            "questions": "single",
+        }
+        if honey_api is not None:
+            data["decider"]["honey_api"] = honey_api
+        path = self.scratch / "manifest-decider.json"
+        path.write_text(json.dumps(data))
+        return path
+
+    def _c1_answers(self, *, allow=True):
+        # Single-mode contract: noul = P(sensitive). allow → 0.02 (98% confident
+        # not sensitive), deny → 0.9 (only 10% confident).
+        return {"approval.sensitive_effect.v1": {"type": "noul", "noul": 0.02 if allow else 0.9}}
+
+    def _fake_decider(self, answers=None, *, status=200, delay=0.0):
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                if delay:
+                    time.sleep(delay)
+                if answers is None:
+                    body = "{}"
+                else:
+                    body = json.dumps({"model_sha256": "b7c132a67934d51c81abc96bb7724800f965ff5a288aed3e1ca7d8bc349c1386", "answers": answers})
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("localhost", 0), Handler)
+        server.threshold = 0.95
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        return f"http://localhost:{server.server_address[1]}/v1/systemone"
+
+    def test_decider_allow_enables_grey_zone(self):
+        # 2026-10-10: a plain grey read (no write, no interpreter body) stays
+        # single-mode eligible; 'cat > file' now routes dual by design.
+        url = self._fake_decider(self._c1_answers(allow=True))
+        manifest = self._decider_manifest(kikin=url)
+        log = self.scratch / "decider.jsonl"
+        payload = event("Bash", {"command": "true"}, self.root)
+        run_hook(payload, manifest, log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(records[-1]["decision"], "allow")
+        self.assertEqual(records[-1]["reason"], "decider_allow")
+        self.assertEqual(records[-1]["decider_status"], "accepted")
+        self.assertEqual(records[-1]["verdict"], "allow")
+        self.assertIsInstance(records[-1]["latency_ms"], int)
+
+    def test_decider_denied_asks(self):
+        url = self._fake_decider(self._c1_answers(allow=False))
+        manifest = self._decider_manifest(kikin=url)
+        log = self.scratch / "decider.jsonl"
+        run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(records[-1]["decision"], "deny")
+        self.assertEqual(records[-1]["decider_status"], "threshold_failed")
+
+    def test_decider_down_asks(self):
+        manifest = self._decider_manifest(kikin=unavailable_decider_url())
+        log = self.scratch / "decider.jsonl"
+        run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(records[-1]["decision"], "deny")
+        self.assertEqual(records[-1]["decider_status"], "unavailable")
+
+    def test_decider_timeout_asks(self):
+        url = self._fake_decider(self._c1_answers(allow=True), delay=3.0)
+        manifest = self._decider_manifest(kikin=url)
+        log = self.scratch / "decider.jsonl"
+        run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(records[-1]["decision"], "deny")
+        self.assertEqual(records[-1]["decider_status"], "timeout")
+
+    def test_true_floor_cannot_be_overridden(self):
+        url = self._fake_decider(self._c1_answers(allow=True))
+        manifest = self._decider_manifest(kikin=url)
+        log = self.scratch / "decider.jsonl"
+        floor_commands = [
+            "ssh kikin date", "sudo true", "pkill python3", "kill -9 123",
+            "pip install x", "rm -rf README.md", "cat .env", "cat NEXUS/keys/token",
+            "rm README.md", "sed -i 's/a/b/' README.md",
+            "awk -i inplace '{print}' README.md", "perl -i -pe 's/a/b/' README.md",
+            "echo x > /etc/dotcortex-approval-floor",
+        ]
+        for command in floor_commands:
+            with self.subTest(command=command):
+                run_hook(event("Bash", {"command": command}, self.root), manifest, log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertTrue(all(record["decision"] == "deny" for record in records[-len(floor_commands):]))
+        self.assertTrue(all(record["reason"] == "true_floor" for record in records[-len(floor_commands):]))
+        self.assertNotIn("decider_status", records[-1])
+
+    def test_common_read_only_shapes_are_class_allowed(self):
+        manifest = self.manifest("local_read", "git_observe")
+        root = str(self.root)
+        json_path = root + "/config.json"
+        Path(json_path).write_text('{"schema": "synthetic"}')
+        commands = [
+            "git -C " + root + " status --short",
+            "git -C " + root + " log --oneline -1",
+            "git -C " + root + " diff --stat",
+            "rg -n synthetic README.md",
+            "ls -la /etc/passwd",
+            "stat /etc/passwd",
+            "ps aux",
+            "pgrep -af python",
+            "uptime",
+            "df -h /var/tmp",
+            "free -h",
+            "tmux list-windows",
+            "tmux list-sessions",
+            "tmux capture-pane -p -t honey-opus",
+            "ps aux | head -3",
+            "uptime && df -h /var/tmp",
+            "cd " + root + " && git status --short && ls /etc/passwd",
+            "python3 -c 'import json; print(json.load(open(\"" + json_path + "\"))[\"schema\"])'",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "allow")
+
+    def test_decider_disabled_keeps_grey_zone_asking(self):
+        manifest = self._decider_manifest(enabled=False)
+        log = self.scratch / "decider.jsonl"
+        run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(records[-1]["decision"], "deny")
+        self.assertNotIn("decider_status", records[-1])
+
+    def _classify_reason(self, payload, manifest):
+        """Run the engine's classify directly (imported once) for reason checks."""
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        if not hasattr(self, "_engine"):
+            loader = SourceFileLoader("kikin_engine_floor", str(ENGINE))
+            spec = importlib.util.spec_from_loader("kikin_engine_floor", loader)
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            self._engine = module
+        import json as _json
+        data = _json.loads(Path(manifest).read_text())
+        data["entries"] = {item["name"]: item for item in data.get("classes", [])}
+        return self._engine.classify(payload, data)[1]
+
+    def test_true_floor_destructive_git(self):
+        commands = [
+            "git push", "git push origin master", "git push --force origin x",
+            "git reset --hard HEAD~1", "git reset --merge", "git rebase master",
+            "git clean -fd", "git checkout -- file.py", "git restore file.py",
+            "git branch -D topic", "git stash drop", "git stash clear",
+            "git commit --amend -m x", "git worktree prune", "git worktree remove ../x",
+            "git filter-branch --tree-filter x", "git filter-repo --x",
+            "git checkout master", "git merge master",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
+
+    def test_true_floor_git_reads_still_classify(self):
+        # Fable's additions must not floor observation forms:
+        manifest = self.manifest("git_observe")
+        reads = ["git status", "git status --short", "git log --oneline -3", "git diff"]
+        for command in reads:
+            with self.subTest(command=command):
+                self.assertIn(self._classify_reason(event("Bash", {"command": command}, self.root), manifest), ("git_observe", "git_observe_disabled"))
+
+    def test_true_floor_disk_and_permissions(self):
+        commands = [
+            "dd if=/dev/zero of=/dev/sda", "mkfs.ext4 /dev/sda1", "cryptsetup luksFormat /dev/sda2",
+            "wipefs /dev/sda", "fdisk /dev/sda", "parted /dev/sda", "shred secret.bin",
+            "truncate -s 0 data.db", "mount /dev/sda1 /mnt", "umount /mnt",
+            "chmod -R 777 dir", "chown -R user dir", "crontab -r", "at now",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
+
+    def test_plain_chmod_not_floored(self):
+        # chmod without -R stays a grey-zone ask, not an absolute floor.
+        reason = self._classify_reason(event("Bash", {"command": "chmod +x script.sh"}, self.root), self.manifest("local_read"))
+        self.assertIn(reason, ("no_match_decider", "syntax"))
+
+    def test_interpreter_body_detection(self):
+        self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())  # load the engine
+        bodies = [
+            "python3 -c 'import os'",
+            "python -c \"import shutil\"",
+            "bash -c 'echo hi'",
+            "cat <<EOF\nprint(1)\nEOF",
+            "python3 <<'PY'\nimport os\nPY",
+        ]
+        for command in bodies:
+            with self.subTest(command=command):
+                self.assertTrue(self._engine._interpreter_body(event("Bash", {"command": command}, self.root)))
+        plain = ["python3 script.py", "cat README.md", "git status"]
+        for command in plain:
+            with self.subTest(command=command):
+                self.assertFalse(self._engine._interpreter_body(event("Bash", {"command": command}, self.root)))
+
+    def test_floor_verbs_caught_inside_compounds(self):
+        # Replay finding (2026-10-10): floor verbs hid inside compound segments.
+        commands = [
+            "cd /repo && kill -TERM 30130",
+            "cd /repo && rm -rf build && make",
+            "cd /repo && git commit --amend --no-edit",
+            "cd /repo && ssh YOUR_HONEY_HOST date",
+            "cd /repo && pkill -f worker",
+            "cd /repo && git push origin master",
+            "cd /repo && crontab -r",
+            "cd /repo && chmod -R 777 dir",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
+
+    def test_floor_verbs_caught_in_multiline(self):
+        # Replay finding: _split_compound refuses raw newlines, so multi-line
+        # commands escaped the segment scan ('cd X\nkill -TERM pid'). The
+        # apostrophe-in-comment case ('job's') made the whole command
+        # unparseable and used to skip the floor entirely.
+        commands = [
+            "cd /repo\n# stop the job\nkill -TERM 15943; sleep 2\nkill -KILL 15943",
+            "cd /repo\n# the job's process group\nkill -TERM -15943 2>/dev/null; sleep 2",
+            "cd /repo\ngit push origin master",
+            "echo start; rm -rf build; echo done",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
+
+    def test_write_capable_detection(self):
+        writes = [
+            "sed -i 's/a/b/' file.txt",
+            "awk -i inplace '{print}' data.txt",
+            "cp src dst",
+            "mv a b",
+            "touch marker",
+            "tee out.txt",
+            "echo hi > out.txt",
+        ]
+        self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())  # load engine
+        for command in writes:
+            with self.subTest(command=command):
+                self.assertTrue(self._engine._write_capable(event("Bash", {"command": command}, self.root)))
+        reads = ["cat README.md", "grep -n x file.txt", "ls -la", "git status"]
+        for command in reads:
+            with self.subTest(command=command):
+                self.assertFalse(self._engine._write_capable(event("Bash", {"command": command}, self.root)))
+
+    def test_git_apply_routes_dual(self):
+        # Calibration finding 2026-10-10: 'git apply x.patch' is a worktree
+        # write and must be dual-judged; --check/--stat dry runs stay single.
+        self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())
+        for command, expected in [
+            ("cd /repo && git apply /tmp/x.patch", True),
+            ("git apply --check /tmp/x.patch", False),
+            ("git apply --stat /tmp/x.patch", False),
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(self._engine._write_capable(event("Bash", {"command": command}, self.root)), expected)
+
+    def test_write_capable_routes_dual_not_single(self):
+        # A reversible in-root redirect must consult the destructive question,
+        # not just sensitive: wire the fake decider to answer single-mode allow
+        # but dual threshold-fail on the destructive half. In-place transforms
+        # are true-floor asks and are covered by the replay below.
+        url = self._fake_decider({
+            "approval.sensitive_effect.v1": {"type": "noul", "noul": 0.02},
+            "approval.needs_human.v1": {"type": "noul", "noul": 0.9},
+        })
+        manifest = self._decider_manifest(kikin=url)
+        log = self.scratch / "write-dual.jsonl"
+        run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(records[-1]["decision"], "deny")
+        self.assertEqual(records[-1]["decider_status"], "threshold_failed")
+
+    def test_r2d2d_wire_round_trip(self):
+        self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())  # load engine
+        envelope = self._engine._c1_envelope(event("Bash", {"command": "stat README.md"}, self.root), "req-1", 2200, mode="dual")
+        envelope["r2d2d"] = True
+        wire, ids = self._engine._r2d2d_body(envelope)
+        self.assertEqual(ids, [self._engine.GREY_QUESTION_SINGLE, self._engine.GREY_QUESTION_DESTRUCTIVE])
+        self.assertEqual(len(wire["questions"]), 2)
+        self.assertTrue(all(q["type"] == "noul" for q in wire["questions"]))
+        self.assertTrue(all("state.command" in q["question"] for q in wire["questions"]))
+        self.assertTrue(all("Do not execute" in q["question"] for q in wire["questions"]))
+        # responses adapt back into the gate answers shape
+        answers = self._engine._r2d2d_answers({"answers": [{"p_yes": 0.02}, {"p_yes": 0.03}]}, ids)
+        self.assertEqual(answers[self._engine.GREY_QUESTION_SINGLE]["noul"], 0.02)
+        # shape failures are rejected
+        self.assertIsNone(self._engine._r2d2d_answers({"answers": [{"p_yes": 0.5}]}, ids))
+        self.assertIsNone(self._engine._r2d2d_answers({"answers": [{"p_yes": "x"}, {"p_yes": 0.5}]}, ids))
+        self.assertIsNone(self._engine._r2d2d_answers({"answers": [{"p_yes": 1.5}, {"p_yes": 0.5}]}, ids))
+
+    def test_decider_config_honey_api_validation(self):
+        self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())  # load engine
+        base = {"enabled": True, "honey_url": "http://YOUR_HONEY_HOST/decide", "kikin_url": "http://YOUR_DECIDER_HOST/v1/systemone", "timeout_ms": 2200, "min_allow_confidence": 0.95, "questions": "single"}
+        cfg = self._engine._decider_config({"decider": base})
+        self.assertEqual(cfg["honey_api"], "kikin")
+        cfg2 = self._engine._decider_config({"decider": {**base, "honey_api": "r2d2d"}})
+        self.assertEqual(cfg2["honey_api"], "r2d2d")
+        cfg3 = self._engine._decider_config({"decider": {**base, "honey_api": "weird"}})
+        self.assertIsNone(cfg3)
+
+    def test_r2d2d_endpoint_allows_and_denies(self):
+        # A fake r2d2d server on loopback: honey endpoint with honey_api=r2d2d.
+        import http.server
+        import threading
+
+        class FakeR2D2D(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", "0"))
+                req = json.loads(self.rfile.read(n) or b"{}")
+                n_questions = len(req.get("questions") or [])
+                # benign p_yes values under the threshold for every question
+                p = [0.02] * n_questions
+                state = json.dumps(req.get("state", {}))
+                if "rm -rf" in state or ">" in state:
+                    p = [0.9] * n_questions
+                answers = [{"choice": "yes" if v > 0.5 else "no", "confidence": 0.9, "probs": {"yes": v, "no": 1 - v}, "p_yes": v} for v in p]
+                body = json.dumps({"answers": answers, "ms": 42}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("localhost", 0), FakeR2D2D)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        manifest = self._decider_manifest(honey=f"http://localhost:{port}/decide", honey_api="r2d2d", kikin=unavailable_decider_url())
+        try:
+            log = self.scratch / "r2d2d.jsonl"
+            run_hook(event("Bash", {"command": "true"}, self.root), manifest, log)
+            records = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(records[-1]["decision"], "allow")
+            self.assertEqual(records[-1]["decider_status"], "accepted")
+            log2 = self.scratch / "r2d2d-deny.jsonl"
+            run_hook(event("Bash", {"command": "echo hi > out.txt && stat x"}, self.root), manifest, log2)
+            records2 = [json.loads(line) for line in log2.read_text().splitlines()]
+            self.assertEqual(records2[-1]["decision"], "deny")
+            self.assertEqual(records2[-1]["decider_status"], "threshold_failed")
+        finally:
+            server.shutdown()
+
+    def test_dual_mode_requires_both_questions(self):
+        url = self._fake_decider({
+            "approval.sensitive_effect.v1": {"type": "noul", "noul": 0.02},
+            "approval.needs_human.v1": {"type": "noul", "noul": 0.9},
+        })
+        manifest = self._decider_manifest(kikin=url)
+        log = self.scratch / "dual.jsonl"
+        run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(records[-1]["decision"], "deny")
+        self.assertEqual(records[-1]["decider_status"], "threshold_failed")
+
+    def test_dual_mode_allows_when_both_clear(self):
+        url = self._fake_decider({
+            "approval.sensitive_effect.v1": {"type": "noul", "noul": 0.02},
+            "approval.needs_human.v1": {"type": "noul", "noul": 0.03},
+        })
+        manifest = self._decider_manifest(kikin=url)
+        log = self.scratch / "dual-ok.jsonl"
+        run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(records[-1]["decision"], "allow")
+        self.assertEqual(records[-1]["reason"], "decider_allow")
+
+    def test_v1_manifest_still_loads_without_decider(self):
+        manifest = self.manifest("local_read")
+        self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "allow")
+
+    def test_malformed_input_asks(self):
+        manifest = self.manifest("local_read")
+        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull, "SO_APPROVAL_MORNING_QUEUE": str(self.scratch / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}, timeout=2, check=False)
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(decision(completed), "deny")
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+* Honey/Fable SSH readonly replay — multi-host and sudo target corpus
+
+This harness keeps Fable's Honey seat-specific read shapes executable without
+putting Honey's real host, users, or paths in the public manifest.  The fake
+Decider always says ALLOW; every dangerous shape must still remain on the
+absolute floor.  The SSH class proves ordinary login-user paths with remote
+=realpath=.  A =sudo -n -u YOUR_AGENT_CLAUDE= reader is lexically checked against
+that host's roots because the login user cannot necessarily realpath the seat's
+private files; no remote command is executed by the harness.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-claude-approval-honey-reads.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""Fable's Honey SSH readonly corpus against the shared Kikin engine."""
+import json
+import http.server
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import threading
+import unittest
+
+
+HERE = Path(__file__).resolve()
+REPO = HERE.parents[5]
+ENGINE = REPO / "all/.local/lib/dotcortex/claude_approval_kikin.py"
+HOOK = REPO / "all/.local/bin/claude-hook-permission-request"
+MANIFEST_SRC = REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json"
+
+
+def load_engine():
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    loader = SourceFileLoader("honey_reads_engine", str(ENGINE))
+    spec = importlib.util.spec_from_loader("honey_reads_engine", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def event(command, cwd):
+    return {
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "cwd": str(cwd),
+    }
+
+
+class HoneyReadsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = load_engine()
+        cls.temp = tempfile.TemporaryDirectory(prefix="honey-reads.")
+        cls.root = Path(cls.temp.name) / "DotCortex"
+        cls.root.mkdir()
+        class AlwaysAllow(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.dumps({
+                    "model_sha256": cls.engine.PINNED_MODEL_SHA256,
+                    "answers": {"approval.sensitive_effect.v1": {"noul": 0.01}},
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        cls.decider = http.server.HTTPServer(("localhost", 0), AlwaysAllow)
+        cls.decider_thread = threading.Thread(target=cls.decider.serve_forever, daemon=True)
+        cls.decider_thread.start()
+        cls.decider_url = f"http://localhost:{cls.decider.server_address[1]}/decide"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.decider.shutdown()
+        cls.decider.server_close()
+        cls.temp.cleanup()
+
+    def manifest(self, *, decider=False):
+        data = json.loads(MANIFEST_SRC.read_text(encoding="utf-8"))
+        data["gate_inversion"] = {"enabled": False}
+        data["roots"] = [str(self.root)]
+        data["scratch_roots"] = [str(self.root)]
+        data["classes"] = [item for item in data["classes"]]
+        ssh = next(item for item in data["classes"] if item["name"] == "ssh_readonly")
+        ssh["enabled"] = True
+        ssh["readonly_hosts"] = [{
+            "host": "YOUR_HONEY_HOST",
+            "remote_home": "/home/YOUR_HONEY_USER",
+            "remote_path_roots": [
+                "/home/YOUR_HONEY_USER/DotCortex",
+                "/home/YOUR_HONEY_USER/HelmCortex",
+                "/home/YOUR_AGENT_CLAUDE",
+                "/var/tmp",
+                "/etc/init.d",
+                "/var/log",
+            ],
+            "allowed_sudo_targets": ["YOUR_AGENT_CLAUDE"],
+        }]
+        if decider:
+            data["manifest_version"] = "claude-approval-canary.kikin.v2"
+            data["decider"] = {
+                "enabled": True,
+                "honey_url": None,
+                "kikin_url": self.decider_url,
+                "timeout_ms": 500,
+                "min_allow_confidence": 0.95,
+                "questions": "single",
+            }
+        data["entries"] = {item["name"]: item for item in data["classes"]}
+        data["roots"] = tuple(os.path.realpath(item) for item in data["roots"])
+        data["scratch_roots"] = tuple(os.path.realpath(item) for item in data["scratch_roots"])
+        return data
+
+    def setUp(self):
+        self.proof = self.engine._remote_realpath_proven_p3
+        self.engine._remote_realpath_proven_p3 = lambda analysis, config: True
+        self.addCleanup(self._restore_proof)
+
+    def _restore_proof(self):
+        self.engine._remote_realpath_proven_p3 = self.proof
+
+    def classify(self, command, *, decider=False):
+        return self.engine.classify(event(command, self.root), self.manifest(decider=decider))
+
+    def test_every_real_honey_read_shape_allows(self):
+        commands = [
+            "ssh YOUR_HONEY_HOST 'ls -ld /home/YOUR_HONEY_USER/DotCortex'",
+            "ssh YOUR_HONEY_HOST 'git -C /home/YOUR_HONEY_USER/DotCortex status --short'",
+            "ssh YOUR_HONEY_HOST 'ps -eo pid,lstart,user,args | grep -i opus'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE tmux -S /tmp/tmux-2002/default capture-pane -p -t honey-opus:0 | tail -20'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE tmux -S /tmp/tmux-2002/default list-windows -t honey-opus'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE cat /home/YOUR_AGENT_CLAUDE/.local/state/dotcortex/claude-approval-kikin.jsonl | tail -5'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE ls -l /home/YOUR_AGENT_CLAUDE/.config/dotcortex/'",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.classify(command), (True, "ssh_readonly"))
+
+    def test_sudo_and_secret_floor_corpus_asks_even_with_always_allow_decider(self):
+        commands = [
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST \"cat '/home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx'\"",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/DotCortex/../Secret Vault/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/SECRET VAULT/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/Secret\\ Vault/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_AGENT_CLAUDE/.claude/.credentials.json'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_AGENT_CLAUDE/.config/dotcortex/auth.json'",
+            "ssh YOUR_HONEY_HOST 'cat ~/.ssh/config'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/HelmCortex/NEXUS/keys/private'",
+            "ssh YOUR_HONEY_HOST 'cat /var/log/approval.token'",
+            "ssh YOUR_HONEY_HOST 'cat /var/tmp/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u root cat /home/YOUR_HONEY_USER/DotCortex/README.md'",
+            "ssh YOUR_HONEY_HOST 'sudo -u YOUR_AGENT_CLAUDE cat /home/YOUR_AGENT_CLAUDE/.config/dotcortex/x'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE bash -c id'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE sh -c id'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE python -c id'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE tmux send-keys -t honey-opus:0 x'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/DotCortex/README.md > /var/tmp/out'",
+            "ssh YOUR_HONEY_HOST 'rm /var/tmp/out'",
+        ]
+        manifest = self.manifest(decider=True)
+        manifest_path = Path(self.temp.name) / "honey-reads-manifest.json"
+        serialized = {key: value for key, value in manifest.items() if key != "entries"}
+        serialized["roots"] = list(serialized["roots"])
+        serialized["scratch_roots"] = list(serialized["scratch_roots"])
+        manifest_path.write_text(json.dumps(serialized), encoding="utf-8")
+        log_path = Path(self.temp.name) / "honey-reads.jsonl"
+        env = {
+            **os.environ,
+            "SO_APPROVAL_KIKIN_MANIFEST": str(manifest_path),
+            "SO_APPROVAL_KIKIN_LOG": str(log_path), "SO_APPROVAL_MORNING_QUEUE": str(Path(self.temp.name) / "queue.jsonl"),
+            "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE),
+        }
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.classify(command, decider=True), (False, "true_floor"))
+                completed = subprocess.run(
+                    [str(HOOK)],
+                    input=json.dumps(event(command, self.root)),
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny", command)
+        records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(records), len(commands))
+        self.assertTrue(all(record["decision"] == "deny" for record in records))
+        self.assertTrue(all(record["reason"] == "true_floor" for record in records))
+        self.assertTrue(all("decider_status" not in record for record in records))
+
+    def test_single_readonly_host_manifest_still_loads(self):
+        data = self.manifest()
+        ssh = data["entries"]["ssh_readonly"]
+        ssh.pop("readonly_hosts")
+        ssh.update({
+            "readonly_host": "YOUR_HONEY_HOST",
+            "remote_home": "/home/YOUR_HONEY_USER",
+            "remote_path_roots": ["/home/YOUR_HONEY_USER/DotCortex"],
+        })
+        self.assertEqual(self.engine._readonly_host_config(ssh, "YOUR_HONEY_HOST")["remote_home"], "/home/YOUR_HONEY_USER")
+
+    def test_readonly_host_list_selects_each_host(self):
+        data = self.manifest()
+        ssh = data["entries"]["ssh_readonly"]
+        ssh["readonly_hosts"].append({
+            "host": "other",
+            "remote_home": "/home/YOUR_OTHER_USER",
+            "remote_path_roots": ["/home/YOUR_OTHER_USER/DotCortex"],
+            "allowed_sudo_targets": [],
+        })
+        command = "ssh other 'ls -ld /home/YOUR_OTHER_USER/DotCortex'"
+        self.assertEqual(self.engine.classify(event(command, self.root), data), (True, "ssh_readonly"))
+
+    def test_approval_hook_sources_have_only_public_home_placeholders(self):
+        import re
+        sources = [REPO / name for name in ("agents-approval.org", "agents-approval-tests.org",
+            "agents-approval-legacy.org", "agents-approval-engine-local.org",
+            "agents-approval-engine-remote.org", "agents-hooks.org")]
+        targets = []
+        for source in sources:
+            raw = source.read_text(encoding="utf-8")
+            targets.extend(REPO / target for target in re.findall(
+                r":tangle (all/[^\s]+)", raw
+            ) if "approval" in target or "claude-hook" in target)
+        # Check canonical prose, fixtures, engines, manifests and wrappers.
+        for path in sources + sorted(set(targets)):
+            with self.subTest(path=path.relative_to(REPO)):
+                raw = path.read_text(encoding="utf-8")
+                self.assertIsNone(re.search(
+                    r"/+home/(?!YOUR_)[A-Za-z0-9_-]+", raw
+                ), str(path.relative_to(REPO)))
+
+    def test_unreviewed_home_is_floor_even_with_always_allow_decider(self):
+        # Build a concrete synthetic username from the public placeholder.
+        home = "/home/" + "YOUR_HONEY_USER".replace("YOUR_", "fixture_").lower()
+        manifest = self.manifest(decider=True)
+        for tool, tool_input in (
+            ("Bash", {"command": f"cat {home}/notes.md"}),
+            ("Bash", {"command": f"ls {home}/notes.md"}),
+            ("Bash", {"command": f"cat /{home}/notes.md"}),
+            ("Read", {"file_path": home + "/notes.md"}),
+        ):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                payload = event("true", self.root)
+                payload.update(tool_name=tool, tool_input=tool_input)
+                self.assertEqual(self.engine.classify(payload, manifest),
+                                 (False, "true_floor"))
+        # Exercise the actual hook, with an ALWAYS-ALLOW Decider configured.
+        serialized = {key: value for key, value in manifest.items() if key != "entries"}
+        path = Path(self.temp.name) / "outside-home-manifest.json"
+        path.write_text(json.dumps(serialized), encoding="utf-8")
+        log = Path(self.temp.name) / "outside-home.jsonl"
+        completed = subprocess.run([str(HOOK)], input=json.dumps(event(f"cat {home}/notes.md", self.root)),
+            text=True, capture_output=True, timeout=5, check=False,
+            env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(path),
+                 "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(Path(self.temp.name) / "queue.jsonl"), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny")
+        record = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(record["reason"], "true_floor")
+        self.assertNotIn("decider_status", record)
+
+    def test_home_boundary_is_independent_of_username_in_both_engines(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("home_boundary_p3",
+            REPO / "all/.local/lib/dotcortex/claude_approval_p3.py")
+        p3 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(p3)
+        home = "/home/" + "YOUR_USER".replace("YOUR_", "fixture_").lower()
+        root = home + "/DotCortex"
+        for engine in (self.engine, p3):
+            with self.subTest(engine=engine.__name__):
+                self.assertFalse(engine._unreviewed_home_path(root + "/README.org", [root]))
+                for path in (home, "/" + home, root + "-other/README.org",
+                             root + "/../notes.md", home + "/other/README.org"):
+                    self.assertTrue(engine._unreviewed_home_path(path, [root]), path)
+
+    def test_manifest_public_placeholders(self):
+        raw = MANIFEST_SRC.read_text(encoding="utf-8")
+        self.assertIn("YOUR_HONEY_HOST", raw)
+        self.assertIn("YOUR_HONEY_USER", raw)
+        self.assertIn("YOUR_AGENT_CLAUDE", raw)
+        self.assertNotIn('"honey"', raw)
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+* Honey/Bunta worst-case replay — shared engine, Bunta manifest
+
+RED/GREEN replay of Bunta's real prompt shapes (harvested read-only from his
+session history 2026-10-10) against the shared engine with the committed
+Bunta manifest.  The floor runs with a fake ALWAYS-ALLOW decider: the floor,
+not the average, must survive the worst case.  Hard denies stay hard with
+the decider fully enabled too.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-claude-approval-bunta-honey.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""Worst-case replay: Bunta's Honey prompt shapes vs the shared engine."""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve()
+ENGINE = HERE.parents[3] / "lib/dotcortex/claude_approval_kikin.py"
+MANIFEST_SRC = HERE.parents[4] / ".config/dotcortex/claude-approval-bunta.honey.v2.json"
+TMP = Path(tempfile.mkdtemp(prefix="bunta-replay."))
+
+
+def event(tool_name, tool_input, cwd):
+    return {"hook_event_name": "PermissionRequest", "tool_name": tool_name,
+            "tool_input": tool_input, "cwd": str(cwd)}
+
+
+def load_engine():
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    loader = SourceFileLoader("shared_engine", str(ENGINE))
+    spec = importlib.util.spec_from_loader("shared_engine", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def bunta_manifest(engine, root):
+    data = json.loads(MANIFEST_SRC.read_text())
+    data["gate_inversion"] = {"enabled": False}
+    data["roots"] = [str(root), "/var/tmp"]
+    data["scratch_roots"] = ["/var/tmp"]
+    data["classes"] = [item for item in data["classes"]]
+    # NOTE: no 'entries' key — the hook's loader validates set(data) strictly
+    # and builds entries itself; classify() callers add entries separately.
+    return data
+
+
+class BuntaReplayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = load_engine()
+        cls.root = TMP / "HelmCortex"
+        (cls.root / ".git").mkdir(parents=True)
+        (cls.root / "README.md").write_text("synthetic")
+        cls.scratch = TMP / "scratch"
+        cls.scratch.mkdir()
+        cls.manifest = bunta_manifest(cls.engine, cls.root)
+        # Fake ALWAYS-ALLOW endpoint on an ephemeral local socket.
+        import http.server
+        import threading
+
+        class AlwaysAllow(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("content-length", 0)))
+                body = json.dumps({"answers": [{"choice": "no", "confidence": 0.99,
+                                               "p_yes": 0.01}], "ms": 5}).encode()
+                self.send_response(200)
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        cls.fake_decider = http.server.HTTPServer(("localhost", 0), AlwaysAllow)
+        cls.decider_thread = threading.Thread(target=cls.fake_decider.serve_forever, daemon=True)
+        cls.decider_thread.start()
+        cls.decider_url = f"http://localhost:{cls.fake_decider.server_address[1]}/decide"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.fake_decider.shutdown()
+        cls.fake_decider.server_close()
+        cls.decider_thread.join(timeout=5)
+
+    @classmethod
+    def _with_entries(cls, manifest):
+        data = json.loads(json.dumps(manifest))
+        data["entries"] = {item["name"]: item for item in data.get("classes", [])}
+        data.setdefault("roots", [])
+        data["roots"] = [os.path.realpath(r) for r in data["roots"]]
+        return data
+
+    def _classify(self, command, cwd=None):
+        return self.engine.classify(event("Bash", {"command": command}, cwd or self.root), self._with_entries(self.manifest))
+
+    # ---- hard denies stay hard (decider fully enabled, fake always-allow) ----
+    def test_hard_denies_with_decider_enabled(self):
+        manifest = json.loads(json.dumps(self.manifest))
+        manifest["decider"] = {"enabled": True,
+                               "honey_url": self.decider_url,
+                               "honey_api": "r2d2d",
+                               "kikin_url": None,
+                               "timeout_ms": 2000,
+                               "min_allow_confidence": 0.95,
+                               "questions": "single"}
+        hard = [
+            ("rm -rf /var/tmp/x", "true_floor"),
+            ("sudo -n rc-service honey-badger-opus zap", "true_floor"),
+            ("pip install --user ductor==0.20.1", "true_floor"),
+            ("git push", "true_floor"),
+            ("git reset --hard HEAD~1", "true_floor"),
+            ("cat ~/.ssh/id_ed25519", "true_floor"),
+            ("cat /home/YOUR_HONEY_USER/.kdbx KeePass", "true_floor"),
+            ("cat .env", "true_floor"),
+            ("git worktree prune", "true_floor"),
+        ]
+        manifest = self._with_entries(manifest)
+        for command, expected in hard:
+            with self.subTest(command=command):
+                allow, reason = self.engine.classify(event("Bash", {"command": command}, self.root), manifest)
+                self.assertFalse(allow, command)
+                self.assertEqual(reason, expected, command)
+
+    def test_worst_case_dangerous_corpus_asks_with_always_allow_decider(self):
+        manifest = json.loads(json.dumps(self.manifest))
+        manifest["decider"] = {
+            "enabled": True,
+            "honey_url": self.decider_url,
+            "honey_api": "r2d2d",
+            "kikin_url": None,
+            "timeout_ms": 2000,
+            "min_allow_confidence": 0.95,
+            "questions": "single",
+        }
+        manifest_path = TMP / "dangerous-always-allow-manifest.json"
+        manifest_path.write_text(json.dumps(manifest))
+        log = TMP / "dangerous-always-allow.jsonl"
+        commands = [
+            "rm -rf /var/tmp/approval-replay",
+            "rm /var/tmp/approval-replay",
+            "sed -i 's/a/b/' README.md",
+            "awk -i inplace '{print}' README.md",
+            "perl -i -pe 's/a/b/' README.md",
+            "echo x > /etc/dotcortex-approval-floor",
+            "sudo -n true",
+            "systemctl restart honey-badger-opus",
+            "rc-service honey-badger-opus stop",
+            "pip install --user example-package",
+            "guix install example-package",
+            "git push origin master",
+            "git pull --ff-only",
+            "git fetch origin",
+            "git reset --hard HEAD~1",
+            "git rebase master",
+            "git clean -fd",
+            "git checkout -- README.md",
+            "cat ~/.ssh/id_ed25519",
+            "cat /home/YOUR_AGENT_CLAUDE/.env",
+            "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
+            "cat NEXUS/keys/token",
+            "curl -X POST https://example.invalid/decide",
+        ]
+        env = {
+            **os.environ,
+            "SO_APPROVAL_KIKIN_MANIFEST": str(manifest_path),
+            "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(TMP / "queue.jsonl"),
+            "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE),
+        }
+        hook = HERE.parents[3] / "bin/claude-hook-permission-request"
+        for command in commands:
+            with self.subTest(command=command):
+                completed = subprocess.run(
+                    [str(hook)],
+                    input=json.dumps(event("Bash", {"command": command}, self.root)),
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny", command)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(len(records), len(commands))
+        self.assertTrue(all(record["decision"] == "deny" for record in records))
+        self.assertTrue(all(record["reason"] == "true_floor" for record in records))
+        self.assertTrue(all("decider_status" not in record for record in records))
+
+    # ---- The Honey login user's home is protected hard (fix round 2026-10-10 item 2) ----
+    # Nothing under /home/YOUR_HONEY_USER outside an explicit root, and nothing under
+    # /home/YOUR_HONEY_USER/Secret Vault, may EVER be allowed — floor, even with an
+    # always-allow decider. The Bunta manifest carries NO YOUR_HONEY_USER root, so no
+    # class can reach it and the floor denies all of it.
+    def test_honey_user_home_never_allowed_even_with_always_allow_decider(self):
+        manifest = json.loads(json.dumps(self.manifest))
+        manifest["decider"] = {"enabled": True,
+                               "honey_url": self.decider_url,
+                               "honey_api": "r2d2d",
+                               "kikin_url": None,
+                               "timeout_ms": 2000,
+                               "min_allow_confidence": 0.95,
+                               "questions": "single"}
+        manifest = self._with_entries(manifest)
+        denied = [
+            "cat /home/YOUR_HONEY_USER/notes.md",
+            "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
+            "ls /home/YOUR_HONEY_USER/Secret Vault/",
+            "sed -n 1,60p /home/YOUR_HONEY_USER/.ductor/workspace/state.json",
+            "grep -r x /home/YOUR_HONEY_USER/YOUR_USER-peer/",
+            "head -5 /home/YOUR_HONEY_USER/.ssh/authorized_keys",
+            "cd /home/YOUR_HONEY_USER && cat README",
+            "cat /home/YOUR_HONEY_USER/DotCortex/agents-approval.org",
+            "cat /home/YOUR_HONEY_USER/HelmCortex/LOGS/TODO",
+            "find /home/YOUR_HONEY_USER/Secret Vault -name '*.kdbx'",
+        ]
+        for command in denied:
+            with self.subTest(command=command):
+                allow, reason = self.engine.classify(event("Bash", {"command": command}, self.root), manifest)
+                self.assertFalse(allow, command)
+                self.assertEqual(reason, "true_floor", command)
+
+    # ---- Bunta's real read shapes: class allows (no decider needed) ----
+    def test_bunta_read_shapes_classify(self):
+        allow_cases = [
+            "git status",
+            "git log --oneline -5",
+            "git diff",
+            "grep -c supervisor /etc/init.d/honey-badger-opus",  # hmm: /etc path
+        ]
+        # /etc reads are OUTSIDE roots: must be grey (decider), not class-allowed
+        allow, reason = self._classify("grep -c x /etc/init.d/honey-badger-opus")
+        self.assertFalse(allow)
+        self.assertEqual(reason, "no_match_decider")
+        for command in allow_cases[:3]:
+            with self.subTest(command=command):
+                allow, reason = self._classify(command)
+                self.assertTrue(allow, (command, reason))
+                self.assertEqual(reason, "git_observe")
+
+    # ---- scratch worktree shapes (his /var/tmp, /tmp/dc-honey pattern) ----
+    def test_scratch_worktree_shapes(self):
+        # A real scratch worktree under a listed root (manifest roots include
+        # the synthetic root and /var/tmp is scratch-only; use the root itself).
+        worktree = self.root / "wt-demo"
+        (worktree / ".git").mkdir(parents=True)
+        (worktree / "layers.org").write_text("synthetic")
+        # git observe inside the worktree: class allows
+        allow, reason = self._classify("git status", cwd=worktree)
+        self.assertTrue(allow)
+        self.assertEqual(reason, "git_observe")
+        # cd + sed read inside the worktree: compound of reads
+        allow, reason = self._classify(f"cd {worktree} && sed -n 1,60p layers.org")
+        self.assertEqual((allow, reason), (True, "compound:local_read"))
+        # pytest in the worktree: local_test_run stays DISABLED in the committed
+        # manifest (proposed, not enabled) — the prompt must not silently allow.
+        allow, reason = self._classify("pytest tests/", cwd=worktree)
+        self.assertFalse(allow)
+        self.assertIn(reason, ("local_test_run_disabled", "no_match_decider"))
+
+    # ---- opaque interpreter bodies stay on the absolute floor ----
+    def test_heredoc_and_dash_c_are_floor_routed(self):
+        manifest = json.loads(json.dumps(self.manifest))
+        manifest["decider"] = {"enabled": True,
+                               "honey_url": self.decider_url,
+                               "honey_api": "r2d2d",
+                               "kikin_url": None,
+                               "timeout_ms": 2000,
+                               "min_allow_confidence": 0.95,
+                               "questions": "single"}
+        config = self.engine._decider_config(manifest)
+        self.assertIsNotNone(config)
+        body = "cd /tmp/dc-honey && python3 - <<'EOF'\nfrom pathlib import Path\nEOF"
+        ev = event("Bash", {"command": body}, self.root)
+        self.assertTrue(self.engine._interpreter_body(ev))
+        allow, reason = self.engine.classify(ev, self._with_entries(self.manifest))
+        self.assertFalse(allow)
+        self.assertEqual(reason, "true_floor")
+
+    # ---- the ledger records decider_status ----
+    def test_ledger_via_hook(self):
+        hook = HERE.parents[3] / "bin/claude-hook-permission-request"
+        if not hook.exists():
+            self.skipTest("hook wrapper not tangled")
+        manifest_path = self.scratch / "manifest.json"
+        manifest_path.write_text(json.dumps(self.manifest))
+        log = self.scratch / "decisions.jsonl"
+        payload = json.dumps(event("Bash", {"command": "git status"}, self.root))
+        env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest_path),
+               "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(TMP / "queue.jsonl"),
+               "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)}
+        completed = subprocess.run([str(hook)], input=payload, text=True,
+                                  capture_output=True, env=env, timeout=10, check=False)
+        self.assertEqual(completed.returncode, 0)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(records[-1]["decision"], "allow")
+        self.assertEqual(records[-1]["reason"], "git_observe")
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
+
+* Unattended coordinator RED/GREEN harness
+
+The initial 24-test replay is RED before the implementation below is enabled.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-claude-approval-unattended.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""Exact coordinator grants and unattended denials; all fixtures are synthetic."""
+import contextlib
+import datetime as dt
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+REPO = Path(__file__).resolve().parents[5]
+ENGINE = REPO / 'all/.local/lib/dotcortex/claude_approval_kikin.py'
+READER = REPO / 'all/.local/bin/approval-morning-queue'
+SPEC = importlib.util.spec_from_file_location('unattended_engine', ENGINE)
+e = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(e)
+NAMES = ('mail_send', 'worktree', 'integrate', 'commit', 'codex_dispatch', 'scratch_scp')
+
+
+class UnattendedCoordinatorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='approval-unattended.')
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.repo = self.base / 'DotCortex'
+        self.repo.mkdir()
+        self.wt = self.base / 'DotCortex-wt-test'
+        self.wt.mkdir()
+        self.scratch = self.base / 'scratch'
+        self.scratch.mkdir()
+        self.prompt = self.scratch / 'prompt.txt'
+        self.prompt.write_text('synthetic work')
+        self.message = self.scratch / 'message.txt'
+        self.message.write_text('test: synthetic')
+        os.chmod(self.message, 0o600)
+        self.log = self.scratch / 'worker.log'
+        self.flag = self.base / 'away'
+        self.queue = self.base / 'queue.jsonl'
+        self.ledger = self.base / 'ledger.jsonl'
+        self.git('init', '-b', 'master')
+        self.git('config', 'user.name', 'YOUR_TEST_USER')
+        self.git('config', 'user.email', 'YOUR_USER@YOUR_HOST.helm')
+        (self.repo / 'README.org').write_text('synthetic')
+        self.git('add', '--', 'README.org')
+        self.git('commit', '-m', 'test: fixture', '--', 'README.org')
+        self.git('branch', 'topic')
+        self.manifest = json.loads((REPO / 'all/.config/dotcortex/claude-approval-canary.kikin.v1.json').read_text())
+        self.manifest['gate_inversion'] = {'enabled': False}
+        self.manifest['roots'] = [str(self.repo), str(self.wt)]
+        self.manifest['scratch_roots'] = [str(self.scratch)]
+        self.manifest['decider']['enabled'] = False
+        for entry in self.manifest['classes']:
+            entry['enabled'] = False
+        self.manifest['coordinator_ops'] = {
+            'classes': {name: True for name in NAMES},
+            'seat_account': 'YOUR_SEAT@YOUR_HOST.helm',
+            'repo_roots': [str(self.repo)],
+            'worktree_roots': [str(self.wt)],
+            'scratch_roots': [str(self.scratch)],
+            'build_host': 'YOUR_BUILD_HOST',
+            'remote_scratch_roots': ['/tmp/YOUR_SEAT'],
+            'remote_scratch_prefixes': ['YOUR_SEAT-'],
+        }
+        self.manifest['unattended'] = {
+            'enabled': True, 'away_flag': str(self.flag),
+            'quiet_hours': {'enabled': False, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'},
+        }
+        self.path = self.base / 'manifest.json'
+
+    def git(self, *args):
+        return subprocess.run(['git', '-C', str(self.repo), *args], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+
+    def event(self, command, **extra):
+        return {'hook_event_name': 'PermissionRequest', 'tool_name': 'Bash',
+                'tool_input': {'command': command}, 'cwd': str(self.repo),
+                'session_id': 'YOUR_SESSION', **extra}
+
+    def loaded(self):
+        self.path.write_text(json.dumps(self.manifest))
+        with mock.patch.dict(os.environ, {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path)}):
+            return e._load_manifest()
+
+    def run_hook(self, command, **extra):
+        self.path.write_text(json.dumps(self.manifest))
+        env = {**os.environ, 'SO_APPROVAL_KIKIN_MANIFEST': str(self.path),
+               'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        p = subprocess.run(['/usr/bin/python3', str(ENGINE)], input=json.dumps(self.event(command, **extra)),
+                           env=env, capture_output=True, text=True, timeout=5, check=True)
+        return json.loads(p.stdout)['hookSpecificOutput']['decision'] if p.stdout.strip() else {'behavior': 'ask'}
+
+    def allow(self, command):
+        result = e.classify(self.event(command), self.loaded())
+        self.assertTrue(result[0], (command, result))
+        self.assertTrue(result[1].startswith('coordinator_'), result)
+
+    def ask(self, command):
+        self.assertEqual(self.run_hook(command)['behavior'], 'deny', command)
+
+    def mail(self):
+        return f'mailcortex send --from YOUR_SEAT@YOUR_HOST.helm --to YOUR_REVIEWER@YOUR_REVIEW_HOST.helm --subject "review ready" --body-file {self.prompt}'
+
+    def dispatch(self):
+        return f'nohup codex exec --model YOUR_MODEL --approve-for-me --skip-git-repo-check "$(cat {self.prompt})" < /dev/null > {self.log} 2>&1 &'
+
+    def remote_dispatch(self):
+        return "ssh -o BatchMode=yes -o ConnectTimeout=3 YOUR_BUILD_HOST 'nohup codex exec --model YOUR_MODEL --approve-for-me --skip-git-repo-check \"$(cat /tmp/YOUR_SEAT/prompt.txt)\" < /dev/null > /tmp/YOUR_SEAT/worker.log 2>&1 &'"
+
+    def test_away_ask_denies_and_queues_full_request(self):
+        self.flag.touch()
+        decision = self.run_hook('unknown-command --argument')
+        self.assertEqual(decision['behavior'], 'deny')
+        self.assertIs(decision['interrupt'], False)
+        self.assertIn('deferred: queued', decision['message'])
+        self.assertIn('do not retry or rephrase', decision['message'])
+        record = json.loads(self.queue.read_text())
+        self.assertEqual(record['tool'], 'Bash')
+        self.assertEqual(record['command'], 'unknown-command --argument')
+        self.assertEqual(record['cwd'], str(self.repo))
+        self.assertEqual(record['session'], 'YOUR_SESSION')
+        self.assertEqual(record['request'], self.event('unknown-command --argument'))
+        self.assertIn('timestamp', record)
+        self.assertEqual(self.queue.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.ledger.read_text())['decision'], 'deny')
+
+    def test_away_floor_denies_and_queues(self):
+        self.flag.touch()
+        self.assertEqual(self.run_hook('rm -rf /tmp/YOUR_TEST')['behavior'], 'deny')
+        self.assertEqual(json.loads(self.queue.read_text())['reason'], 'true_floor')
+
+    def test_present_refusal_is_queued_without_terminal_prompt(self):
+        self.ask('unknown-command')
+        self.assertEqual(json.loads(self.queue.read_text())['command'], 'unknown-command')
+
+    def test_away_does_not_change_class_allow(self):
+        self.flag.touch()
+        self.assertEqual(self.run_hook(self.mail())['behavior'], 'allow')
+        self.assertFalse(self.queue.exists())
+
+    def test_quiet_hours_boundaries_timezone_and_flag_or(self):
+        self.manifest['unattended']['quiet_hours']['enabled'] = True
+        manifest = self.loaded()
+        for hour, minute, expected in [(22, 59, False), (23, 0, True), (7, 59, True), (8, 0, False)]:
+            with self.subTest(hour=hour, minute=minute):
+                # January UTC +11: these values are Melbourne-local.
+                instant = dt.datetime(2026, 1, 2, hour, minute, tzinfo=dt.timezone(dt.timedelta(hours=11)))
+                self.assertEqual(e._away_status(manifest, now=instant)[0], expected)
+        self.flag.touch()
+        self.assertTrue(e._away_status(manifest, now=dt.datetime(2026, 1, 2, 12, tzinfo=dt.timezone(dt.timedelta(hours=11))))[0])
+
+    def test_quiet_hours_day_window_and_dst(self):
+        q = self.manifest['unattended']['quiet_hours']
+        q.update(enabled=True, start='09:00', end='17:00')
+        m = self.loaded()
+        for utc, expected in [(dt.datetime(2026, 7, 1, 0, tzinfo=dt.timezone.utc), True),
+                              (dt.datetime(2026, 7, 1, 7, tzinfo=dt.timezone.utc), False)]:
+            self.assertEqual(e._away_status(m, now=utc)[0], expected)
+
+    def test_queue_symlink_failure_still_denies(self):
+        self.flag.touch()
+        victim = self.base / 'victim.txt'
+        victim.write_text('keep me')
+        self.queue.symlink_to(victim)
+        decision = self.run_hook('unknown-command')
+        self.assertEqual(decision['behavior'], 'deny')
+        self.assertIn('queue unavailable', decision['message'])
+        self.assertEqual(victim.read_text(), 'keep me')
+
+    def test_queue_existing_permissions_are_restricted(self):
+        self.flag.touch()
+        self.queue.touch(mode=0o644)
+        self.run_hook('unknown-command')
+        self.assertEqual(self.queue.stat().st_mode & 0o777, 0o600)
+
+    def test_queue_reader_groups_and_clear(self):
+        self.flag.touch()
+        self.run_hook('unknown-command')
+        self.run_hook('another-command', session_id='YOUR_SECOND_SESSION')
+        env = {**os.environ, 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        args = ['/usr/bin/python3', str(READER)]
+        read = subprocess.run(args, env=env, text=True, capture_output=True, timeout=3, check=True)
+        self.assertIn('YOUR_SESSION', read.stdout)
+        self.assertIn('YOUR_SECOND_SESSION', read.stdout)
+        self.assertIn('unknown-command', read.stdout)
+        self.assertEqual(len(self.queue.read_text().splitlines()), 2)
+        subprocess.run(args + ['--clear'], env=env, capture_output=True, timeout=3, check=True)
+        self.assertEqual(self.queue.read_text(), '')
+        self.assertEqual(self.queue.stat().st_mode & 0o777, 0o600)
+
+    def test_coordinator_home_paths_keep_reviewed_boundary(self):
+        root = '/home/YOUR_USER/DotCortex'
+        path = root + '/README.org'
+        self.assertEqual(e._coordinator_path(path, [root], exists=False), path)
+        for outside in [root + '-other/README.org', '/home/YOUR_OTHER_USER/notes.md',
+                        root + '/.env', root + '/../notes.md']:
+            self.assertIsNone(e._coordinator_path(outside, [root], exists=False), outside)
+        with mock.patch.object(e.os.path, 'realpath', return_value='/home/YOUR_OTHER_USER/notes.md'):
+            self.assertIsNone(e._coordinator_path(path, [root], exists=False))
+
+    def test_proven_worktree_home_root_keeps_other_homes_on_floor(self):
+        manifest = self.loaded()
+        root = '/home/YOUR_USER/DotCortex-wt-test'
+        manifest['coordinator_ops']['worktree_roots'] = [root]
+        payload = self.event(f'git worktree add {root}/worker -b worker master')
+        self.assertTrue(e._true_floor(payload, manifest))
+        self.assertFalse(e._true_floor(payload, manifest, 'coordinator_worktree'))
+        for outside in [root + '-other', '/home/YOUR_OTHER_USER/DotCortex-wt-test']:
+            bad = self.event(f'git worktree add {outside}/worker -b worker master')
+            self.assertTrue(e._true_floor(bad, manifest, 'coordinator_worktree'))
+        manifest['coordinator_ops']['classes']['worktree'] = False
+        self.assertFalse(e.classify(payload, manifest)[0])
+
+    def test_mail_exact_and_deviations(self):
+        self.allow(self.mail())
+        for bad in [self.mail().replace('YOUR_SEAT@', 'YOUR_OTHER@'),
+                    self.mail().replace('YOUR_REVIEW_HOST.helm', 'example.invalid'),
+                    self.mail().replace(str(self.prompt), str(self.repo / 'README.org')),
+                    self.mail() + ' --cc YOUR_OTHER@YOUR_HOST.helm',
+                    self.mail() + '; rm README.org']:
+            self.ask(bad)
+
+    def test_worktree_add_exact_and_deviations(self):
+        command = f'git worktree add {self.wt}/worker -b worker master'
+        self.allow(command)
+        self.allow(f'git -C {self.repo} worktree add {self.wt}/worker -b worker master')
+        for bad in [command + ' --force', command.replace('-b worker', '-B worker'),
+                    command.replace('-b worker', '-b wrong'), command.replace(' master', ' HEAD'),
+                    command.replace(str(self.wt), str(self.base / 'other'))]:
+            self.ask(bad)
+
+    def test_worktree_remove_and_prune_exact(self):
+        path = self.wt / 'worker'
+        self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
+        self.allow(f'git worktree remove {path}')
+        self.allow('git worktree prune')
+        self.ask(f'git worktree remove --force {path}')
+        self.ask(f'git worktree remove {self.repo}')
+        self.ask('git worktree prune --expire now')
+
+    def test_worktree_symlink_escape_and_wrong_repo(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (self.wt / 'escape').symlink_to(outside, target_is_directory=True)
+        self.ask(f'git worktree add {self.wt}/escape/worker -b worker master')
+        self.ask(f'git -C {outside} worktree prune')
+
+    def test_ff_merge_requires_master_and_exact_shape(self):
+        command = f'git -C {self.repo} merge --ff-only topic'
+        self.allow(command)
+        self.ask(command.replace('--ff-only', '--no-ff'))
+        self.ask('git merge --ff-only topic')
+        self.git('checkout', 'topic')
+        self.ask(command)
+
+    def test_ff_push_uses_current_remote_tip_and_non_ff_asks(self):
+        remote = self.base / 'origin.git'
+        subprocess.run(['git', 'init', '--bare', str(remote)], capture_output=True, check=True)
+        self.git('remote', 'add', 'origin', str(remote))
+        self.git('push', 'origin', 'master')
+        self.allow('git push origin master')
+        for bad in ['git push --force origin master', 'git push origin topic', 'git push', 'git push --all origin']:
+            self.ask(bad)
+        # Move the real remote to a divergent commit WITHOUT updating origin/master.
+        self.git('checkout', 'topic')
+        (self.repo / 'README.org').write_text('remote divergence')
+        self.git('commit', '-am', 'test: divergence')
+        divergent = self.git('rev-parse', 'HEAD')
+        self.git('push', 'origin', 'topic')  # transfer the object without refreshing origin/master
+        subprocess.run(['git', '--git-dir', str(remote), 'update-ref', 'refs/heads/master', divergent], capture_output=True, check=True)
+        self.git('checkout', 'master')
+        self.ask('git push origin master')
+
+    def test_commit_explicit_paths_and_deviations(self):
+        for prefix in ['git', f'git -C {self.repo}']:
+            self.allow(f'{prefix} commit -m "test: scoped" -- README.org')
+            self.allow(f'{prefix} commit -F {self.message} -- README.org')
+        for bad in ['git commit -m x --', 'git commit -m x', 'git commit -am x -- README.org',
+                    'git commit --amend -m x -- README.org', 'git commit -m x -- .',
+                    'git commit -m x -- :/', 'git commit -m x -- ../other',
+                    f'git commit -F {self.repo}/README.org -- README.org']:
+            self.ask(bad)
+
+    def test_commit_inside_owned_worktree(self):
+        path = self.wt / 'worker'
+        self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
+        payload = self.event('git commit -m "test: scoped" -- README.org', cwd=str(path))
+        self.assertEqual(e.classify(payload, self.loaded()), (True, 'coordinator_commit'))
+
+    def test_codex_dispatch_requires_null_stdin_and_scoped_files(self):
+        self.allow(self.dispatch())
+        for bad in [self.dispatch().replace(' < /dev/null', ''),
+                    self.dispatch().replace('--approve-for-me ', ''),
+                    self.dispatch().replace(str(self.prompt), str(self.repo / 'README.org')),
+                    self.dispatch().replace(str(self.log), '/etc/worker.log'),
+                    self.dispatch() + ' rm README.org', self.dispatch().replace('$(cat ', '$(rm '),
+                    self.dispatch().replace('YOUR_MODEL', 'YOUR_MODEL;id')]:
+            self.ask(bad)
+
+    def test_remote_codex_dispatch_proof_and_deviations(self):
+        with mock.patch.object(e, '_coordinator_remote_proof', return_value=True) as proof:
+            self.allow(self.remote_dispatch())
+            self.assertTrue(proof.called)
+            self.assertFalse(e.classify(self.event(self.remote_dispatch().replace('YOUR_BUILD_HOST', 'YOUR_OTHER_HOST')), self.loaded())[0])
+            self.assertFalse(e.classify(self.event(self.remote_dispatch().replace(' < /dev/null', '')), self.loaded())[0])
+        with mock.patch.object(e, '_coordinator_remote_proof', return_value=False):
+            self.assertFalse(e.classify(self.event(self.remote_dispatch()), self.loaded())[0])
+
+    def test_scp_exact_scope_and_deviations(self):
+        command = f'scp {self.prompt} YOUR_BUILD_HOST:/tmp/YOUR_SEAT/prompt.txt'
+        with mock.patch.object(e, '_coordinator_remote_proof', return_value=True):
+            self.allow(command)
+            self.allow(command.replace('/tmp/YOUR_SEAT/', '/tmp/YOUR_SEAT-job/'))
+            for bad in [command.replace('/tmp/YOUR_SEAT/prompt.txt', '/etc/file'),
+                        command.replace(str(self.prompt), str(self.repo / 'README.org')),
+                        command.replace('scp ', 'scp -r '),
+                        command.replace('YOUR_BUILD_HOST:', 'YOUR_OTHER_HOST:')]:
+                self.assertFalse(e.classify(self.event(bad), self.loaded())[0], bad)
+        with mock.patch.object(e, '_coordinator_remote_proof', return_value=False):
+            self.assertFalse(e.classify(self.event(command), self.loaded())[0])
+
+    def test_disabled_classes_do_not_grant(self):
+        self.manifest['coordinator_ops']['classes'] = {name: False for name in NAMES}
+        for command in [self.mail(), self.dispatch(), 'git worktree prune', 'git commit -m x -- README.org']:
+            self.ask(command)
+
+    def test_secret_symlink_and_floor_always_win(self):
+        secret = self.base / '.env'
+        secret.write_text('synthetic floor fixture')
+        self.prompt.unlink()
+        self.prompt.symlink_to(secret)
+        self.ask(self.mail())
+        self.ask(self.dispatch())
+        for command in ['sudo true', 'git reset --hard HEAD', 'git -C ' + str(self.repo) + ' reset --hard HEAD',
+                        'pip install example', 'cat ~/.ssh/id_rsa', 'cat KEEPASS.kdbx']:
+            self.ask(command)
+
+    def test_worst_case_always_allow_decider_cannot_approve_danger_or_bad_shapes(self):
+        self.manifest['decider']['enabled'] = True
+        self.manifest['decider']['kikin_url'] = 'https://YOUR_DECIDER.invalid/decide'
+        self.loaded()
+        commands = ['rm README.org', 'sudo true', 'git push --force origin master',
+                    'git commit -m x --', self.mail().replace('YOUR_SEAT@', 'YOUR_OTHER@'),
+                    self.dispatch().replace(' < /dev/null', ''),
+                    f'scp {self.prompt} YOUR_BUILD_HOST:/etc/file',
+                    'git -C ' + str(self.repo) + ' reset --hard HEAD', 'cat .env',
+                    "python3 -c 'import os'", self.mail() + '; rm README.org']
+        for away in (False, True):
+            if away:
+                self.flag.touch()
+            for command in commands:
+                out = io.StringIO()
+                env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger),
+                       'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+                with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event(command)))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(True, 'accepted', 1, 'allow')) as decider:
+                    e.main()
+                result = json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'] if out.getvalue().strip() else 'ask'
+                self.assertEqual(result, 'deny', command)
+                decider.assert_not_called()
+
+    def test_timeout_while_away_denies_and_preserves_request(self):
+        self.flag.touch()
+        self.loaded()
+        out = io.StringIO()
+        env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('unknown-command')))), contextlib.redirect_stdout(out), mock.patch.object(e, 'classify', side_effect=TimeoutError('fixture deadline')):
+            e.main()
+        self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], 'deny')
+        self.assertEqual(json.loads(self.queue.read_text())['request'], self.event('unknown-command'))
+
+    def test_manifest_error_while_away_retains_full_request(self):
+        self.flag.touch()
+        self.manifest['schema'] = 'INVALID_SCHEMA'
+        self.assertEqual(self.run_hook('unknown-command')['behavior'], 'deny')
+        self.assertEqual(json.loads(self.queue.read_text())['request'], self.event('unknown-command'))
+        self.path.write_text('{invalid-manifest')
+        env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger),
+               'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        with mock.patch.dict(os.environ, env), mock.patch.object(e, '_away_status', return_value=(True, 'away_flag')), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('second-command')))), contextlib.redirect_stdout(io.StringIO()):
+            e.main()
+        self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['request'], self.event('second-command'))
+
+    def test_default_quiet_window_and_invalid_quiet_config(self):
+        self.manifest['unattended'].pop('quiet_hours')
+        instant = dt.datetime(2026, 1, 2, 14, tzinfo=dt.timezone.utc)  # Melbourne 01:00
+        self.assertTrue(e._away_status(self.loaded(), now=instant)[0])
+        self.manifest['unattended']['quiet_hours'] = {'enabled': True, 'start': 'bad-time'}
+        self.assertEqual(e._away_status(self.loaded(), now=instant), (True, 'invalid_unattended'))
+
+    def test_commit_directory_and_git_routing_overrides_are_refused(self):
+        directory = self.repo / 'bundle'
+        directory.mkdir()
+        (directory / '.env').write_text('synthetic')
+        self.ask('git commit -m x -- bundle')
+        with mock.patch.dict(os.environ, {'GIT_DIR': str(self.base / 'other.git')}):
+            self.assertFalse(e.classify(self.event('git commit -m x -- README.org'), self.loaded())[0])
+
+    def test_codex_log_symlink_escape_is_refused(self):
+        target = self.base / 'outside.log'
+        target.touch()
+        self.log.symlink_to(target)
+        self.ask(self.dispatch())
+
+    def test_remote_proof_fixed_argv_and_symlink_escape(self):
+        config = self.manifest['coordinator_ops']
+        paths = ['/tmp/YOUR_SEAT/prompt.txt', '/tmp/YOUR_SEAT/log.txt']
+        completed = subprocess.CompletedProcess([], 0, '\n'.join(paths) + '\n', '')
+        with mock.patch.object(e.subprocess, 'run', return_value=completed) as run:
+            self.assertTrue(e._coordinator_remote_proof(config, paths, regular_input=paths[0]))
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[:6], ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=1', 'YOUR_BUILD_HOST'])
+            self.assertIn('test ! -L', argv[-1])
+            self.assertEqual(run.call_args.kwargs['stdin'], subprocess.DEVNULL)
+            self.assertLessEqual(run.call_args.kwargs['timeout'], 1)
+        for stdout in ['/etc/passwd\n/tmp/YOUR_SEAT/log.txt\n', 'malformed', '\n'.join(paths + paths) + '\n']:
+            with mock.patch.object(e.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout, '')):
+                self.assertFalse(e._coordinator_remote_proof(config, paths))
+        with mock.patch.object(e.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ssh', 1)):
+            self.assertFalse(e._coordinator_remote_proof(config, paths))
+
+    def test_concurrent_queue_appends_keep_complete_json_records(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with mock.patch.dict(os.environ, {'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = list(pool.map(lambda i: e._queue_morning(self.event(f'fixture-{i}'), 'true_floor', 'away_flag'), range(20)))
+        self.assertTrue(all(results))
+        records = [json.loads(line) for line in self.queue.read_text().splitlines()]
+        self.assertEqual({r['command'] for r in records}, {f'fixture-{i}' for i in range(20)})
+        self.assertEqual(len(records), 20)
+
+    def test_queue_lock_contention_denies_without_hanging(self):
+        import fcntl
+        self.flag.touch()
+        self.queue.touch()
+        with self.queue.open('a') as file:
+            fcntl.flock(file, fcntl.LOCK_EX)
+            decision = self.run_hook('unknown-command')
+        self.assertEqual(decision['behavior'], 'deny')
+        self.assertIn('queue unavailable', decision['message'])
+        self.assertEqual(self.queue.read_text(), '')
+
+    def test_away_decider_ask_denies_but_decider_allow_is_unchanged(self):
+        self.flag.touch()
+        self.manifest['decider']['enabled'] = True
+        self.manifest['decider']['kikin_url'] = 'https://YOUR_DECIDER.invalid/decide'
+        self.loaded()
+        for verdict, expected in [(False, 'deny'), (True, 'allow')]:
+            env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('true')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
+                e.main()
+            self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], expected)
+
+
+    def test_configured_legacy_worktree_remove_and_prune(self):
+        legacy = self.base / 'DotCortex-wt'
+        legacy.mkdir()
+        self.manifest['coordinator_ops']['worktree_roots'].append(str(legacy))
+        self.manifest['roots'].append(str(legacy))
+        path = legacy / 'worker'
+        self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
+        self.allow(f'git worktree remove {path}')
+        self.allow('git worktree prune')
+        # New additions retain the requested <repo>-wt-* root shape.
+        self.ask(f'git worktree add {legacy}/new-worker -b new-worker master')
+
+
+
+if __name__ == '__main__':
+    unittest.main()
+#+END_SRC

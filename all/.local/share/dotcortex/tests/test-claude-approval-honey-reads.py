@@ -210,7 +210,9 @@ class HoneyReadsTests(unittest.TestCase):
 
     def test_approval_hook_sources_have_only_public_home_placeholders(self):
         import re
-        sources = [REPO / "agents-approval.org", REPO / "agents-hooks.org"]
+        sources = [REPO / name for name in ("agents-approval.org", "agents-approval-tests.org",
+            "agents-approval-legacy.org", "agents-approval-engine-local.org",
+            "agents-approval-engine-remote.org", "agents-hooks.org")]
         targets = []
         for source in sources:
             raw = source.read_text(encoding="utf-8")
