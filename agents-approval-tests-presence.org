@@ -92,7 +92,9 @@ class RemotePresenceTests(unittest.TestCase):
     def test_write_floor_includes_git_gate_and_secrets(self):
         self.configure()
         for target in [self.repo / '.git/config', self.repo / '.env', self.scratch / 'approval-morning-queue.jsonl',
-                       self.repo / 'agents-approval.org', self.scratch / 'claude-approval.local.json',
+                       self.repo / 'agents-approval.org', self.repo / 'agents-hooks.org',
+                       self.scratch / 'approval-presence', self.scratch / 'claude-hook-admiral-presence',
+                       self.scratch / 'claude-hook-approval-inverted', self.scratch / 'claude-approval.local.json',
                        self.base / 'outside.md']:
             event = self.event('', tool_name='Write', tool_input={'file_path': str(target), 'content': 'x'})
             with self.subTest(target=target), mock.patch.object(e, '_decider_decide') as decider:
@@ -234,6 +236,21 @@ class RemotePresenceTests(unittest.TestCase):
             self.assertTrue(e._queue_authorize(item,'123456',self.loaded()))
             self.assertTrue(e._queue_claim(item, token)[0])
             self.assertFalse(e._queue_claim(item, token)[0])
+
+    def test_same_intent_duplicate_cannot_replace_held_preview(self):
+        self.configure()
+        with self.queue_env():
+            original=self.event('first command',approval_intent='deliver evidence')
+            duplicate=self.event('second command',approval_intent='deliver evidence',session_id='SECOND_SESSION')
+            item=e._queue_upsert(original,'true_floor','presence',self.loaded(),status='held')
+            nonce=e._queue_begin_hold(item,self.loaded())
+            self.assertEqual(e._queue_upsert(duplicate,'true_floor','presence',self.loaded(),status='held'),item)
+            record=self.records()[0]
+            self.assertEqual(record['request'],original)
+            self.assertEqual(record['session'],original['session_id'])
+            self.assertEqual(record['hold_nonce'],nonce)
+            self.assertEqual(record['count'],2)
+            self.assertEqual(record['requests'],[original,duplicate])
 
     def test_hold_one_use_authenticated_callback_and_timeout(self):
         self.configure()

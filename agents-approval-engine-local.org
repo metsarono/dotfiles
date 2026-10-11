@@ -395,8 +395,9 @@ def _protected_write_target(value):
     parts = Path(path).parts
     name = Path(path).name.casefold()
     return (_protected(path) or '.git' in parts
-        or name.startswith(('agents-approval', 'claude-approval', 'claude_approval', 'approval-queue', 'approval-morning-queue', 'approval-telegram', 'admiral-last-seen', 'approval-away'))
-        or name in {'settings.json', 'settings.shared.json', 'access.json'} and any(x in parts for x in ('.claude', '.config')))
+        or name.startswith(('agents-approval', 'claude-approval', 'claude_approval', 'claude-hook-approval', 'claude-hook-admiral-presence', 'approval-presence', 'approval-queue', 'approval-morning-queue', 'approval-telegram', 'admiral-last-seen', 'approval-away'))
+        or name == 'agents-hooks.org'
+        or name in {'settings.json', 'settings.local.json', 'settings.shared.json', 'access.json'} and any(x in parts for x in ('.claude', '.config')))
 
 
 def _credential_content(payload):

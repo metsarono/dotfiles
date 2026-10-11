@@ -388,8 +388,9 @@ def _protected_write_target(value):
     parts = Path(path).parts
     name = Path(path).name.casefold()
     return (_protected(path) or '.git' in parts
-        or name.startswith(('agents-approval', 'claude-approval', 'claude_approval', 'approval-queue', 'approval-morning-queue', 'approval-telegram', 'admiral-last-seen', 'approval-away'))
-        or name in {'settings.json', 'settings.shared.json', 'access.json'} and any(x in parts for x in ('.claude', '.config')))
+        or name.startswith(('agents-approval', 'claude-approval', 'claude_approval', 'claude-hook-approval', 'claude-hook-admiral-presence', 'approval-presence', 'approval-queue', 'approval-morning-queue', 'approval-telegram', 'admiral-last-seen', 'approval-away'))
+        or name == 'agents-hooks.org'
+        or name in {'settings.json', 'settings.local.json', 'settings.shared.json', 'access.json'} and any(x in parts for x in ('.claude', '.config')))
 
 
 def _credential_content(payload):
@@ -1773,10 +1774,11 @@ def _queue_upsert(event, reason, away_reason, manifest, status='open'):
         items = _queue_read(file)
         item = next((x for x in items if x.get('seat') == seat and x['status'] in {'open', 'held'}
             and (sha in x.get('command_hashes', []) or intent and intent == x.get('intent'))), None)
+        inflight = item is not None and item.get('status') == 'held'
         if item is None:
             item = {'schema':'dotcortex.approval.queue.v2', 'id':secrets.token_hex(12), 'seat':seat,
                 'count':0, 'first_seen':now, 'command_hashes':[], 'requests':[], 'context':context}
-        if item.get('request') != event:
+        if not inflight and item.get('request') != event:
             item['context']=context
             for key in ('approved_by','approved_at','approved_request_sha','confirmation','confirmed_at'):
                 item.pop(key,None)
@@ -1787,9 +1789,14 @@ def _queue_upsert(event, reason, away_reason, manifest, status='open'):
         # the earlier command. The Desk renders one logical item, with history.
         if payload not in item['requests']:
             item['requests'].append(payload)
-        item.update(timestamp=now, tool=payload.get('tool_name'), command=tool.get('command'),
-            cwd=payload.get('cwd'), session=payload.get('session_id'), intent=intent or item.get('intent', ''),
-            reason=reason, away_reason=away_reason, request=event)
+        if not inflight:
+            item.update(timestamp=now, tool=payload.get('tool_name'), command=tool.get('command'),
+                cwd=payload.get('cwd'), session=payload.get('session_id'), intent=intent or item.get('intent', ''),
+                reason=reason, away_reason=away_reason, request=event)
+        elif not item.get('intent') and intent:
+            item['intent'] = intent
+        # Dedupe counts/history may grow while held, but the nonce is bound to
+        # the ORIGINAL request, preview and session until that hook finishes.
         # A second pending hook must not overwrite a first hook's nonce.
         if item.get('status') != 'held':
             item['status'] = status
