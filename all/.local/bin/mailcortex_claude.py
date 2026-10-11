@@ -125,6 +125,15 @@ def scan_batch(api, seat, record, adapter, now):
     if now < min(item[2] for item in pending) + record["coalesce_seconds"]:
         return 0
     last = w.latest_injection(seat)
+    for path in (w.MAILCORTEX.runtime_root() / "receipts" / seat).glob("*.json"):
+        if path.is_symlink():
+            raise w.WatcherError("unsafe Claude wake receipt")
+        value = json.loads(path.read_text())
+        if value.get("wake_state") in {"injecting", "delivery_unknown"}:
+            receipt = w.safe_receipt(seat, value["message_id"])
+            if path != w.MAILCORTEX.receipt_path(seat, value["message_id"]):
+                raise w.WatcherError("Claude wake receipt identity mismatch")
+            last = max(last, float(receipt["wake_updated_at"]))
     if last and now < last + record["rate_limit_seconds"]:
         receipts("queued", reason="rate_limited")
         return 0
@@ -272,8 +281,8 @@ def remote_request(request):
 
 def pending_terminal(owner):
     try:
-        ready, _, _ = select.select([sys.stdin.fileno(), owner.master_fd], [], [], 0)
-        return bool(ready) or bool(owner.input_classifier.pending) or owner.stdin_eof
+        ready, _, _ = select.select([sys.stdin.fileno(), owner.master_fd, owner.socket.fileno()], [], [], 0)
+        return bool(ready) or bool(owner.input_classifier.buffer) or owner.input_classifier.in_bracketed_paste or owner.stdin_eof
     except (OSError, ValueError, AttributeError):
         return True
 
@@ -314,6 +323,7 @@ def owner_control(owner, request, warm):
     owner._record_transcript_activity()
     if (owner.status != "idle" or owner.screen_state != "idle" or owner.lifecycle_health != "wired"
             or owner.compacting or owner.recovery_pending or owner.recovery_awaiting
+            or getattr(owner, "mailcortex_input_dirty", True)
             or owner.transcript_gate_blocked or owner.transcript_partial
             or owner.transcript_quiescence_deadline is not None
             or not owner.last_normal_stop
@@ -352,10 +362,28 @@ def launch(argv):
     base = warm.Supervisor
 
     class MailOwner(base):
+        def __init__(self, *args, **kwargs):
+            self.mailcortex_input_dirty = False
+            super().__init__(*args, **kwargs)
+
+        def _record_input_observations(self, observations, forwarded=True):
+            if any(human for _kind, _length, human in observations):
+                self.mailcortex_input_dirty = True
+            return super()._record_input_observations(observations, forwarded=forwarded)
+
+        def _handle_event(self, message):
+            response = super()._handle_event(message)
+            # A normal Stop resets the governor's activity timestamp, but must
+            # NEVER erase unfinished input typed while the preceding turn ran.
+            if (response.get("ok") is True and not response.get("ignored")
+                    and message.get("event") == "user-prompt-submit"):
+                self.mailcortex_input_dirty = False
+            return response
+
         def _handle_control(self, message):
             if message.get("command") in {"mailcortex-status", "mailcortex-admit"}:
                 return owner_control(self, message, warm)
             return super()._handle_control(message)
 
     warm.Supervisor = MailOwner
-    return warm.main(argv)
+    return warm.shell_exit_code(warm.main(argv))

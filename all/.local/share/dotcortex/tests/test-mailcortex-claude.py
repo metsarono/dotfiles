@@ -122,6 +122,17 @@ class ClaudeWakeTests(unittest.TestCase):
         self.assertEqual(self.w.locked_scan(self.registry, a, now=131), 0)
         self.assertEqual(self.w.locked_scan(self.registry, a, now=132), 1)
 
+    def test_unknown_attempt_also_rate_limits_new_mail(self):
+        self.mail(1)
+        self.w.MAILCORTEX.write_wake_receipt("worker", "<m1@fixture.helm>", "delivery_unknown",
+                                            wake_updated_at=10)
+        self.mail(2); a = self.adapter()
+        self.w.locked_scan(self.registry, a, now=20)
+        self.assertEqual(self.w.locked_scan(self.registry, a, now=22), 0)
+        self.assertEqual(a.runner.call_count, 0)
+        self.assertEqual(self.w.locked_scan(self.registry, a, now=130), 1)
+        self.assertEqual(self.receipt(1)["wake_state"], "delivery_unknown")
+
     def test_busy_at_admission_is_queued_and_can_retry(self):
         self.mail(1)
         self.w.locked_scan(self.registry, self.adapter(), now=10)
@@ -172,10 +183,11 @@ class ClaudeWakeTests(unittest.TestCase):
         for field, value in (("status", "active"), ("screen_state", "blocked"),
                              ("screen_state", "unknown"), ("last_local_input", 11),
                              ("compacting", True), ("recovery_pending", True),
-                             ("transcript_gate_blocked", True), ("lifecycle_health", "missing")):
+                             ("transcript_gate_blocked", True), ("lifecycle_health", "missing"), ("mailcortex_input_dirty", True)):
             with self.subTest(field=field):
                 setattr(o, field, value)
-                with mock.patch.object(self.c, "pending_terminal", return_value=False):
+                with mock.patch.object(self.c, "pending_terminal", return_value=False), \
+                     mock.patch.object(self.c, "owner_matches", return_value=True):
                     self.assertEqual(self.c.owner_control(o, self.request(), self.fake_warm())["status"], "busy")
                 setattr(o, field, getattr(self.fake_owner(), field))
 
@@ -188,7 +200,8 @@ class ClaudeWakeTests(unittest.TestCase):
             last_local_input=None, last_lifecycle_activity=10, lifecycle_health="wired", compacting=False,
             recovery_pending=False, recovery_awaiting=False, transcript_gate_blocked=False,
             transcript_quiescence_deadline=None, transcript_partial=b"", master_fd=99,
-            stdin_eof=False, input_classifier=types.SimpleNamespace(pending=bytearray()),
+            stdin_eof=False, mailcortex_input_dirty=False,
+            input_classifier=types.SimpleNamespace(buffer=bytearray(), in_bracketed_paste=False),
             _gate_reason=lambda purpose: None, _write_state=mock.Mock(), timer_generation=0,
             _guard_log=mock.Mock(), _record_transcript_activity=mock.Mock())
 
@@ -219,6 +232,181 @@ class ClaudeWakeTests(unittest.TestCase):
                    "operation": "status", "target": self.record["claude_target"]}
         with mock.patch.object(self.c, "resolve_owner", side_effect=RuntimeError("unsafe")):
             self.assertEqual(self.c.remote_request(request)["status"], "unavailable")
+
+    def test_remote_roundtrip_rechecks_exact_owner_and_keeps_lost_ipc_unknown(self):
+        r = {"protocol": self.c.PROTOCOL, "request_id": "c" * 32, "operation": "admit",
+             "target": self.record["claude_target"], "owner": self.owner, "text": "short wake"}
+        with mock.patch.object(self.c, "resolve_owner", return_value=(self.owner, self.base / "socket")), \
+             mock.patch.object(self.c, "socket_request", return_value=dict(
+                 protocol=self.c.PROTOCOL, request_id=r["request_id"], owner=self.owner, status="accepted")) as ipc:
+            self.assertEqual(self.c.remote_request(r)["status"], "accepted")
+            self.assertEqual(ipc.call_args.args[1]["command"], "mailcortex-admit")
+            r["owner"] = dict(self.owner, epoch=2)
+            self.assertEqual(self.c.remote_request(r)["status"], "unavailable")
+            self.assertEqual(ipc.call_count, 1)
+            r["owner"] = self.owner
+            ipc.side_effect = OSError("lost acknowledgement")
+            self.assertEqual(self.c.remote_request(r)["status"], "unknown")
+
+    def test_partial_pty_write_keeps_owner_claim_unknown(self):
+        o = self.fake_owner(); warm = self.fake_warm()
+        warm.write_all.side_effect = OSError("partial write")
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "unknown")
+            self.assertEqual(o.status, "active")
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "busy")
+
+    def test_resolve_owner_binds_private_runtime_to_exact_single_tmux_pane(self):
+        import socket
+        target = dict(self.record["claude_target"], tmux_socket=str(self.base / "tmux.sock"),
+                      runtime_dir=str(self.base / "runtime"))
+        root = Path(target["runtime_dir"]) / "claude-idle-compaction" / self.owner["channel"]
+        root.mkdir(parents=True)
+        root.chmod(0o700); root.parent.chmod(0o700)
+        control = root / "control.sock"
+        with socket.socket(socket.AF_UNIX) as tmux, socket.socket(socket.AF_UNIX) as ipc:
+            tmux.bind(target["tmux_socket"]); os.chmod(target["tmux_socket"], 0o600)
+            ipc.bind(str(control)); control.chmod(0o600)
+            state = root / "state.json"
+            state.write_text(json.dumps(dict(self.owner, supervisor_pid=os.getpid(),
+                completed_turn_epoch=1, control_socket=str(control))))
+            state.chmod(0o600)
+            row = f"YOUR_TMUX_SESSION\t%1\t{os.getpid()}\t/dev/pts/1\t0\t0\n"
+            result = subprocess.CompletedProcess([], 0, row, "")
+            with mock.patch.object(self.c.subprocess, "run", return_value=result) as run:
+                owner, path = self.c.resolve_owner(target)
+                self.assertEqual(path, control)
+                self.assertEqual(owner["supervisor_pid"], os.getpid())
+                self.assertIn("=YOUR_TMUX_SESSION", run.call_args.args[0])
+                for bad in (row + row, row.replace("\t0\t0", "\t0\t1"), row.replace("YOUR_TMUX_SESSION", "other")):
+                    result.stdout = bad
+                    with self.assertRaises(ValueError): self.c.resolve_owner(target)
+                result.stdout = row
+                state.chmod(0o644)
+                with self.assertRaises(ValueError): self.c.resolve_owner(target)
+
+    def test_status_failure_and_bad_claude_mail_do_not_block_other_seats(self):
+        self.mail(1)
+        mailbox = self.base / "Mail/seats/other"
+        for leaf in ("new", "cur", "tmp"): (mailbox / leaf).mkdir(parents=True)
+        (mailbox / "new/one").write_bytes((self.mailbox / "new/1").read_bytes())
+        local = dict(host="fixture-host", mailbox="seats/other", harness="codex", transport="herdr",
+                     herdr_target="local", herdr_session="local", rate_limit_seconds=0)
+        registry = dict(self.registry, seats={"worker": self.record, "other": local})
+        fallback = mock.Mock()
+        fallback.resolve_idle_pane.return_value = "wT:p1"
+        a = self.adapter()
+        a.runner.side_effect = OSError("ssh unavailable")
+        factory = types.SimpleNamespace(for_record=lambda r: a if r["transport"] == "claude-ssh" else fallback)
+        self.w.locked_scan(self.registry, a, now=10)
+        self.assertEqual(self.w.locked_scan(registry, factory, now=12), 1)
+        self.assertEqual(self.receipt(1)["wake_state"], "queued")
+        (self.mailbox / "new/bad").write_text("malformed")
+        self.assertEqual(self.w.locked_scan(registry, factory, now=14), 0)
+
+    def start_pty(self):
+        import pty
+        import select
+        import time
+        runtime = self.base / "pty-runtime"
+        home = self.base / "pty-home"
+        runtime.mkdir(); home.mkdir()
+        fake = self.base / "fake-claude"
+        fake.write_text("#!/usr/bin/env python3\nimport os,sys,signal\n"
+                        "signal.signal(signal.SIGUSR1, lambda *a: print('Do you want to proceed?', flush=True))\n"
+                        "signal.signal(signal.SIGUSR2, lambda *a: print('\\u276f ', flush=True))\n"
+                        "print('\\u276f ', flush=True)\n"
+                        "for line in sys.stdin: print('RECEIVED:' + line.strip(), flush=True)\n")
+        fake.chmod(0o755)
+        master, slave = pty.openpty()
+        tty = os.ttyname(slave)
+        env = dict(os.environ, HOME=str(home), XDG_RUNTIME_DIR=str(runtime),
+                   XDG_STATE_HOME=str(home / 'state'), TMUX_PANE='%1',
+                   CLAUDE_IDLE_REAL_EXECUTABLE=str(fake), CLAUDE_IDLE_CACHE_PROFILE='short',
+                   CLAUDE_SHORT_CACHE_IDLE_COMPACT_SECONDS='600', CLAUDE_IDLE_WATCHED_SERVERS='',
+                   CLAUDE_IDLE_COMPACT_TRANSCRIPT_QUIESCENCE_SECONDS='1')
+        # Explicit allowlist: no credentials, interactive hooks, or real session endpoints.
+        env = {k:v for k,v in env.items() if k in {'PATH','HOME','XDG_RUNTIME_DIR','XDG_STATE_HOME','TMUX_PANE',
+                'CLAUDE_IDLE_REAL_EXECUTABLE','CLAUDE_IDLE_CACHE_PROFILE',
+                'CLAUDE_SHORT_CACHE_IDLE_COMPACT_SECONDS','CLAUDE_IDLE_WATCHED_SERVERS',
+                'CLAUDE_IDLE_COMPACT_TRANSCRIPT_QUIESCENCE_SECONDS'}}
+        process = subprocess.Popen([str(BIN / 'mailcortex-claude-warm')], stdin=slave,
+                                   stdout=slave, stderr=slave, env=env, start_new_session=True)
+        os.close(slave)
+        output = bytearray()
+        def cleanup():
+            process.terminate()
+            try: process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait(timeout=2)
+            os.close(master)
+        self.addCleanup(cleanup)
+        def drain(duration=0.05):
+            until = time.monotonic() + duration
+            while time.monotonic() < until:
+                ready, _, _ = select.select([master], [], [], max(0, until-time.monotonic()))
+                if ready:
+                    try: output.extend(os.read(master, 65536))
+                    except OSError: break
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            paths = list(runtime.glob('claude-idle-compaction/claude-*/state.json'))
+            drain()
+            if paths and b'\xe2\x9d\xaf' in output: break
+            if process.poll() is not None: self.fail(output.decode(errors='replace'))
+        self.assertTrue(paths, output.decode(errors='replace'))
+        path = paths[0]
+        state = json.loads(path.read_text())
+        control = Path(state['control_socket'])
+        transcript = self.base / 'transcript.jsonl'; transcript.write_text('')
+        sid = 'b' * 32
+        def event(name):
+            return self.c.socket_request(control, dict(kind='event', channel=state['channel'],
+                event=name, session_id=sid, transcript_path=str(transcript), stop_hook_active=False))
+        self.assertTrue(event('session-start')['ok'])
+        self.assertTrue(event('stop')['ok'])
+        import signal
+        os.kill(state['pid'], signal.SIGUSR2)
+        owner = dict(self.owner, channel=state['channel'], session_id=sid,
+                     supervisor_pid=process.pid, epoch=1, pane_tty=tty)
+        request = dict(self.request(), channel=state['channel'], owner=owner)
+        # Status requests omit the admission-only text field.
+        def status():
+            r = dict(request, command='mailcortex-status'); r.pop('text')
+            return self.c.socket_request(control, r)
+        while time.monotonic() < deadline:
+            drain()
+            if status()['status'] == 'idle': break
+        self.assertEqual(status()['status'], 'idle', output.decode(errors='replace'))
+        return control, request, event, master, output, drain, path
+
+    def test_real_pty_owner_admits_once_without_terminal_typing(self):
+        control, request, event, master, output, drain, path = self.start_pty()
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'accepted')
+        drain(0.2)
+        self.assertIn(b'RECEIVED:short wake', output)
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+
+    def test_real_pty_permission_screen_refuses(self):
+        import signal
+        control, request, event, master, output, drain, path = self.start_pty()
+        state = json.loads(path.read_text())
+        os.kill(state['pid'], signal.SIGUSR1)
+        drain(0.2)
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+        self.assertNotIn(b'RECEIVED:short wake', output)
+
+    def test_real_pty_stop_does_not_erase_half_typed_input(self):
+        control, request, event, master, output, drain, path = self.start_pty()
+        self.assertTrue(event('user-prompt-submit')['ok'])
+        os.write(master, b'half typed')
+        drain(0.2)
+        self.assertTrue(event('stop')['ok'])
+        request['owner']['epoch'] = 2
+        drain(1.3)
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+        self.assertNotIn(b'RECEIVED:short wake', output)
 
 
 if __name__ == "__main__":
