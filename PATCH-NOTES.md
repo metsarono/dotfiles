@@ -21,9 +21,11 @@ durable session origin, resolves its authorized delivery adapter, and calls
 `all/.bots/patches/hermes-mailcortex-idle-prompt.patch` exposes a narrow,
 authenticated conditional endpoint around that platform path.  It accepts only
 an existing Telegram DM key, refuses any observed work or pending adapter input,
-and returns `accepted` only after the adapter's real session guard accepts the
-event.  Therefore the injected turn and its adapter-delivered reply occupy the
-Telegram lane the Admiral watches.
+and returns `accepted` only after the target session's turn, lease, admission,
+and pending-input state is clear and the adapter's real session guard accepts
+the event.  Permanent gateway infrastructure tasks and unrelated sessions do
+not block it.  Therefore the injected turn and its adapter-delivered reply
+occupy the Telegram lane the Admiral watches.
 
 ## DeepSeek finding
 
@@ -42,14 +44,6 @@ Telegram inbound.  The existing harness feed then publishes through its own
 Telegram transport exactly as it does for an owner-originated turn.  The
 watcher requires a `telegram-...` target and mints an unguessable ID in that
 namespace; it does not call the Bot API.
-
-The remaining live defect was a cold-start ordering race.  Restoring a session
-called `adopt()` before reinstalling its durable chat binding.  Adoption can
-synchronously replay the queued MailCortex `user/message`, so the Bridge
-dropped that event as unbound.  The later assistant event arrived after the
-session became live: pvox spoke it, but the feed had no pending Telegram
-inbound and sent nothing.  The patch now binds the validated persisted session
-before adoption, preserving the wake event without changing pvox behavior.
 
 ## Ductor finding
 
@@ -119,21 +113,8 @@ routes to Nano's existing health listener.
 ## Review and activation order
 
 1. Preflight the complete dsh patch series against a pristine copy of its pinned
-   revision, build it, and run its full suite.  On the approved DotCortex
-   checkout, the coordinator applies it with:
-
-   ```bash
-   cd ~/DotCortex
-   tangle-one package-bun.org
-   BUN_BUILD_ONLY=dsh-telegram bun-apply
-   cd ~/HelmCortex/NEXUS/git/dsh-telegram
-   npm run check
-   ```
-
-   Do not pass `--help` to `bun-apply`.  After the check passes, restart only
-   Orca through the verified local service owner, and only after the Admiral's
-   explicit approval.  Require the existing readiness check to pass before
-   releasing queued MailCortex work.
+   revision, build it, and run its full suite.  With explicit approval, apply
+   the series and restart only dsh; require its readiness check to pass.
 2. Run `ductor-seam-apply --site YOUR_DISPOSABLE_SITE` against a pristine Ductor
    0.20.1 copy, then repeat with `--check`.  The complete series, including
    `idle_prompt_telegram.patch`, must apply with zero fuzz and compile.  With
@@ -166,16 +147,6 @@ the persisted receipt prevents automatic resend.
   Telegram-delivery assertion failing before the seam.
 - DeepSeek follow-up GREEN: watcher 39/39 and the pristine, fully patched dsh
   suite 75/75.  Cumulative relevant GREEN count at this point: 159/159.
-- Orca restart-race RED: the real bridge/feed fixture passed the already-bound
-  case but failed the adopt-before-bind restart case, 1/2; the expected final
-  Telegram send list was empty while the later assistant event remained
-  routable.
-- Orca restart-race GREEN: generated patch applies cleanly to both the exact
-  staged pvox-bearing runtime shape and the pristine pinned ordered patch
-  series.  Focused suites pass 25/25 bridge-final-answer and 6/6 chat-bindings.
-  The official process-isolated package check passes 75/75 test files; running
-  those files individually to expose case totals passes exactly 697/697, up
-  from the previous 694/694 by the three requested integration regressions.
 - Ductor follow-up RED: focused encrypted-router fixture 0/1; the admitted final
   result did not reach the fake Telegram transport.  The first complete-series
   preflight also refused the incompatible combined v1/v2 patch before mutation;
