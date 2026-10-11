@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+
+def main():
+    try:
+        here=Path(__file__).resolve()
+        path=next(p for p in [here.parent/'claude_approval_runtime.py',here.parents[1]/'lib/dotcortex/claude_approval_runtime.py'] if p.is_file())
+        spec=importlib.util.spec_from_file_location('approval_runtime',path)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        sys.argv=[sys.argv[0],'prompt']
+        return module.presence_main()
+    except Exception:
+        return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

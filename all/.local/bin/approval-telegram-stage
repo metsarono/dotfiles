@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Preflight the complete new Telegram seam against the pinned fleet baseline.
+Only creates a candidate directory; never installs, restarts or edits upstream.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import subprocess
+
+PINNED_SHA = 'd902d7195a527b579b889cfdbf251fc24fd224a68e319ac6b7c3b691515c3458'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--upstream', type=Path, required=True)
+    parser.add_argument('--destination', type=Path, required=True)
+    args = parser.parse_args()
+    upstream = args.upstream.resolve(strict=True)
+    if args.destination.exists() or args.destination.is_symlink(): parser.error('destination must be new')
+    # Complete pinned runtime is staged before applying ANY patch.
+    body = (upstream/'server.ts').read_bytes()
+    if hashlib.sha256(body).hexdigest() != PINNED_SHA: parser.error('unsupported upstream hash; live runtime untouched')
+    version = json.loads((upstream/'.claude-plugin/plugin.json').read_text()).get('version')
+    if version != '0.0.7': parser.error('unsupported plugin version')
+    here = Path(__file__).resolve().parents[1]/'share/dotcortex/approval-telegram'
+    shutil.copytree(upstream,args.destination,symlinks=True)
+    patch = here/'holds.patch'
+    subprocess.run(['patch','--batch','--fuzz=0','--dry-run','-p1','-i',str(patch)],cwd=args.destination,check=True)
+    subprocess.run(['patch','--batch','--fuzz=0','-p1','-i',str(patch)],cwd=args.destination,check=True)
+    shutil.copy2(here/'approval-holds.ts',args.destination/'approval-holds.ts')
+    final=(args.destination/'server.ts').read_text()
+    for seam in ['startApprovalHolds(bot, loadAccess, STATE_DIR)', 'await handleApprovalCallback(ctx, data, loadAccess())', 'await approvalPresence(String(from.id))']:
+        if final.count(seam)!=1: raise ValueError('invalid generated seam')
+    # No package install. Existing lock and dependencies must already be present.
+    subprocess.run(['bun','build',str(args.destination/'server.ts'),'--target=bun','--outdir',str(args.destination/'approval-preflight')],cwd=args.destination,check=True)
+    print('Review-ready candidate: '+str(args.destination))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

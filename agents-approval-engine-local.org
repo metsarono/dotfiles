@@ -126,6 +126,13 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         raw = json.dumps(floor_event.get("tool_input", {}), ensure_ascii=False, sort_keys=True).casefold()
     except (TypeError, ValueError):
         return True
+    if event.get('tool_name') in {'Write', 'Edit', 'MultiEdit', 'NotebookEdit'} and not isinstance(command, str):
+        # Report prose is data, not a filesystem operand. Credential assignment
+        # evidence stays on the floor; merely naming an environment variable is
+        # harmless. All destinations, including symlink targets, are proved below.
+        if _credential_content(tool_input):
+            return True
+        raw = json.dumps({key: tool_input[key] for key in ('file_path', 'notebook_path', 'path') if key in tool_input}).casefold()
     if _protected(raw) or "logs/telegram/personal" in raw or "palmcortex" in raw:
         return True
     roots = _policy_roots(manifest) if manifest is not None and _inversion_enabled(manifest) else (tuple(manifest.get("roots") or ()) + tuple(manifest.get("scratch_roots") or ())) if manifest is not None else ()
@@ -154,14 +161,16 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         words = None
     if readonly_proven is None:
         readonly_proven = bool(manifest is not None and _ssh_readonly_proven(event, manifest))
-    if (not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp'}
+    if (not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}
             and _split_approval_compound(tool_input['command']) is None):
         return True
     if _unreviewed_home_path(raw, roots) and not readonly_proven:
         return True
     # The floor sees every shell stage, including wrappers and redirects without
     # whitespace. A failed parser never reaches a probabilistic veto.
-    if not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp'}:
+    if _inert_local_command(command, event.get('cwd', '/')):
+        return False
+    if not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}:
         if _dynamic_shell(command):
             substitutions = _shell_substitutions(command)
             residual = _remove_shell_substitutions(command, substitutions) if substitutions is not None else None
@@ -170,6 +179,8 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
                 return True
             if _dynamic_shell(residual):
                 return True
+            if re.fullmatch(r'readlink -f "\$\(command -v [A-Za-z0-9_.+-]+\)"', command):
+                return False
             try:
                 words = shlex.split(residual, posix=True)
             except ValueError:
@@ -242,7 +253,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         # checked every parseable line; anything left unparsed is floor.
         return True
     lowered = [word if word in {"-C", "-F"} else word.casefold() for word in words]
-    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         # 2026-10-10 shared-engine carve-out: the ssh_readonly class (p3 port)
         # may allow a parser-PROVEN readonly ssh command to the reviewed host.
         # The proof runs here, inside the floor, so no other REMOTE shape and
@@ -268,10 +279,18 @@ def _floor_verb(lowered, coordinator=None):
         return True
     if lowered and lowered[0] in {'cp', 'mv', 'ln', 'install'} and '-f' in lowered[1:]:
         return True
+    if lowered and lowered[0] in {'approval-telegram-verdict', 'approval-telegram-presence', 'approval-telegram-hold'}:
+        return True
+    if lowered[:1] == ['approval-presence'] and lowered[1:2] != ['status']:
+        return True
+    if lowered[:1] == ['approval-queue'] and lowered[1:2] in (['claim'], ['approve']):
+        return True
     if lowered[:1] in (['eval'], ['source'], ['.'], ['xargs']):
         return True  # opaque execution cannot erase the floor
     # 2026-10-10 (replay finding): a bare 'kill PID' is still process control —
     # any kill form floors (flag forms AND plain PID forms).
+    if lowered[:2] == ["printf", "-v"]:
+        return True
     if lowered and lowered[0] == "kill":
         return True
     # Plain rm is always destructive, including non-recursive forms.  A
@@ -287,7 +306,7 @@ def _floor_verb(lowered, coordinator=None):
     ):
         return True
     # Remote and service control also floor per segment ('cd X && ssh y'):
-    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         return True
     if any(word in SERVICE or word in {"pkill", "killall"} for word in lowered):
         return True
@@ -370,7 +389,74 @@ def _floor_verb(lowered, coordinator=None):
     return any(word in {"--output", "--exec", "--execdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"} or word.startswith("--output=") for word in lowered)
 
 
-def _write_target_outside(raw, cwd, roots):
+
+def _protected_write_target(value):
+    path = str(value).replace('\\', '/')
+    parts = Path(path).parts
+    name = Path(path).name.casefold()
+    return (_protected(path) or '.git' in parts
+        or name.startswith(('agents-approval', 'claude-approval', 'claude_approval', 'approval-queue', 'approval-morning-queue', 'approval-telegram', 'admiral-last-seen', 'approval-away'))
+        or name in {'settings.json', 'settings.shared.json', 'access.json'} and any(x in parts for x in ('.claude', '.config')))
+
+
+def _credential_content(payload):
+    # Scan actual strings: JSON serialization escapes quotes and can hide a
+    # quoted shell value or a JSON key/value assignment from the floor.
+    def strings(value):
+        if isinstance(value,str):
+            yield value
+        elif isinstance(value,dict):
+            for key,child in value.items():
+                if key not in {'file_path','notebook_path','path'}:
+                    yield from strings(child)
+        elif isinstance(value,list):
+            for child in value:
+                yield from strings(child)
+    assignment = re.compile(r'''(?i)\b[A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|SECRET_KEY|PASSWORD|BOT_TOKEN)\b\s*["']?\s*[=:]\s*["']?[A-Za-z0-9_/-]{8,}''')
+    return any(assignment.search(text) for text in strings(payload))
+
+
+def _inert_local_command(command, cwd='/'):
+    """Exact local probes and output arguments; no shell effects or secret values."""
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not words:
+        return False
+    if re.fullmatch(r'command -v [A-Za-z0-9_.+-]+', command):
+        return True
+    if re.fullmatch(r'(?:type|which) [A-Za-z0-9_.+-]+', command):
+        return True
+    if (len(words) == 3 and words[:2] == ['readlink','-f']
+            and not SHELL_META.search(command) and not _dynamic_shell(command)):
+        path = _lexical(words[2], cwd)
+        return path is not None and not _protected(path) and not _protected(os.path.realpath(path))
+    if words[0] not in {'echo','printf'}:
+        return False
+    if words[0] == 'printf' and (len(words) < 2 or words[1].startswith('-') or '$' in words[1]):
+        return False  # printf -v mutates; an expanded format may introduce -v
+    quote, cursor = None, 0
+    while cursor < len(command):
+        char = command[cursor]
+        if quote == "'":
+            if char == "'": quote = None
+            cursor += 1; continue
+        if char == '$':
+            match = re.match(r'\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})', command[cursor:])
+            if match is None: return False
+            name = match.group(1) or match.group(2)
+            if re.search(r'(?i)(?:TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL)', name): return False
+            cursor += match.end(); continue
+        if char in {'`', '\\'} or quote is None and char in ';|&<>\n\r(){}*?[]':
+            return False
+        if char == quote: quote = None
+        elif quote is None and char in {"'",'"'}: quote = char
+        cursor += 1
+    return quote is None
+
+
+def _write_target_outside(raw, cwd, roots, protect_gate=False):
     """Return True when a file-writing target escapes approved roots."""
     if raw in {"", "-"}:
         return False
@@ -378,7 +464,7 @@ def _write_target_outside(raw, cwd, roots):
     if lexical is None:
         return True
     resolved = os.path.realpath(lexical)
-    return _protected(resolved) or not any(_inside(resolved, root) for root in roots)
+    return _protected(resolved) or (protect_gate and (_protected_write_target(lexical) or _protected_write_target(resolved))) or not any(_inside(resolved, root) for root in roots)
 
 
 def _tool_write_outside(event, roots):
@@ -387,7 +473,7 @@ def _tool_write_outside(event, roots):
     if not isinstance(payload, dict) or not isinstance(cwd, str):
         return True
     target = payload.get('file_path', payload.get('notebook_path', payload.get('path')))
-    return not isinstance(target, str) or not target or _write_target_outside(target, cwd, roots)
+    return not isinstance(target, str) or not target or _write_target_outside(target, cwd, roots, protect_gate=True)
 
 
 def _dynamic_shell(command):
@@ -540,7 +626,9 @@ def _substitution_data_only(command, substitutions):
                 continue
             if words[index - 1] in {'>', '>>', '<', '>&', '<&', '&>', '&>>'}:
                 return False
-            if verb not in {'echo', 'printf'} and not (verb in {'grep', 'rg'} and index == pattern):
+            if (verb not in {'echo', 'printf'} and not (verb in {'grep', 'rg'} and index == pattern)
+                    and not (verb == 'readlink' and words[1:2] == ['-f'] and len(words) == 3
+                             and len(substitutions) == 1 and re.fullmatch(r'command -v [A-Za-z0-9_.+-]+', substitutions[0][2]))):
                 return False
     return True
 
@@ -669,6 +757,8 @@ def _unwrap_words(words):
             words.pop(0)
             continue
         verb = words[0].rsplit('/', 1)[-1]
+        if verb == 'command' and len(words) == 3 and words[1] == '-v' and re.fullmatch(r'[A-Za-z0-9_.+-]+', words[2]):
+            return words
         if verb in {'command', 'builtin', 'exec', 'nohup', 'env'}:
             words.pop(0)
             while words and words[0] in {'--', '-p', '-i'}:
@@ -730,7 +820,7 @@ def _write_outside_roots(event, manifest):
                 if index + 1 >= len(words):
                     return True
                 redirects.append(words[index + 1])
-        if any(path not in harmless and _write_target_outside(path, current, roots) for path in redirects):
+        if any(path not in harmless and _write_target_outside(path, current, roots, protect_gate=True) for path in redirects):
             return True
         operands, cursor = [], 1
         while cursor < len(words):
@@ -768,7 +858,7 @@ def _write_outside_roots(event, manifest):
                 targets = [repo]
                 if any(key in os.environ for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE')):
                     return True
-        if targets and (not any(_inside(current, root) for root in roots) or any(_write_target_outside(path, current, roots) for path in targets)):
+        if targets and (not any(_inside(current, root) for root in roots) or any(_write_target_outside(path, current, roots, protect_gate=True) for path in targets)):
             return True
     return False
 
@@ -1278,6 +1368,10 @@ def _split_approval_compound(command):
                 continue
             if char == '|' and (not ''.join(current).strip() or ''.join(current).rstrip().endswith('|')):
                 return None
+            if char == '$':
+                expansion = re.match(r'\$\{[A-Za-z_][A-Za-z0-9_]*\}', command[index:])
+                if expansion:
+                    current.append(expansion.group()); index += expansion.end(); continue
             if char in {'&', '\\', '\r', '(', ')', '{', '}'}:
                 return None
         current.append(char)

@@ -109,6 +109,11 @@ The JSON below is the SHARED settings baseline. It tangles to =all/.claude/setti
           },
           {
             "type": "command",
+            "command": "claude-hook-admiral-presence",
+            "timeout": 2
+          },
+          {
+            "type": "command",
             "command": "claude-hook-voice-transcribe",
             "timeout": 540
           }
@@ -183,6 +188,7 @@ The JSON below is the SHARED settings baseline. It tangles to =all/.claude/setti
       }
     ],
     "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "claude-hook-approval-session-end", "timeout": 2}]},
       {
         "hooks": [
           {
@@ -229,6 +235,7 @@ The JSON below is the SHARED settings baseline. It tangles to =all/.claude/setti
       }
     ],
     "PostToolUse": [
+      {"hooks": [{"type": "command", "command": "claude-hook-approval-observe", "timeout": 2}]},
       {
         "matcher": "mcp__plugin_telegram_telegram__reply",
         "hooks": [
@@ -3962,4 +3969,94 @@ else
     echo 'MEMORY.md empty, nothing to save.'
   fi
 fi
+#+END_SRC
+
+* Presence and successful live approval observation
+
+These tiny hooks call the shared unattended runtime. The private per-seat
+manifest selects the Admiral Telegram user ID and optional shared authority.
+Only a matching channel sender or terminal prompt stamps presence. Successful
+live requests resolve the same queue; SessionEnd records evidence without
+inventing intent fulfilment. The paired Telegram plugin stamps incoming messages
+while a PermissionRequest hook is held, because a held turn has not yet run
+UserPromptSubmit. All stamps use the same shared implementation and file.
+
+#+BEGIN_SRC python :tangle all/.local/bin/claude-hook-admiral-presence :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+
+def main():
+    try:
+        here=Path(__file__).resolve()
+        path=next(p for p in [here.parent/'claude_approval_runtime.py',here.parents[1]/'lib/dotcortex/claude_approval_runtime.py'] if p.is_file())
+        spec=importlib.util.spec_from_file_location('approval_runtime',path)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        sys.argv=[sys.argv[0],'prompt']
+        return module.presence_main()
+    except Exception:
+        return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+#+END_SRC
+
+#+BEGIN_SRC python :tangle all/.local/bin/claude-hook-approval-observe :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+
+def main():
+    try:
+        here=Path(__file__).resolve()
+        path=next(p for p in [here.parent/'claude_approval_runtime.py',here.parents[1]/'lib/dotcortex/claude_approval_runtime.py'] if p.is_file())
+        spec=importlib.util.spec_from_file_location('approval_runtime',path)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.observe_main()
+    except Exception:
+        return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+#+END_SRC
+
+#+BEGIN_SRC python :tangle all/.local/bin/claude-hook-approval-session-end :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+
+def main():
+    try:
+        here=Path(__file__).resolve()
+        path=next(p for p in [here.parent/'claude_approval_runtime.py',here.parents[1]/'lib/dotcortex/claude_approval_runtime.py'] if p.is_file())
+        spec=importlib.util.spec_from_file_location('approval_runtime',path)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.session_end_main()
+    except Exception:
+        return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+#+END_SRC
+
+#+BEGIN_SRC json :tangle all/.config/dotcortex/claude-presence-settings.fragments.json :comments no
+{
+  "applied": false,
+  "note": "Review and privately fill both seats. Hook timeout must exceed hold_timeout_minutes*60+9; below matches the ten-minute default.",
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_SEAT/.config/dotcortex/claude-approval.local.json /home/YOUR_SEAT/.local/bin/claude-hook-admiral-presence", "timeout": 2}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_SEAT/.config/dotcortex/claude-approval.local.json /home/YOUR_SEAT/.local/bin/claude-hook-approval-inverted", "timeout": 609}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_SEAT/.config/dotcortex/claude-approval.local.json /home/YOUR_SEAT/.local/bin/claude-hook-approval-observe", "timeout": 2}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_SEAT/.config/dotcortex/claude-approval.local.json /home/YOUR_SEAT/.local/bin/claude-hook-approval-session-end", "timeout": 2}]}]
+  }
+}
 #+END_SRC

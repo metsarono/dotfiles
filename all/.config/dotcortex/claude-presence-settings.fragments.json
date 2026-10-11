@@ -1,0 +1,10 @@
+{
+  "applied": false,
+  "note": "Review and privately fill both seats. Hook timeout must exceed hold_timeout_minutes*60+9; below matches the ten-minute default.",
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_SEAT/.config/dotcortex/claude-approval.local.json /home/YOUR_SEAT/.local/bin/claude-hook-admiral-presence", "timeout": 2}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_SEAT/.config/dotcortex/claude-approval.local.json /home/YOUR_SEAT/.local/bin/claude-hook-approval-inverted", "timeout": 609}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_SEAT/.config/dotcortex/claude-approval.local.json /home/YOUR_SEAT/.local/bin/claude-hook-approval-observe", "timeout": 2}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_SEAT/.config/dotcortex/claude-approval.local.json /home/YOUR_SEAT/.local/bin/claude-hook-approval-session-end", "timeout": 2}]}]
+  }
+}

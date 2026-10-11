@@ -116,7 +116,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.assertEqual(decision['behavior'], 'deny')
         self.assertIs(decision['interrupt'], False)
         self.assertIn('deferred: queued', decision['message'])
-        self.assertIn('do not retry or rephrase', decision['message'])
+        self.assertIn('never retry, rephrase or route around this refusal', decision['message'])
         record = json.loads(self.queue.read_text())
         self.assertEqual(record['tool'], 'Bash')
         self.assertEqual(record['command'], 'unknown-command --argument')

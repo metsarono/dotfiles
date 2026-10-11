@@ -101,10 +101,11 @@ class KikinApprovalHookTests(unittest.TestCase):
         for command in allow:
             with self.subTest(allow=command):
                 self.assert_decision(event("Bash", {"command": command, "description": "read"}, self.root), manifest, "allow")
-        # Each segment now requires its standalone grant, including no-ops.
+        for command in ["cat README.md; echo ===", "printf x && cat README.md"]:
+            self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "allow")
+        # Each segment still requires its standalone grant, including no-ops.
         ask = [
             "cat README.md 2>/dev/null || true",
-            "cat README.md; echo ===",
             "cat README.md > copy",
             "cat README.md | tee copy",
             "cat README.md | sh",
@@ -121,7 +122,6 @@ class KikinApprovalHookTests(unittest.TestCase):
             "cat README.md | head -n 5 README.md",
             "cat README.md |",
             "cat 'README.md && ls",
-            "printf x && cat README.md",
             'grep -n "$(id)" README.md',
             'grep -n "a\\$b" README.md | head',
             "cat README.md 2>/tmp/err",

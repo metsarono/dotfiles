@@ -6,18 +6,20 @@
 
 * Contract
 
-This module owns the pure-Python Claude =PermissionRequest= shared engine.
-The Admiral's 2026-10-11 inversion ruling below is the current contract:
-ordinary local work within configured roots defaults to ALLOW after the absolute
-floor, and only a confident Decider danger verdict vetoes. While present,
-=gate_inversion.present_refusal= selects native approval (=ask=, the default)
-or DENY/queue/notify (=deny=). This includes true-floor refusals. Away and quiet
-hours always emit DENY with =interrupt: false=, queue and attempt Telegram.
-The legacy p3 engine and dated deployment sections remain historical regression references.
+This module owns the shared Claude PermissionRequest engine. Ordinary local
+work within declared roots defaults to ALLOW after the absolute floor; a
+confident Decider danger verdict may veto. A fresh Admiral presence stamp
+selects a bounded Telegram hold for refusals, even during quiet hours. An
+explicit authenticated human answer is the only way a held refusal becomes an
+allow. Timeout or failed delivery denies with interrupt:false and leaves one
+open smart queue item. The away flag always forces away. With a stale/missing
+stamp, quiet hours are the fallback; daytime keeps the existing presentation
+switch. Presence never broadens automatic authority.
 
-The executable hook remains in =agents-hooks.org=.  Changing the reviewed class
-flags and wiring the hook into a live =~/.claude/settings.json= are separate,
-machine-local acts.
+The shared unattended runtime is in agents-approval-unattended.org. The paired
+Telegram seam and complete candidate preflight are in agents-approval-telegram.org.
+The tiny prompt/observer hooks are in agents-hooks.org. Private manifests and
+live deployment remain separate review actions. Published files use placeholders.
 
 * Kikin local approval gate — separate manifest with Honey readonly canary
 
@@ -148,6 +150,11 @@ authorize local Kikin reads or writes.
   "unattended": {
     "enabled": false,
     "away_flag": "~/.config/dotcortex/approval-away",
+    "presence_file": "~/.local/state/dotcortex/admiral-last-seen",
+    "presence_window_minutes": 20,
+    "hold_timeout_minutes": 10,
+    "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
+    "hold_notify_argv": ["/home/YOUR_SEAT/.local/bin/approval-telegram-hold"],
     "quiet_hours": {
       "enabled": true,
       "start": "23:00",
@@ -206,6 +213,7 @@ authorize local Kikin reads or writes.
      (org-babel-goto-named-src-block (cdr pair))
      (nth 1 (org-babel-get-src-block-info 'no-eval))))
  '(("agents-approval-engine-local.org" . "approval-engine-local")
+   ("agents-approval-unattended.org" . "approval-unattended-runtime")
    ("agents-approval-engine-remote.org" . "approval-engine-remote"))
  "\n\n\n")
 #+END_SRC
@@ -319,60 +327,28 @@ and clear that fixture with =approval-morning-queue --clear=. No push, remote
 pull, live settings edit or session restart is performed by this branch.
 
 #+BEGIN_SRC python :tangle all/.local/bin/approval-morning-queue :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
-"""Print the private morning queue by session; --clear consumes it under lock."""
-import argparse
 import importlib.util
-import json
 import os
 from pathlib import Path
 import sys
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--clear', action='store_true', help='print and clear the queue atomically')
-    args = parser.parse_args()
-    override = os.environ.get('DOTCORTEX_APPROVAL_ENGINE')
+def runtime():
     here = Path(__file__).resolve()
-    candidates = [Path(override)] if override else [
-        here.parent / 'claude_approval_kikin.py',
-        here.parents[1] / 'lib/dotcortex/claude_approval_kikin.py',
-        Path.home() / '.local/lib/dotcortex/claude_approval_kikin.py',
-    ]
-    engine = next((path for path in candidates if path.is_file()), None)
-    if engine is None:
-        parser.error('shared approval engine not found')
-    spec = importlib.util.spec_from_file_location('morning_queue_engine', engine)
+    candidates = [here.parent / 'claude_approval_runtime.py', here.parents[1] / 'lib/dotcortex/claude_approval_runtime.py']
+    path = next(p for p in candidates if p.is_file())
+    spec = importlib.util.spec_from_file_location('approval_runtime', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    try:
-        with module._morning_queue_file() as file:
-            file.seek(0)
-            records = [json.loads(line) for line in file if line.strip()]
-            sessions = {}
-            for record in records:
-                if not isinstance(record, dict):
-                    raise ValueError('invalid queue record')
-                sessions.setdefault(record.get('session') or '(unknown session)', []).append(record)
-            if not records:
-                print('No queued requests.')
-            for session, entries in sessions.items():
-                print('Session ' + json.dumps(session, ensure_ascii=True) + f' ({len(entries)} requests)')
-                for record in entries:
-                    # JSON escaping also prevents control sequences from reaching the terminal.
-                    print(json.dumps(record, ensure_ascii=True, sort_keys=True))
-            sys.stdout.flush()
-            if args.clear:
-                file.seek(0)
-                file.truncate(0)
-    except (OSError, ValueError, TypeError, TimeoutError) as exc:
-        print('Morning queue unavailable: ' + type(exc).__name__, file=sys.stderr)
-        return 1
-    return 0
-
+    return module
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    try:
+        raise SystemExit(runtime().queue_main())
+    except (StopIteration, OSError, ValueError, ImportError):
+        print('Approval queue unavailable', file=sys.stderr)
+        raise SystemExit(1)
+
 #+END_SRC
 
 * Inverted gate RED/GREEN replay
@@ -1000,191 +976,105 @@ URLs nor exception text. The deployment smoke test must establish actual deliver
 * Manifest-aware installation wrapper
 
 #+BEGIN_SRC python :tangle all/.local/bin/claude-hook-approval-inverted :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
-"""Preserve native present approval or defer, even with unavailable engines."""
-import fcntl
-import hashlib
-import json
+import importlib.util
 import os
 from pathlib import Path
-import stat
-import subprocess
 import sys
-import time
-import re
 
 
-def _away_status(manifest, now=None):
-    """Flag OR Melbourne quiet hours. Old manifests retain interactive behavior.
+def runtime():
+    here = Path(__file__).resolve()
+    candidates = [here.parent / 'claude_approval_runtime.py', here.parents[1] / 'lib/dotcortex/claude_approval_runtime.py']
+    path = next(p for p in candidates if p.is_file())
+    spec = importlib.util.spec_from_file_location('approval_runtime', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+import hashlib
+import json
+import subprocess
 
-    Published templates are disabled until each seat reviews its private copy.
-    With unattended.enabled true, the default window is 23:00 through 08:00.
-    Invalid enabled configuration conservatively defers rather than hanging.
-    """
-    import datetime
-    from zoneinfo import ZoneInfo
-    section = manifest.get('unattended', {}) if isinstance(manifest, dict) else {}
-    if not isinstance(section, dict):
-        return True, 'invalid_unattended'
-    if section.get('enabled') is False:
-        return False, 'disabled'
-    try:
-        flag = section.get('away_flag', '~/.config/dotcortex/approval-away')
-        if not isinstance(flag, str) or not flag:
-            raise ValueError('away flag')
-        if Path(flag).expanduser().exists():
-            return True, 'away_flag'
-        quiet = section.get('quiet_hours', {})
-        if not isinstance(quiet, dict):
-            raise ValueError('quiet hours')
-        if quiet.get('enabled', bool(section)) is False:
-            return False, 'present'
-        zone = ZoneInfo(quiet.get('timezone', 'Australia/Melbourne'))
-        current = (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(zone)
-        def minutes(raw):
-            if not isinstance(raw, str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', raw):
-                raise ValueError('quiet time')
-            hour, minute = map(int, raw.split(':'))
-            return hour * 60 + minute
-        start, end = minutes(quiet.get('start', '23:00')), minutes(quiet.get('end', '08:00'))
-        if start == end:
-            raise ValueError('empty quiet window')
-        clock = current.hour * 60 + current.minute
-        away = start <= clock < end if start < end else clock >= start or clock < end
-        return away, 'quiet_hours' if away else 'present'
-    except (ValueError, TypeError, OSError, KeyError):
-        return True, 'invalid_unattended'
-
-
-def _present_refusal(manifest):
-    """Native approval remains available until the Desk consumer is deployed.
-
-    Only an explicit deny opts into queued daytime refusals. Missing or invalid
-    configuration retains ask; this never grants a refused operation.
-    """
-    section = manifest.get('gate_inversion', {}) if isinstance(manifest, dict) else {}
-    return 'deny' if isinstance(section, dict) and section.get('present_refusal') == 'deny' else 'ask'
+_runtime = runtime()
+_away_status = _runtime._away_status
+_present_refusal = _runtime._present_refusal
 
 
 def defer(raw):
-    # Read policy before queue mutation; this private manifest has no credentials.
     try:
-        manifest_path = os.environ.get('SO_APPROVAL_KIKIN_MANIFEST')
-        path = Path(manifest_path) if manifest_path else Path(__file__).resolve().parents[2] / '.config/dotcortex/claude-approval-canary.kikin.v1.json'
-        manifest = json.loads(path.read_text())
+        manifest = _runtime._runtime_manifest()
     except (OSError, ValueError, TypeError):
         manifest = {}
     away, away_reason = _away_status(manifest)
-    if not away and _present_refusal(manifest) == 'ask':
+    if not away and away_reason != 'presence' and _present_refusal(manifest) == 'ask':
         return None
     try:
         event = json.loads(raw)
     except ValueError:
-        event = {'raw_input': raw}
-    queued = False
-    fd = None
+        event = {'raw_input':raw}
     try:
-        path = Path(os.environ.get('SO_APPROVAL_MORNING_QUEUE') or Path.home() / '.local/state/dotcortex/approval-morning-queue.jsonl')
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-            raise OSError('invalid private queue')
-        os.fchmod(fd, 0o600)
-        deadline = time.monotonic() + 0.25
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError()
-                time.sleep(0.005)
-        payload = event if isinstance(event, dict) else {}
-        tool_input = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
-        import datetime
-        record = {'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
-                  'tool': payload.get('tool_name'), 'command': tool_input.get('command'),
-                  'cwd': payload.get('cwd'), 'session': payload.get('session_id'),
-                  'reason': 'engine_unavailable', 'away_reason': away_reason, 'request': event}
-        with os.fdopen(fd, 'a', encoding='utf-8') as file:
-            fd = None
-            file.write(json.dumps(record, ensure_ascii=True) + '\n')
-        queued = True
+        item = _runtime._queue_upsert(event, 'engine_unavailable', away_reason, manifest)
     except (OSError, ValueError, TypeError, TimeoutError):
-        pass
-    finally:
-        if fd is not None:
-            os.close(fd)
+        item = None
     notification = False
     try:
-        # Routing failure does not alter a queued refusal.
         argv = manifest.get('notifications', {}).get('argv')
-        if (isinstance(argv, list) and argv and argv[0].startswith('/')
-                and all(isinstance(arg, str) and arg and 'YOUR_' not in arg for arg in argv)):
-            message = {'schema': 'dotcortex.approval.notification.v1',
-                'request_sha': hashlib.sha256(json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()[:16],
-                'reason': 'engine_unavailable', 'away': away, 'queued': queued}
-            result = subprocess.run(argv, input=json.dumps(message), text=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.75, check=False)
-            notification = result.returncode == 0
+        if isinstance(argv, list) and argv and argv[0].startswith('/') and all(isinstance(a,str) and a and 'YOUR_' not in a for a in argv):
+            message = {'schema':'dotcortex.approval.notification.v1', 'request_sha':hashlib.sha256(json.dumps(event,sort_keys=True,default=str).encode()).hexdigest()[:16],
+                'reason':'engine_unavailable', 'away':away, 'queued':item is not None}
+            notification = subprocess.run(argv, input=json.dumps(message), text=True, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=0.75, check=False).returncode == 0
     except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
         pass
-    note = "deferred: engine unavailable; " + ("queued for the Admiral's morning review" if away else "awaiting the Admiral's approval on the Desk/Telegram")
-    if not queued:
-        note += '; morning queue unavailable'
-    if not notification:
-        note += '; Telegram notification unavailable'
-    note += '; continue with other work, do not retry or rephrase this command'
-    return {'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
-        'decision': {'behavior': 'deny', 'message': note, 'interrupt': False}}}
+    note = 'deferred: engine unavailable; '+("queued for the Admiral's morning review" if away or away_reason == 'presence' else "awaiting the Admiral's approval on the Desk/Telegram")
+    note += '; queue item '+item if item else '; morning queue unavailable'
+    if not notification: note += '; Telegram notification unavailable'
+    return {'hookSpecificOutput':{'hookEventName':'PermissionRequest','decision':{'behavior':'deny','message':note+'; '+_runtime.DEFERRED_ACTION,'interrupt':False}}}
 
 
 def main():
-    raw = sys.stdin.read(1024 * 1024 + 1)
+    raw = sys.stdin.read(1024*1024+1)
     here = Path(__file__).resolve()
     override = os.environ.get('DOTCORTEX_KIKIN_APPROVAL_ENGINE') or os.environ.get('DOTCORTEX_APPROVAL_ENGINE')
-    candidates = [Path(override)] if override else [here.parent / 'claude_approval_kikin.py',
-        here.parents[1] / 'lib/dotcortex/claude_approval_kikin.py']
+    candidates = [Path(override)] if override else [here.parent/'claude_approval_kikin.py', here.parents[1]/'lib/dotcortex/claude_approval_kikin.py']
     output = None
     try:
-        engine = next(path for path in candidates if path.is_file())
-        result = subprocess.run(['/usr/bin/python3', str(engine)], input=raw, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=4.5, check=False)
+        engine = next(p for p in candidates if p.is_file())
+        manifest = _runtime._runtime_manifest()
+        away, why = _away_status(manifest)
+        budget = 6.0 + (_runtime._hold_seconds(manifest) if not away and why == 'presence' else 0)
+        result = subprocess.run(['/usr/bin/python3',str(engine)],input=raw,text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=budget,check=False)
+        if result.returncode == 0 and not result.stdout.strip() and not away and why != 'presence' and _present_refusal(manifest) == 'ask':
+            return 0
         parsed = json.loads(result.stdout)
-        hook = parsed['hookSpecificOutput']
-        decision = hook['decision']
-        if (result.returncode == 0 and hook['hookEventName'] == 'PermissionRequest'
-                and decision['behavior'] in {'allow', 'deny'}
-                and (decision['behavior'] == 'allow' or decision.get('interrupt') is False)):
+        hook = parsed['hookSpecificOutput']; decision = hook['decision']
+        if result.returncode == 0 and hook['hookEventName'] == 'PermissionRequest' and decision['behavior'] in {'allow','deny'} and (decision['behavior'] == 'allow' or decision.get('interrupt') is False):
             output = parsed
     except (StopIteration, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
         pass
-    if output is None:
-        output = defer(raw)
-    if output is not None:
-        sys.stdout.write(json.dumps(output, ensure_ascii=True, separators=(',', ':')) + '\n')
+    if output is None: output = defer(raw)
+    if output is not None: print(json.dumps(output,ensure_ascii=True,separators=(',',':')))
     return 0
 
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
 #+END_SRC
 
-For this mode, install and wire =claude-hook-approval-inverted= for BOTH seats,
-replacing the historical wrapper in the private PermissionRequest command. Keep
-=SO_APPROVAL_KIKIN_MANIFEST= and either existing engine-override variable pointed
-at the reviewed private manifest and versioned shared engine. Set the hook's
-outer timeout to seven seconds. This wrapper bounds the engine at 4.5 seconds
-and validates its decision JSON. Missing, broken, timed-out or old silent engines
-follow the same switch: no decision while present with default =ask=;
-private queued DENY with =interrupt: false= and bounded Telegram notification
-while present with =deny= or always while away/quiet. Queue records and
-notification payloads carry the observed away status and reason.
-The historical wrappers/p3 reference remain
-untouched; installing only the new engine behind an old wrapper does not provide
-this missing-engine guarantee. A framework that does not fire PermissionRequest
-is outside this hook's control; verify the target session's sandbox/auto-mode
-integration at deployment.
+Install the reviewed engine, independent shared runtime, wrapper, queue CLI,
+presence/observer helpers and Telegram bridge for BOTH seats. Set each private
+PermissionRequest outer timeout to hold_timeout_minutes*60+9 (609 seconds for
+the default ten minutes). The wrapper allows six seconds beyond the bounded
+hold for classification and queue/notification work. Missing or failed engines
+use the same shared presence decision and smart queue; a fresh stamp fails
+closed to queued denial when the engine cannot validate the request. Stale
+native daytime asks retain their existing relay, and successful PostToolUse
+observations record live approvals and resolve matching queued items.
+
+Keep quiet hours disabled until both seats use the shared presence authority
+and the staged Telegram seam passes the deployment smoke test. Afterwards,
+quiet hours may be enabled as the fallback for a stale stamp. No live apply,
+restart, installation, pull or push is performed by this review branch.
 
 * Reviewed Honey seat manifest
 
@@ -1217,7 +1107,9 @@ integration at deployment.
     "/home/YOUR_AGENT_CLAUDE/DotCortex-wt-YOUR_HOST"
   ],
   "scratch_roots": [
-    "/var/tmp"
+    "/var/tmp",
+    "/tmp",
+    "/tmp/claude-YOUR_UID"
   ],
   "classes": [
     {
@@ -1302,6 +1194,11 @@ integration at deployment.
   "unattended": {
     "enabled": false,
     "away_flag": "~/.config/dotcortex/approval-away",
+    "presence_file": "~/.local/state/dotcortex/admiral-last-seen",
+    "presence_window_minutes": 20,
+    "hold_timeout_minutes": 10,
+    "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
+    "hold_notify_argv": ["/home/YOUR_SEAT/.local/bin/approval-telegram-hold"],
     "quiet_hours": {
       "enabled": true,
       "start": "23:00",
@@ -1330,6 +1227,7 @@ integration at deployment.
       "/home/YOUR_AGENT_CLAUDE/.claude/scratchpad"
     ],
     "build_host": "YOUR_BUILD_HOST",
+    "peer_host": "YOUR_MAIL_AND_SCRATCH_HOST",
     "remote_scratch_roots": [
       "/tmp/YOUR_SEAT"
     ],
@@ -1355,14 +1253,50 @@ The current contract, seat manifests, engine assembly and inversion fixtures liv
 here. [[file:agents-approval-engine-local.org][Local engine source]] owns imports,
 the floor, paths and local classes; [[file:agents-approval-engine-remote.org][Remote
 and decision source]] owns SSH, coordinator proofs, the Decider and deferral.
-These two named blocks have =:tangle no :eval never=. The assembly above reads
-their bodies through Org without evaluating Python and emits the same single
-self-contained shared engine. [[file:agents-approval-tests.org][Existing suites]]
-and [[file:agents-approval-legacy.org][Historical p3 source]] own the other fixtures.
+Their named blocks use =:tangle no :eval never=. The assembly reads both plus
+[[file:agents-approval-unattended.org][the shared unattended runtime]] without
+evaluating Python and emits one self-contained engine. The unattended source
+also emits the independent runtime used by the wrapper and CLI helpers.
+[[file:agents-approval-tests.org][Existing suites]],
+[[file:agents-approval-tests-presence.org][presence and smart queue tests]] and
+[[file:agents-approval-legacy.org][historical p3 source]] own the fixtures.
 
-Tangle =agents-approval.org=, =agents-approval-tests.org= and
-=agents-approval-legacy.org= from the same checkout. Normal =make tangle= also
-includes these sources. Engine-part sources emit nothing independently; after
-editing either part, tangle =agents-approval.org=. Keep all sources in this map
-in the same review/checkpoint and recheck their hashes before tangling. Runtime
-deployment still copies just the generated engine, wrapper, reader and notifier.
+Tangle =agents-approval.org=, =agents-approval-unattended.org=,
+=agents-approval-telegram.org=, =agents-hooks.org=, =agents-approval-tests.org=,
+=agents-approval-tests-presence.org= and =agents-approval-legacy.org= from the same
+checkout. Normal =make tangle= includes these sources. After editing either
+engine body or the unattended runtime, tangle =agents-approval.org=. Recheck
+source hashes before tangling. Deploy the reviewed engine and independent
+runtime with the wrapper, queue, presence and observer helpers, notifier and
+staged Telegram bridge; deploying the engine alone does not provide the hold.
+
+* Presence and smart queue superseding contract (2026-10-12)
+
+Fresh presence overrides quiet hours and the presentation switch; the away flag
+always wins. Missing/stale daytime presence retains the existing switch. With
+fresh presence a refusal is HELD by the hook, relayed to the paired Telegram
+plugin, and answered by the authenticated Admiral once. Timeout defaults to ten
+minutes, then DENY with interrupt:false and an open smart queue item. There is
+no terminal-only fallback. Use a hook timeout of hold_timeout_minutes*60+9.
+
+One shared =agents-approval-unattended.org= body provides all presence decisions
+to the engine, wrapper and helpers. A remote seat may set presence_host to the
+authority SSH alias; that helper stamps and reads the authority file so a message
+to ANY seat counts for all seats. Leave quiet hours disabled until both seats
+can reach that authority and the Telegram hold smoke test passes. Quiet hours
+then become only the fallback for a missing/stale stamp.
+
+The private JSONL queue is a revision journal; =approval-queue list --json= folds
+latest items by ID. Dedupe uses seat plus normalized request (quoting, newlines,
+cwd and tool-write content preserved), or a nonempty declared intent. Exact
+requests stay in history. Denial notes supply the ID and intent/resolve commands.
+Later live allows and successful live PostToolUse observations resolve matching
+open items with “approved live at <time>”. =resolve= requires an explicit how.
+
+The deterministic sweep marks a removed worktree, a captured topic tip landed
+on master, or ended session with explicit intent-met evidence obsolete.
+Unknown state stays open. =confirm= must come from the recorded seat session on
+wake; =approve= is for the authenticated Desk consumer only. =claim= rechecks its
+approval, state and staleness and consumes a short-lived seat confirmation nonce. It returns the original request once, never executes it. Resolved or
+obsolete approvals are audited and do nothing. The Desk must consume this live
+API, not raw revision lines, and execute only a successfully claimed request.

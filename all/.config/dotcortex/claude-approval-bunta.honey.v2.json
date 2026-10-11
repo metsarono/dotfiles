@@ -26,7 +26,9 @@
     "/home/YOUR_AGENT_CLAUDE/DotCortex-wt-YOUR_HOST"
   ],
   "scratch_roots": [
-    "/var/tmp"
+    "/var/tmp",
+    "/tmp",
+    "/tmp/claude-YOUR_UID"
   ],
   "classes": [
     {
@@ -111,6 +113,11 @@
   "unattended": {
     "enabled": false,
     "away_flag": "~/.config/dotcortex/approval-away",
+    "presence_file": "~/.local/state/dotcortex/admiral-last-seen",
+    "presence_window_minutes": 20,
+    "hold_timeout_minutes": 10,
+    "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
+    "hold_notify_argv": ["/home/YOUR_SEAT/.local/bin/approval-telegram-hold"],
     "quiet_hours": {
       "enabled": true,
       "start": "23:00",
@@ -139,6 +146,7 @@
       "/home/YOUR_AGENT_CLAUDE/.claude/scratchpad"
     ],
     "build_host": "YOUR_BUILD_HOST",
+    "peer_host": "YOUR_MAIL_AND_SCRATCH_HOST",
     "remote_scratch_roots": [
       "/tmp/YOUR_SEAT"
     ],

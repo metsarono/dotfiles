@@ -496,7 +496,7 @@ def _coordinator_config(manifest):
     config = manifest.get('coordinator_ops')
     if not isinstance(config, dict):
         return None
-    if set(config) != {'classes', 'seat_account', 'repo_roots', 'worktree_roots', 'scratch_roots',
+    if set(config) - {'peer_host'} != {'classes', 'seat_account', 'repo_roots', 'worktree_roots', 'scratch_roots',
                        'build_host', 'remote_scratch_roots', 'remote_scratch_prefixes'}:
         return None
     flags = config.get('classes')
@@ -518,6 +518,8 @@ def _coordinator_config(manifest):
     if not isinstance(config.get('seat_account'), str) or not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', config['seat_account']):
         return None
     if not isinstance(config.get('build_host'), str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', config['build_host']):
+        return None
+    if 'peer_host' in config and (not isinstance(config['peer_host'], str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', config['peer_host'])):
         return None
     return config
 
@@ -617,7 +619,7 @@ def _coordinator_worktree_path(raw, config, repo, *, adding=False):
 
 def _coordinator_remote_path(raw, config):
     if (not isinstance(raw, str) or not raw.startswith('/tmp/') or not COORDINATOR_ATOM.fullmatch(raw)
-            or '..' in Path(raw).parts or _protected(raw)):
+            or '..' in Path(raw).parts or _protected_write_target(raw)):
         return False
     path = posixpath.normpath(raw)
     return any(path == root or path.startswith(root.rstrip('/') + '/') for root in config['remote_scratch_roots']) or any(
@@ -626,7 +628,10 @@ def _coordinator_remote_path(raw, config):
     )
 
 
-def _coordinator_remote_proof(config, paths, regular_input=None):
+_coordinator_proof_cache = None
+
+
+def _coordinator_remote_proof(config, paths, regular_input=None, *, host=None, via=None, copied_output=None):
     """Resolve remote destinations too: lexical /tmp paths may be symlinks.
 
     The generated proof contains only fixed operators and shell-quoted paths;
@@ -634,18 +639,30 @@ def _coordinator_remote_proof(config, paths, regular_input=None):
     """
     if not paths or not all(_coordinator_remote_path(p, config) for p in paths):
         return False
+    host = host or config['build_host']
+    key = (host,via,tuple(paths),regular_input,copied_output,tuple(config['remote_scratch_roots']),tuple(config['remote_scratch_prefixes']))
+    if _coordinator_proof_cache is not None and key in _coordinator_proof_cache:
+        return _coordinator_proof_cache[key]
     proof = 'realpath -m -- ' + ' '.join(shlex.quote(p) for p in paths)
     if regular_input is not None:
         proof = 'test -f ' + shlex.quote(regular_input) + ' && test ! -L ' + shlex.quote(regular_input) + ' && ' + proof
+    if copied_output is not None:
+        proof = 'test ! -d ' + shlex.quote(copied_output) + ' && test ! -L ' + shlex.quote(copied_output) + ' && ' + proof
+    argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=1', host, proof]
+    if via is not None:
+        argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=1', via, shlex.join(argv)]
     try:
-        p = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=1', config['build_host'], proof],
+        p = subprocess.run(argv,
                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=0.7, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return False
     resolved = p.stdout.splitlines()
-    return p.returncode == 0 and p.stdout.endswith('\n') and len(resolved) == len(paths) and all(
+    proven = p.returncode == 0 and p.stdout.endswith('\n') and len(resolved) == len(paths) and all(
         _coordinator_remote_path(path, config) for path in resolved
     )
+    if _coordinator_proof_cache is not None:
+        _coordinator_proof_cache[key] = proven
+    return proven
 
 
 def _coordinator_push(repo):
@@ -681,6 +698,49 @@ def _coordinator_candidate(command):
     return words[0] in {'codex', 'nohup', 'scp'} or words[:2] == ['mailcortex', 'send']
 
 
+
+def _peer_coordinator_match(command, words, config, manifest):
+    """An SSH argv transport, never an arbitrary script or near-match carve-out."""
+    peer = config.get('peer_host')
+    if peer is None or len(words) < 3 or words[:2] != ['ssh', peer] or _dynamic_shell(command):
+        return None
+    # Accept a single shell-quoted remote argv or unquoted inert mail argv.
+    if len(words) == 3:
+        remote_text = words[2]
+    else:
+        remote_text = ' '.join(words[2:])  # OpenSSH joins argv; it does NOT shell-quote it
+        if SHELL_META.search(command) or _dynamic_shell(command): return None
+    try:
+        remote = shlex.split(remote_text)
+    except ValueError:
+        return None
+    if remote[:2] == ['mailcortex','send'] and config['classes']['mail_send']:
+        if (SHELL_META.search(remote_text) or _dynamic_shell(remote_text) or len(remote) != 10
+                or remote[2::2] != ['--from','--to','--subject','--body-file']
+                or remote[3] != config['seat_account'] or not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', remote[5])
+                or not remote[7] or not _coordinator_remote_path(remote[9], config)):
+            return None
+        planned = (peer,remote[9]) in manifest.get('_compound_remote_created_files',())
+        # SCP's proof guarantees this will be a regular nonsymlink destination;
+        # only the internal compound walker may carry that future-file fact.
+        proven = (_coordinator_remote_proof(config,[remote[9]],host=peer,copied_output=remote[9]) if planned
+            else _coordinator_remote_proof(config,[remote[9]],regular_input=remote[9],host=peer))
+        return 'coordinator_remote_mail_send' if proven else None
+    if not config['classes']['codex_dispatch']:
+        return None
+    host, via, dispatch_text = peer, None, remote_text
+    if len(remote) == 3 and remote[:2] == ['ssh', config['build_host']]:
+        if _dynamic_shell(remote_text): return None
+        host, via, dispatch_text = config['build_host'], peer, remote[2]
+    dispatch = DISPATCH_RE.fullmatch(dispatch_text)
+    if not dispatch:
+        return None
+    _model, prompt, log = dispatch.groups()
+    if all(_coordinator_remote_path(p, config) for p in (prompt,log)) and _coordinator_remote_proof(config, [prompt,log], regular_input=prompt, host=host, via=via):
+        return 'coordinator_codex_dispatch'
+    return None
+
+
 def _coordinator_match(event, manifest):
     config = _coordinator_config(manifest)
     tool_input, cwd = event.get('tool_input'), event.get('cwd')
@@ -697,6 +757,9 @@ def _coordinator_match(event, manifest):
     if not words or not any(_inside(os.path.realpath(cwd), os.path.realpath(root)) for root in config['repo_roots'] + config['worktree_roots'] + config['scratch_roots']):
         return None
     flags = config['classes']
+    remote_grant = _peer_coordinator_match(command, words, config, manifest)
+    if remote_grant is not None:
+        return remote_grant
     if words[:2] == ['mailcortex', 'send'] and flags['mail_send'] and not SHELL_META.search(command):
         if (len(words) == 10 and words[2::2] == ['--from', '--to', '--subject', '--body-file']
                 and words[3] == config['seat_account'] and re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', words[5])
@@ -720,10 +783,10 @@ def _coordinator_match(event, manifest):
         return None
     if words[:1] == ['scp'] and flags['scratch_scp'] and len(words) == 3 and not SHELL_META.search(command):
         dest = words[2].split(':', 1)
-        if (len(dest) == 2 and dest[0] == config['build_host']
-                and _coordinator_path(words[1], config['scratch_roots'], regular=True)
+        if (len(dest) == 2 and dest[0] == config.get('peer_host', config['build_host'])
+                and _coordinator_regular_input(words[1], config, manifest)
                 and _coordinator_remote_path(dest[1], config)
-                and _coordinator_remote_proof(config, [dest[1]])):
+                and _coordinator_remote_proof(config, [dest[1]], host=dest[0],copied_output=dest[1] if config.get('peer_host') else None)):
             return 'coordinator_scratch_scp'
         return None
     if words[0] != 'git' or SHELL_META.search(command):
@@ -815,6 +878,8 @@ def _inversion_scope(event, manifest):
     if not isinstance(cwd, str) or not cwd.startswith('/') or not isinstance(payload, dict):
         return False
     roots = _policy_roots(manifest)
+    if tool in {'Write','Edit','MultiEdit','NotebookEdit'}:
+        return not _tool_write_outside(event,roots)
     current = os.path.realpath(cwd)
     if _protected(current) or not any(_inside(current, root) for root in roots):
         return False
@@ -872,6 +937,8 @@ def _classify_single(event, manifest):
         return True, 'ssh_readonly'
     payload = event.get('tool_input')
     command = payload.get('command') if isinstance(payload, dict) else None
+    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and _inert_local_command(command, event.get('cwd','/')):
+        return (True, 'local_read') if manifest['entries']['local_read']['enabled'] else (False, 'no_match_decider')
     if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS:
         try:
             cd_words = shlex.split(command)
@@ -950,9 +1017,10 @@ def _compound_approval(event, manifest, judge=None):
         return False, 'true_floor'
     current = event['cwd']
     created = set(manifest.get('_compound_created_files', ()))
+    remote_created = set(manifest.get('_compound_remote_created_files', ()))
     stages = []
     for index, (separator, text) in enumerate(segments, 1):
-        stage_manifest = {**manifest, '_compound_created_files': frozenset(created)}
+        stage_manifest = {**manifest, '_compound_created_files': frozenset(created), '_compound_remote_created_files':frozenset(remote_created)}
         stage = {**event, 'cwd': current, 'tool_input': {**payload, 'command': text}}
         result = classify(stage, stage_manifest)
         allow, reason = result
@@ -976,8 +1044,16 @@ def _compound_approval(event, manifest, judge=None):
         output = _heredoc_scratch_output(stage, stage_manifest)
         if output is not None:
             created.add(output)
+        elif allow and reason == 'coordinator_scratch_scp':
+            try:
+                source, destination = shlex.split(text)[1:]
+                host, path = destination.split(':',1)
+                remote_created.add((host,path))
+            except ValueError:
+                return False,'true_floor'
         elif _write_capable(stage):
             created.clear()
+            remote_created.clear()
     used = []
     for index, text, stage, stage_manifest, cd in stages:
         try:
@@ -1538,118 +1614,6 @@ def _log_decision(event, allow, reason):
         pass
 
 
-DEFERRED_MESSAGE = "deferred: queued for the Admiral's morning review; continue with other work, do not retry or rephrase this command"
-
-
-def _away_status(manifest, now=None):
-    """Flag OR Melbourne quiet hours. Old manifests retain interactive behavior.
-
-    Published templates are disabled until each seat reviews its private copy.
-    With unattended.enabled true, the default window is 23:00 through 08:00.
-    Invalid enabled configuration conservatively defers rather than hanging.
-    """
-    import datetime
-    from zoneinfo import ZoneInfo
-    section = manifest.get('unattended', {}) if isinstance(manifest, dict) else {}
-    if not isinstance(section, dict):
-        return True, 'invalid_unattended'
-    if section.get('enabled') is False:
-        return False, 'disabled'
-    try:
-        flag = section.get('away_flag', '~/.config/dotcortex/approval-away')
-        if not isinstance(flag, str) or not flag:
-            raise ValueError('away flag')
-        if Path(flag).expanduser().exists():
-            return True, 'away_flag'
-        quiet = section.get('quiet_hours', {})
-        if not isinstance(quiet, dict):
-            raise ValueError('quiet hours')
-        if quiet.get('enabled', bool(section)) is False:
-            return False, 'present'
-        zone = ZoneInfo(quiet.get('timezone', 'Australia/Melbourne'))
-        current = (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(zone)
-        def minutes(raw):
-            if not isinstance(raw, str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', raw):
-                raise ValueError('quiet time')
-            hour, minute = map(int, raw.split(':'))
-            return hour * 60 + minute
-        start, end = minutes(quiet.get('start', '23:00')), minutes(quiet.get('end', '08:00'))
-        if start == end:
-            raise ValueError('empty quiet window')
-        clock = current.hour * 60 + current.minute
-        away = start <= clock < end if start < end else clock >= start or clock < end
-        return away, 'quiet_hours' if away else 'present'
-    except (ValueError, TypeError, OSError, KeyError):
-        return True, 'invalid_unattended'
-
-
-def _present_refusal(manifest):
-    """Native approval remains available until the Desk consumer is deployed.
-
-    Only an explicit deny opts into queued daytime refusals. Missing or invalid
-    configuration retains ask; this never grants a refused operation.
-    """
-    section = manifest.get('gate_inversion', {}) if isinstance(manifest, dict) else {}
-    return 'deny' if isinstance(section, dict) and section.get('present_refusal') == 'deny' else 'ask'
-
-
-def _morning_queue_path():
-    return Path(os.environ.get('SO_APPROVAL_MORNING_QUEUE') or Path.home() / '.local/state/dotcortex/approval-morning-queue.jsonl')
-
-
-@__import__('contextlib').contextmanager
-def _morning_queue_file():
-    """Private regular file, no symlink/hardlink, bounded interprocess locking.
-
-    Clear truncates the same inode under this lock; it never unlinks a queue
-    that an appender may already have opened. Content stays outside the ledger.
-    """
-    import fcntl
-    import time
-    path = _morning_queue_path()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-            raise OSError('queue is not a private regular file')
-        os.fchmod(fd, 0o600)
-        deadline = time.monotonic() + 0.25
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError('queue lock deadline')
-                time.sleep(0.005)
-        with os.fdopen(fd, 'a+', encoding='utf-8') as file:
-            fd = None
-            yield file
-    finally:
-        if fd is not None:
-            os.close(fd)
-
-
-def _queue_morning(event, reason, away_reason):
-    import datetime
-    payload = event if isinstance(event, dict) else {}
-    tool_input = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
-    record = {
-        'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
-        'tool': payload.get('tool_name'), 'command': tool_input.get('command'),
-        'cwd': payload.get('cwd'), 'session': payload.get('session_id'),
-        'reason': reason, 'away_reason': away_reason, 'request': event,
-    }
-    try:
-        with _morning_queue_file() as file:
-            file.write(json.dumps(record, ensure_ascii=True, separators=(',', ':')) + '\n')
-            file.flush()
-        return True
-    except (OSError, ValueError, TypeError, TimeoutError):
-        return False
-
-
 def _notify_admiral(event, reason, away, queued, manifest):
     """Fixed seat-owned bridge reads a hash-only JSON message on stdin.
 
@@ -1687,7 +1651,7 @@ def _deadline(_signal, _frame):
 
 
 def main():
-    global _approval_deadline
+    global _approval_deadline, _coordinator_proof_cache
     event, manifest, allow, reason = None, {}, False, 'error:initialization'
     away, away_reason = _away_status(manifest)
     _log_decision.extras = {}
@@ -1710,31 +1674,57 @@ def main():
         if len(raw) > 1024 * 1024 or not parsed:
             raise ValueError('invalid or oversized input')
         manifest = _load_manifest(manifest)
+        _coordinator_proof_cache = {}
         allow, reason = _decide_request(event, manifest)
     except Exception as exc:
         allow, reason = False, f'error:{type(exc).__name__}'
     finally:
         _approval_deadline = None
+        _coordinator_proof_cache = None
         if previous is not None:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous)
+    item_id, hold_status = None, None
+    if not allow and not away and away_reason == 'presence':
+        # A fresh human stamp selects a bounded Telegram hold, including floor
+        # refusals. Only an authenticated human answer may produce human_allow.
+        try:
+            hold_status, item_id = _hold_admiral(event, reason, manifest)
+            if hold_status == 'allow':
+                allow = True
+                _log_decision.extras.update(human_approved=True, decision='allow')
+            else:
+                away_reason = 'hold_timeout' if hold_status == 'timeout' else 'human_denied' if hold_status == 'deny' else 'away_flag' if hold_status == 'away_flag' else 'hold_unavailable'
+                away = hold_status == 'away_flag'
+        except Exception:
+            hold_status, away_reason = 'unavailable', 'hold_unavailable'
     if allow:
+        if not away:
+            try:
+                _log_decision.extras['resolved_queue_ids'] = _queue_live_allow(event, manifest)
+            except (OSError, ValueError, TypeError, TimeoutError):
+                _log_decision.extras['queue_resolution_failed'] = True
         sys.stdout.write(json.dumps(ALLOW_OUTPUT, separators=(',', ':')) + '\n')
-    elif not away and _present_refusal(manifest) == 'ask':
-        # No hook decision: Claude Code retains its native Telegram Allow flow.
-        # The floor/proof still refused; only the human may approve this request.
+    elif not away and hold_status is None and _present_refusal(manifest) == 'ask':
+        # Legacy stale/missing daytime presence retains today's native relay.
         _log_decision.extras.update(decision='ask', away_reason=away_reason, morning_queued=False, notification_status='not_requested')
     else:
-        queued = _queue_morning(event, reason, away_reason)
+        try:
+            item_id = item_id or _queue_upsert(event, reason, away_reason, manifest)
+        except (OSError, ValueError, TypeError, TimeoutError):
+            item_id = None
+        queued = item_id is not None
         notification = _notify_admiral(event, reason, away, queued, manifest)
-        note = "queued for the Admiral's morning review" if away else "awaiting the Admiral's approval on the Desk/Telegram"
-        if not queued:
+        note = "queued for the Admiral's morning review" if away or hold_status else "awaiting the Admiral's approval on the Desk/Telegram"
+        if item_id:
+            note += '; queue item ' + item_id + '; record intent with approval-queue intent ' + item_id + ' --text <one-line-intent>; after achieving it in policy: approval-queue resolve ' + item_id + ' --how <one-line-method>'
+        else:
             note += '; morning queue unavailable'
         if notification != 'sent':
             note += '; Telegram notification unavailable (' + notification + ')'
-        message = 'deferred: ' + note + '; continue with other work, do not retry or rephrase this command'
+        message = 'deferred: ' + note + '; ' + DEFERRED_ACTION
         sys.stdout.write(json.dumps(_deny_output(message), separators=(',', ':')) + '\n')
-        _log_decision.extras.update(decision='deny', away_reason=away_reason, morning_queued=queued, notification_status=notification)
+        _log_decision.extras.update(decision='deny', away_reason=away_reason, morning_queued=queued, queue_id=item_id, hold_status=hold_status, notification_status=notification)
     _log_decision(event, allow, reason)
     return 0
 

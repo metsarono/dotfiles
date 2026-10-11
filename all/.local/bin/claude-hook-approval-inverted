@@ -1,167 +1,81 @@
 #!/usr/bin/env python3
-"""Preserve native present approval or defer, even with unavailable engines."""
-import fcntl
-import hashlib
-import json
+import importlib.util
 import os
 from pathlib import Path
-import stat
-import subprocess
 import sys
-import time
-import re
 
 
-def _away_status(manifest, now=None):
-    """Flag OR Melbourne quiet hours. Old manifests retain interactive behavior.
+def runtime():
+    here = Path(__file__).resolve()
+    candidates = [here.parent / 'claude_approval_runtime.py', here.parents[1] / 'lib/dotcortex/claude_approval_runtime.py']
+    path = next(p for p in candidates if p.is_file())
+    spec = importlib.util.spec_from_file_location('approval_runtime', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+import hashlib
+import json
+import subprocess
 
-    Published templates are disabled until each seat reviews its private copy.
-    With unattended.enabled true, the default window is 23:00 through 08:00.
-    Invalid enabled configuration conservatively defers rather than hanging.
-    """
-    import datetime
-    from zoneinfo import ZoneInfo
-    section = manifest.get('unattended', {}) if isinstance(manifest, dict) else {}
-    if not isinstance(section, dict):
-        return True, 'invalid_unattended'
-    if section.get('enabled') is False:
-        return False, 'disabled'
-    try:
-        flag = section.get('away_flag', '~/.config/dotcortex/approval-away')
-        if not isinstance(flag, str) or not flag:
-            raise ValueError('away flag')
-        if Path(flag).expanduser().exists():
-            return True, 'away_flag'
-        quiet = section.get('quiet_hours', {})
-        if not isinstance(quiet, dict):
-            raise ValueError('quiet hours')
-        if quiet.get('enabled', bool(section)) is False:
-            return False, 'present'
-        zone = ZoneInfo(quiet.get('timezone', 'Australia/Melbourne'))
-        current = (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(zone)
-        def minutes(raw):
-            if not isinstance(raw, str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', raw):
-                raise ValueError('quiet time')
-            hour, minute = map(int, raw.split(':'))
-            return hour * 60 + minute
-        start, end = minutes(quiet.get('start', '23:00')), minutes(quiet.get('end', '08:00'))
-        if start == end:
-            raise ValueError('empty quiet window')
-        clock = current.hour * 60 + current.minute
-        away = start <= clock < end if start < end else clock >= start or clock < end
-        return away, 'quiet_hours' if away else 'present'
-    except (ValueError, TypeError, OSError, KeyError):
-        return True, 'invalid_unattended'
-
-
-def _present_refusal(manifest):
-    """Native approval remains available until the Desk consumer is deployed.
-
-    Only an explicit deny opts into queued daytime refusals. Missing or invalid
-    configuration retains ask; this never grants a refused operation.
-    """
-    section = manifest.get('gate_inversion', {}) if isinstance(manifest, dict) else {}
-    return 'deny' if isinstance(section, dict) and section.get('present_refusal') == 'deny' else 'ask'
+_runtime = runtime()
+_away_status = _runtime._away_status
+_present_refusal = _runtime._present_refusal
 
 
 def defer(raw):
-    # Read policy before queue mutation; this private manifest has no credentials.
     try:
-        manifest_path = os.environ.get('SO_APPROVAL_KIKIN_MANIFEST')
-        path = Path(manifest_path) if manifest_path else Path(__file__).resolve().parents[2] / '.config/dotcortex/claude-approval-canary.kikin.v1.json'
-        manifest = json.loads(path.read_text())
+        manifest = _runtime._runtime_manifest()
     except (OSError, ValueError, TypeError):
         manifest = {}
     away, away_reason = _away_status(manifest)
-    if not away and _present_refusal(manifest) == 'ask':
+    if not away and away_reason != 'presence' and _present_refusal(manifest) == 'ask':
         return None
     try:
         event = json.loads(raw)
     except ValueError:
-        event = {'raw_input': raw}
-    queued = False
-    fd = None
+        event = {'raw_input':raw}
     try:
-        path = Path(os.environ.get('SO_APPROVAL_MORNING_QUEUE') or Path.home() / '.local/state/dotcortex/approval-morning-queue.jsonl')
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-            raise OSError('invalid private queue')
-        os.fchmod(fd, 0o600)
-        deadline = time.monotonic() + 0.25
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError()
-                time.sleep(0.005)
-        payload = event if isinstance(event, dict) else {}
-        tool_input = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
-        import datetime
-        record = {'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
-                  'tool': payload.get('tool_name'), 'command': tool_input.get('command'),
-                  'cwd': payload.get('cwd'), 'session': payload.get('session_id'),
-                  'reason': 'engine_unavailable', 'away_reason': away_reason, 'request': event}
-        with os.fdopen(fd, 'a', encoding='utf-8') as file:
-            fd = None
-            file.write(json.dumps(record, ensure_ascii=True) + '\n')
-        queued = True
+        item = _runtime._queue_upsert(event, 'engine_unavailable', away_reason, manifest)
     except (OSError, ValueError, TypeError, TimeoutError):
-        pass
-    finally:
-        if fd is not None:
-            os.close(fd)
+        item = None
     notification = False
     try:
-        # Routing failure does not alter a queued refusal.
         argv = manifest.get('notifications', {}).get('argv')
-        if (isinstance(argv, list) and argv and argv[0].startswith('/')
-                and all(isinstance(arg, str) and arg and 'YOUR_' not in arg for arg in argv)):
-            message = {'schema': 'dotcortex.approval.notification.v1',
-                'request_sha': hashlib.sha256(json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()[:16],
-                'reason': 'engine_unavailable', 'away': away, 'queued': queued}
-            result = subprocess.run(argv, input=json.dumps(message), text=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.75, check=False)
-            notification = result.returncode == 0
+        if isinstance(argv, list) and argv and argv[0].startswith('/') and all(isinstance(a,str) and a and 'YOUR_' not in a for a in argv):
+            message = {'schema':'dotcortex.approval.notification.v1', 'request_sha':hashlib.sha256(json.dumps(event,sort_keys=True,default=str).encode()).hexdigest()[:16],
+                'reason':'engine_unavailable', 'away':away, 'queued':item is not None}
+            notification = subprocess.run(argv, input=json.dumps(message), text=True, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=0.75, check=False).returncode == 0
     except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
         pass
-    note = "deferred: engine unavailable; " + ("queued for the Admiral's morning review" if away else "awaiting the Admiral's approval on the Desk/Telegram")
-    if not queued:
-        note += '; morning queue unavailable'
-    if not notification:
-        note += '; Telegram notification unavailable'
-    note += '; continue with other work, do not retry or rephrase this command'
-    return {'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
-        'decision': {'behavior': 'deny', 'message': note, 'interrupt': False}}}
+    note = 'deferred: engine unavailable; '+("queued for the Admiral's morning review" if away or away_reason == 'presence' else "awaiting the Admiral's approval on the Desk/Telegram")
+    note += '; queue item '+item if item else '; morning queue unavailable'
+    if not notification: note += '; Telegram notification unavailable'
+    return {'hookSpecificOutput':{'hookEventName':'PermissionRequest','decision':{'behavior':'deny','message':note+'; '+_runtime.DEFERRED_ACTION,'interrupt':False}}}
 
 
 def main():
-    raw = sys.stdin.read(1024 * 1024 + 1)
+    raw = sys.stdin.read(1024*1024+1)
     here = Path(__file__).resolve()
     override = os.environ.get('DOTCORTEX_KIKIN_APPROVAL_ENGINE') or os.environ.get('DOTCORTEX_APPROVAL_ENGINE')
-    candidates = [Path(override)] if override else [here.parent / 'claude_approval_kikin.py',
-        here.parents[1] / 'lib/dotcortex/claude_approval_kikin.py']
+    candidates = [Path(override)] if override else [here.parent/'claude_approval_kikin.py', here.parents[1]/'lib/dotcortex/claude_approval_kikin.py']
     output = None
     try:
-        engine = next(path for path in candidates if path.is_file())
-        result = subprocess.run(['/usr/bin/python3', str(engine)], input=raw, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=4.5, check=False)
+        engine = next(p for p in candidates if p.is_file())
+        manifest = _runtime._runtime_manifest()
+        away, why = _away_status(manifest)
+        budget = 6.0 + (_runtime._hold_seconds(manifest) if not away and why == 'presence' else 0)
+        result = subprocess.run(['/usr/bin/python3',str(engine)],input=raw,text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=budget,check=False)
+        if result.returncode == 0 and not result.stdout.strip() and not away and why != 'presence' and _present_refusal(manifest) == 'ask':
+            return 0
         parsed = json.loads(result.stdout)
-        hook = parsed['hookSpecificOutput']
-        decision = hook['decision']
-        if (result.returncode == 0 and hook['hookEventName'] == 'PermissionRequest'
-                and decision['behavior'] in {'allow', 'deny'}
-                and (decision['behavior'] == 'allow' or decision.get('interrupt') is False)):
+        hook = parsed['hookSpecificOutput']; decision = hook['decision']
+        if result.returncode == 0 and hook['hookEventName'] == 'PermissionRequest' and decision['behavior'] in {'allow','deny'} and (decision['behavior'] == 'allow' or decision.get('interrupt') is False):
             output = parsed
     except (StopIteration, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
         pass
-    if output is None:
-        output = defer(raw)
-    if output is not None:
-        sys.stdout.write(json.dumps(output, ensure_ascii=True, separators=(',', ':')) + '\n')
+    if output is None: output = defer(raw)
+    if output is not None: print(json.dumps(output,ensure_ascii=True,separators=(',',':')))
     return 0
 
 
