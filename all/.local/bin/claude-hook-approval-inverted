@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Always return a permission decision, including missing or broken engine installs."""
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import time
+
+
+def defer(raw):
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        event = {'raw_input': raw}
+    queued = False
+    fd = None
+    try:
+        path = Path(os.environ.get('SO_APPROVAL_MORNING_QUEUE') or Path.home() / '.local/state/dotcortex/approval-morning-queue.jsonl')
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise OSError('invalid private queue')
+        os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + 0.25
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError()
+                time.sleep(0.005)
+        payload = event if isinstance(event, dict) else {}
+        tool_input = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
+        import datetime
+        record = {'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
+                  'tool': payload.get('tool_name'), 'command': tool_input.get('command'),
+                  'cwd': payload.get('cwd'), 'session': payload.get('session_id'),
+                  'reason': 'engine_unavailable', 'away_reason': 'unknown', 'request': event}
+        with os.fdopen(fd, 'a', encoding='utf-8') as file:
+            fd = None
+            file.write(json.dumps(record, ensure_ascii=True) + '\n')
+        queued = True
+    except (OSError, ValueError, TypeError, TimeoutError):
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
+    notification = False
+    try:
+        # The private policy file contains routing, never a token. Invalid
+        # routing does not alter the refusal or create a terminal-only prompt.
+        manifest_path = os.environ.get('SO_APPROVAL_KIKIN_MANIFEST')
+        manifest = json.loads(Path(manifest_path).read_text()) if manifest_path else {}
+        argv = manifest.get('notifications', {}).get('argv')
+        if (isinstance(argv, list) and argv and argv[0].startswith('/')
+                and all(isinstance(arg, str) and arg and 'YOUR_' not in arg for arg in argv)):
+            message = {'schema': 'dotcortex.approval.notification.v1',
+                'request_sha': hashlib.sha256(json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()[:16],
+                'reason': 'engine_unavailable', 'away': False, 'queued': queued}
+            result = subprocess.run(argv, input=json.dumps(message), text=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.75, check=False)
+            notification = result.returncode == 0
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
+        pass
+    note = "deferred: engine unavailable; awaiting the Admiral's approval on the Desk/Telegram"
+    if not queued:
+        note += '; morning queue unavailable'
+    if not notification:
+        note += '; Telegram notification unavailable'
+    note += '; continue with other work, do not retry or rephrase this command'
+    return {'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
+        'decision': {'behavior': 'deny', 'message': note, 'interrupt': False}}}
+
+
+def main():
+    raw = sys.stdin.read(1024 * 1024 + 1)
+    here = Path(__file__).resolve()
+    override = os.environ.get('DOTCORTEX_KIKIN_APPROVAL_ENGINE') or os.environ.get('DOTCORTEX_APPROVAL_ENGINE')
+    candidates = [Path(override)] if override else [here.parent / 'claude_approval_kikin.py',
+        here.parents[1] / 'lib/dotcortex/claude_approval_kikin.py']
+    output = None
+    try:
+        engine = next(path for path in candidates if path.is_file())
+        result = subprocess.run(['/usr/bin/python3', str(engine)], input=raw, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=4.5, check=False)
+        parsed = json.loads(result.stdout)
+        hook = parsed['hookSpecificOutput']
+        decision = hook['decision']
+        if (result.returncode == 0 and hook['hookEventName'] == 'PermissionRequest'
+                and decision['behavior'] in {'allow', 'deny'}
+                and (decision['behavior'] == 'allow' or decision.get('interrupt') is False)):
+            output = parsed
+    except (StopIteration, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
+        pass
+    if output is None:
+        output = defer(raw)
+    sys.stdout.write(json.dumps(output, ensure_ascii=True, separators=(',', ':')) + '\n')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

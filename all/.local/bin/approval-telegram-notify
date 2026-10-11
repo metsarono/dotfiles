@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Private-environment Telegram adapter; never opens credential files or logs secrets."""
+import json
+import os
+import re
+import sys
+import urllib.request
+
+
+def main():
+    try:
+        raw = sys.stdin.read(8193)
+        if len(raw) > 8192:
+            return 1
+        message = json.loads(raw)
+        if not isinstance(message, dict) or message.get('schema') != 'dotcortex.approval.notification.v1':
+            return 1
+        digest = message.get('request_sha')
+        if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{16}', digest):
+            return 1
+        token = os.environ.get('APPROVAL_TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN')
+        chat = os.environ.get('APPROVAL_TELEGRAM_CHAT_ID', 'YOUR_ADMIRAL_CHAT')
+        base = os.environ.get('APPROVAL_TELEGRAM_API_BASE', 'YOUR_TELEGRAM_API_BASE')
+        if any(not value or 'YOUR_' in value for value in (token, chat, base)):
+            return 1
+        # This adapter is launched by the existing credential-owning bot path;
+        # neither the hook nor this program loads .env/auth/key files.
+        if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+', token) or not re.fullmatch(r'-?[0-9]+', chat):
+            return 1
+        if not re.fullmatch(r'https://[A-Za-z0-9.-]+', base):
+            return 1
+        queued = message.get('queued') is True
+        text = 'Deferred approval ' + digest + '. '
+        text += "Queued for morning review. " if message.get('away') is True else "Awaiting the Admiral's approval on the Desk/Telegram. "
+        text += 'Review the private approval queue.' if queued else 'Queue unavailable; inspect the seat.'
+        body = json.dumps({'chat_id': chat, 'text': text}).encode()
+        request = urllib.request.Request(base + '/bot' + token + '/sendMessage', data=body,
+            headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(request, timeout=0.5) as response:
+            result = json.loads(response.read(4096))
+        return 0 if isinstance(result, dict) and result.get('ok') is True else 1
+    except Exception:
+        # HTTP exception text may contain the credential-bearing URL.
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

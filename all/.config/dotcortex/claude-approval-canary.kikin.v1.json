@@ -36,13 +36,42 @@
     {
       "name": "local_read",
       "enabled": false,
-      "tool_names": ["Read", "Glob", "Grep"],
-      "bash_verbs": ["cat", "head", "tail", "grep", "rg", "ls", "stat", "wc", "find", "sed", "ps", "pgrep", "uptime", "df", "free", "tmux", "python", "python3"]
+      "tool_names": [
+        "Read",
+        "Glob",
+        "Grep"
+      ],
+      "bash_verbs": [
+        "cat",
+        "head",
+        "tail",
+        "grep",
+        "rg",
+        "ls",
+        "stat",
+        "wc",
+        "find",
+        "sed",
+        "ps",
+        "pgrep",
+        "uptime",
+        "df",
+        "free",
+        "tmux",
+        "python",
+        "python3"
+      ]
     },
     {
       "name": "git_observe",
       "enabled": false,
-      "subcommands": ["status", "log", "diff", "show", "branch"]
+      "subcommands": [
+        "status",
+        "log",
+        "diff",
+        "show",
+        "branch"
+      ]
     },
     {
       "name": "centre_render",
@@ -58,7 +87,10 @@
     {
       "name": "safe_commit",
       "enabled": false,
-      "commands": ["git commit", "dotcortex-safe-commit"]
+      "commands": [
+        "git commit",
+        "dotcortex-safe-commit"
+      ]
     },
     {
       "name": "ssh_readonly",
@@ -75,7 +107,9 @@
             "/etc/init.d",
             "/var/log"
           ],
-          "allowed_sudo_targets": ["YOUR_AGENT_CLAUDE"]
+          "allowed_sudo_targets": [
+            "YOUR_AGENT_CLAUDE"
+          ]
         }
       ]
     }
@@ -116,6 +150,14 @@
     ],
     "remote_scratch_prefixes": [
       "YOUR_SEAT-"
+    ]
+  },
+  "gate_inversion": {
+    "enabled": true
+  },
+  "notifications": {
+    "argv": [
+      "/home/YOUR_SEAT/.local/bin/approval-telegram-notify"
     ]
   }
 }

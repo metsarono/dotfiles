@@ -71,6 +71,7 @@ class HoneyReadsTests(unittest.TestCase):
 
     def manifest(self, *, decider=False):
         data = json.loads(MANIFEST_SRC.read_text(encoding="utf-8"))
+        data["gate_inversion"] = {"enabled": False}
         data["roots"] = [str(self.root)]
         data["scratch_roots"] = [str(self.root)]
         data["classes"] = [item for item in data["classes"]]
@@ -161,7 +162,7 @@ class HoneyReadsTests(unittest.TestCase):
         env = {
             **os.environ,
             "SO_APPROVAL_KIKIN_MANIFEST": str(manifest_path),
-            "SO_APPROVAL_KIKIN_LOG": str(log_path),
+            "SO_APPROVAL_KIKIN_LOG": str(log_path), "SO_APPROVAL_MORNING_QUEUE": str(Path(self.temp.name) / "queue.jsonl"),
             "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE),
         }
         for command in commands:
@@ -177,10 +178,10 @@ class HoneyReadsTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertFalse(completed.stdout.strip(), (command, completed.stdout))
+                self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny", command)
         records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(len(records), len(commands))
-        self.assertTrue(all(record["decision"] == "ask" for record in records))
+        self.assertTrue(all(record["decision"] == "deny" for record in records))
         self.assertTrue(all(record["reason"] == "true_floor" for record in records))
         self.assertTrue(all("decider_status" not in record for record in records))
 
@@ -247,9 +248,9 @@ class HoneyReadsTests(unittest.TestCase):
         completed = subprocess.run([str(HOOK)], input=json.dumps(event(f"cat {home}/notes.md", self.root)),
             text=True, capture_output=True, timeout=5, check=False,
             env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(path),
-                 "SO_APPROVAL_KIKIN_LOG": str(log), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)})
+                 "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(Path(self.temp.name) / "queue.jsonl"), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)})
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertFalse(completed.stdout.strip())
+        self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny")
         record = json.loads(log.read_text().splitlines()[-1])
         self.assertEqual(record["reason"], "true_floor")
         self.assertNotIn("decider_status", record)

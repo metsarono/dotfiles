@@ -49,6 +49,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.git('commit', '-m', 'test: fixture', '--', 'README.org')
         self.git('branch', 'topic')
         self.manifest = json.loads((REPO / 'all/.config/dotcortex/claude-approval-canary.kikin.v1.json').read_text())
+        self.manifest['gate_inversion'] = {'enabled': False}
         self.manifest['roots'] = [str(self.repo), str(self.wt)]
         self.manifest['scratch_roots'] = [str(self.scratch)]
         self.manifest['decider']['enabled'] = False
@@ -98,7 +99,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.assertTrue(result[1].startswith('coordinator_'), result)
 
     def ask(self, command):
-        self.assertEqual(self.run_hook(command)['behavior'], 'ask', command)
+        self.assertEqual(self.run_hook(command)['behavior'], 'deny', command)
 
     def mail(self):
         return f'mailcortex send --from YOUR_SEAT@YOUR_HOST.helm --to YOUR_REVIEWER@YOUR_REVIEW_HOST.helm --subject "review ready" --body-file {self.prompt}'
@@ -131,9 +132,9 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.run_hook('rm -rf /tmp/YOUR_TEST')['behavior'], 'deny')
         self.assertEqual(json.loads(self.queue.read_text())['reason'], 'true_floor')
 
-    def test_present_ask_unchanged(self):
+    def test_present_refusal_is_queued_without_terminal_prompt(self):
         self.ask('unknown-command')
-        self.assertFalse(self.queue.exists())
+        self.assertEqual(json.loads(self.queue.read_text())['command'], 'unknown-command')
 
     def test_away_does_not_change_class_allow(self):
         self.flag.touch()
@@ -357,7 +358,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
                 with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event(command)))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(True, 'accepted', 1, 'allow')) as decider:
                     e.main()
                 result = json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'] if out.getvalue().strip() else 'ask'
-                self.assertEqual(result, 'deny' if away else 'ask', command)
+                self.assertEqual(result, 'deny', command)
                 decider.assert_not_called()
 
     def test_timeout_while_away_denies_and_preserves_request(self):

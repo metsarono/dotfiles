@@ -22,7 +22,8 @@
   "roots": [
     "/home/YOUR_AGENT_CLAUDE/DotCortex",
     "/home/YOUR_AGENT_CLAUDE/honey-work",
-    "/var/tmp"
+    "/var/tmp",
+    "/home/YOUR_AGENT_CLAUDE/DotCortex-wt-YOUR_HOST"
   ],
   "scratch_roots": [
     "/var/tmp"
@@ -31,36 +32,75 @@
     {
       "name": "local_read",
       "enabled": true,
-      "tool_names": ["Read", "Glob", "Grep"],
-      "bash_verbs": ["cat", "head", "tail", "grep", "rg", "ls", "stat", "wc", "find", "sed", "ps", "pgrep", "uptime", "df", "free", "tmux", "python", "python3"]
+      "tool_names": [
+        "Read",
+        "Glob",
+        "Grep"
+      ],
+      "bash_verbs": [
+        "cat",
+        "head",
+        "tail",
+        "grep",
+        "rg",
+        "ls",
+        "stat",
+        "wc",
+        "find",
+        "sed",
+        "ps",
+        "pgrep",
+        "uptime",
+        "df",
+        "free",
+        "tmux",
+        "python",
+        "python3"
+      ]
     },
     {
       "name": "git_observe",
       "enabled": true,
-      "subcommands": ["status", "log", "diff", "show", "branch"]
+      "subcommands": [
+        "status",
+        "log",
+        "diff",
+        "show",
+        "branch"
+      ]
     },
     {
       "name": "centre_render",
       "enabled": true,
-      "commands": ["pokemon-centre render"]
+      "commands": [
+        "pokemon-centre render"
+      ]
     },
     {
       "name": "safe_commit",
       "enabled": true,
-      "commands": ["git commit", "dotcortex-safe-commit"]
+      "commands": [
+        "git commit",
+        "dotcortex-safe-commit"
+      ]
     },
     {
       "name": "ssh_readonly",
-      "enabled": false,
+      "enabled": true,
       "readonly_host": "YOUR_READONLY_HOST",
       "remote_home": "/home/YOUR_REMOTE_USER",
-      "remote_path_roots": ["/home/YOUR_REMOTE_USER/HelmCortex"],
+      "remote_path_roots": [
+        "/home/YOUR_REMOTE_USER/HelmCortex"
+      ],
       "mailcortex_account": "YOUR_AGENT@YOUR_READONLY_HOST"
     },
     {
       "name": "local_test_run",
       "enabled": false,
-      "local_test_roots": ["/home/YOUR_AGENT_CLAUDE/DotCortex", "/home/YOUR_AGENT_CLAUDE/honey-work"]
+      "local_test_roots": [
+        "/home/YOUR_AGENT_CLAUDE/DotCortex",
+        "/home/YOUR_AGENT_CLAUDE/honey-work"
+      ]
     },
     {
       "name": "outbound_tool",
@@ -104,6 +144,14 @@
     ],
     "remote_scratch_prefixes": [
       "YOUR_SEAT-"
+    ]
+  },
+  "gate_inversion": {
+    "enabled": true
+  },
+  "notifications": {
+    "argv": [
+      "/home/YOUR_SEAT/.local/bin/approval-telegram-notify"
     ]
   }
 }

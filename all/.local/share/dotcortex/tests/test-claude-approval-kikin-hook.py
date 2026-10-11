@@ -19,13 +19,13 @@ def event(tool_name, tool_input, cwd):
 
 def run_hook(payload, manifest, log=os.devnull):
     # Never let a test write the real decision ledger; os.devnull unless a test reads it.
-    env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": str(log), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}
+    env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(Path(manifest).parent / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}
     return subprocess.run([str(HOOK)], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=2, check=False)
 
 
 def decision(completed):
     if not completed.stdout.strip():
-        return "ask"
+        return "deny"
     return json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"]
 
 
@@ -56,6 +56,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def manifest(self, *enabled):
         data = json.loads(json.dumps(self.base))
+        data["gate_inversion"] = {"enabled": False}
         data["roots"] = [str(self.root)]
         data["scratch_roots"] = [str(self.scratch)]
         for item in data["classes"]:
@@ -77,7 +78,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         run_hook("not json", self.manifest(), log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual([(r["decision"], r["reason"]) for r in records],
-                         [("allow", "local_read"), ("ask", "local_read_disabled"), ("ask", "not_permission_request")])
+                         [("allow", "local_read"), ("deny", "local_read_disabled"), ("deny", "not_permission_request")])
         self.assertNotIn(secret_path, log.read_text())
         self.assertEqual(oct(log.stat().st_mode & 0o777), "0o600")
 
@@ -130,11 +131,11 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for command in ask:
             with self.subTest(ask=command):
-                self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "ask")
+                self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "deny")
         # A compound read still respects a disabled class.
-        self.assert_decision(event("Bash", {"command": "cat README.md | wc -l"}, self.root), self.manifest(), "ask")
+        self.assert_decision(event("Bash", {"command": "cat README.md | wc -l"}, self.root), self.manifest(), "deny")
 
-    def test_all_classes_are_default_off(self):
+    def test_class_flags_do_not_block_the_new_scoped_default(self):
         manifest = REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json"
         self.assertTrue(all(
             not item["enabled"]
@@ -142,7 +143,7 @@ class KikinApprovalHookTests(unittest.TestCase):
             if item["name"] != "ssh_readonly"
         ))
         self.assertTrue(next(item for item in self.base["classes"] if item["name"] == "ssh_readonly")["enabled"])
-        self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "ask")
+        self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "allow")
 
     def test_each_class_has_green_and_disabled_paths(self):
         cases = [
@@ -154,7 +155,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         for class_name, payload in cases:
             with self.subTest(class_name=class_name):
                 self.assert_decision(payload, self.manifest(class_name), "allow")
-                self.assert_decision(payload, self.manifest(), "ask")
+                self.assert_decision(payload, self.manifest(), "deny")
 
     def test_full_red_corpus_never_allows(self):
         manifest = self.manifest("local_read", "git_observe", "centre_render", "safe_commit")
@@ -169,7 +170,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "ask")
+                self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "deny")
 
     def test_mount_symlink_and_scratch_output_boundaries(self):
         mount = Path(self.temp.name) / "mount"
@@ -185,7 +186,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         self.assert_decision(event("Read", {"file_path": str(canonical / "README.md")}, canonical), manifest, "allow")
         data["classes"][-2]["enabled"] = True
         manifest.write_text(json.dumps(data))
-        self.assert_decision(event("Bash", {"command": "FORGE/bin/pokemon-centre render --out /etc/x"}, canonical), manifest, "ask")
+        self.assert_decision(event("Bash", {"command": "FORGE/bin/pokemon-centre render --out /etc/x"}, canonical), manifest, "deny")
 
     def _decider_manifest(self, *, honey=None, kikin=None, enabled=True, honey_api=None):
         data = json.loads(self.manifest("local_read", "git_observe").read_text())
@@ -257,7 +258,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         log = self.scratch / "decider.jsonl"
         run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "ask")
+        self.assertEqual(records[-1]["decision"], "deny")
         self.assertEqual(records[-1]["decider_status"], "threshold_failed")
 
     def test_decider_down_asks(self):
@@ -265,7 +266,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         log = self.scratch / "decider.jsonl"
         run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "ask")
+        self.assertEqual(records[-1]["decision"], "deny")
         self.assertEqual(records[-1]["decider_status"], "unavailable")
 
     def test_decider_timeout_asks(self):
@@ -274,7 +275,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         log = self.scratch / "decider.jsonl"
         run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "ask")
+        self.assertEqual(records[-1]["decision"], "deny")
         self.assertEqual(records[-1]["decider_status"], "timeout")
 
     def test_true_floor_cannot_be_overridden(self):
@@ -292,7 +293,7 @@ class KikinApprovalHookTests(unittest.TestCase):
             with self.subTest(command=command):
                 run_hook(event("Bash", {"command": command}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertTrue(all(record["decision"] == "ask" for record in records[-len(floor_commands):]))
+        self.assertTrue(all(record["decision"] == "deny" for record in records[-len(floor_commands):]))
         self.assertTrue(all(record["reason"] == "true_floor" for record in records[-len(floor_commands):]))
         self.assertNotIn("decider_status", records[-1])
 
@@ -330,7 +331,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         log = self.scratch / "decider.jsonl"
         run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "ask")
+        self.assertEqual(records[-1]["decision"], "deny")
         self.assertNotIn("decider_status", records[-1])
 
     def _classify_reason(self, payload, manifest):
@@ -478,7 +479,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         log = self.scratch / "write-dual.jsonl"
         run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "ask")
+        self.assertEqual(records[-1]["decision"], "deny")
         self.assertEqual(records[-1]["decider_status"], "threshold_failed")
 
     def test_r2d2d_wire_round_trip(self):
@@ -549,7 +550,7 @@ class KikinApprovalHookTests(unittest.TestCase):
             log2 = self.scratch / "r2d2d-deny.jsonl"
             run_hook(event("Bash", {"command": "echo hi > out.txt && stat x"}, self.root), manifest, log2)
             records2 = [json.loads(line) for line in log2.read_text().splitlines()]
-            self.assertEqual(records2[-1]["decision"], "ask")
+            self.assertEqual(records2[-1]["decision"], "deny")
             self.assertEqual(records2[-1]["decider_status"], "threshold_failed")
         finally:
             server.shutdown()
@@ -563,7 +564,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         log = self.scratch / "dual.jsonl"
         run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "ask")
+        self.assertEqual(records[-1]["decision"], "deny")
         self.assertEqual(records[-1]["decider_status"], "threshold_failed")
 
     def test_dual_mode_allows_when_both_clear(self):
@@ -584,9 +585,9 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_malformed_input_asks(self):
         manifest = self.manifest("local_read")
-        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull, "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}, timeout=2, check=False)
+        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull, "SO_APPROVAL_MORNING_QUEUE": str(self.scratch / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}, timeout=2, check=False)
         self.assertEqual(completed.returncode, 0)
-        self.assertEqual(decision(completed), "ask")
+        self.assertEqual(decision(completed), "deny")
 
 
 if __name__ == "__main__":

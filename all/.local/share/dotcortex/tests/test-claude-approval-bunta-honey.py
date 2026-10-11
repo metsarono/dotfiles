@@ -31,6 +31,7 @@ def load_engine():
 
 def bunta_manifest(engine, root):
     data = json.loads(MANIFEST_SRC.read_text())
+    data["gate_inversion"] = {"enabled": False}
     data["roots"] = [str(root), "/var/tmp"]
     data["scratch_roots"] = ["/var/tmp"]
     data["classes"] = [item for item in data["classes"]]
@@ -158,7 +159,7 @@ class BuntaReplayTests(unittest.TestCase):
         env = {
             **os.environ,
             "SO_APPROVAL_KIKIN_MANIFEST": str(manifest_path),
-            "SO_APPROVAL_KIKIN_LOG": str(log),
+            "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(TMP / "queue.jsonl"),
             "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE),
         }
         hook = HERE.parents[3] / "bin/claude-hook-permission-request"
@@ -174,10 +175,10 @@ class BuntaReplayTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertFalse(completed.stdout.strip(), (command, completed.stdout))
+                self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny", command)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(len(records), len(commands))
-        self.assertTrue(all(record["decision"] == "ask" for record in records))
+        self.assertTrue(all(record["decision"] == "deny" for record in records))
         self.assertTrue(all(record["reason"] == "true_floor" for record in records))
         self.assertTrue(all("decider_status" not in record for record in records))
 
@@ -281,7 +282,7 @@ class BuntaReplayTests(unittest.TestCase):
         log = self.scratch / "decisions.jsonl"
         payload = json.dumps(event("Bash", {"command": "git status"}, self.root))
         env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest_path),
-               "SO_APPROVAL_KIKIN_LOG": str(log),
+               "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(TMP / "queue.jsonl"),
                "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)}
         completed = subprocess.run([str(hook)], input=payload, text=True,
                                   capture_output=True, env=env, timeout=10, check=False)
