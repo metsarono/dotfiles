@@ -86,9 +86,15 @@ honey_claude_launch() {
         case "$bot" in opus) voice=Jasper ;; sonnet) voice=Luna ;; haiku) voice=Kiki ;; esac
         export HONEY_VOICE="${!voice_var:-$voice}"
         [[ -n "${LIB_DIR:-}" ]] && export WHISPER_TRANSCRIBE="$LIB_DIR/../bin/honey-whisper-transcribe"
+        # Mail wake (services-mailcortex-claude.org): seats listed in
+        # HONEY_CLAUDE_MAIL_WAKE_BOTS (default: opus, Bunta, the only seat with a
+        # Kikin wake registry entry) launch through mailcortex-claude-warm with the
+        # opt-in set; it execs claude-warm unchanged unless the wake is enabled.
+        local warm=claude-warm wake=0
+        case " ${HONEY_CLAUDE_MAIL_WAKE_BOTS-opus} " in *" $bot "*) warm=mailcortex-claude-warm wake=1 ;; esac
         # acceptEdits (auto) mode: plan mode blocks unattended bot work (as on kikin).
-        exec env CLAUDE_WARM_HERDR_AGENT="$agent" TELEGRAM_STATE_DIR="$state_dir" \
-            claude-warm --model "$model" --permission-mode acceptEdits \
+        exec env CLAUDE_WARM_HERDR_AGENT="$agent" TELEGRAM_STATE_DIR="$state_dir" MAILCORTEX_CLAUDE_WAKE="$wake" \
+            "$warm" --model "$model" --permission-mode acceptEdits \
             --allowedTools=mcp__plugin_telegram_telegram \
             ${LIB_DIR:+--settings="$LIB_DIR/../claude-settings.json"} \
             --channels plugin:telegram@claude-plugins-official "${passthrough[@]+"${passthrough[@]}"}"

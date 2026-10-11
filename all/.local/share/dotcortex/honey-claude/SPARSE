@@ -1,5 +1,8 @@
 /all/.local/share/dotcortex/honey-claude/
 /all/.local/bin/claude-warm
+/all/.local/bin/mailcortex-claude-warm
+/all/.local/bin/mailcortex-claude-wake
+/all/.local/bin/mailcortex_claude.py
 /all/.local/bin/agent-session
 /all/.local/bin/agent-sessiond
 /all/.local/bin/telegram-agent-host
@@ -8,6 +11,7 @@
 /all/.local/bin/piper
 /all/.local/bin/loom
 /all/.local/bin/nanobot-telegram
+/all/.local/bin/shoukichi-telegram
 /all/.local/bin/opencode-owner
 /all/.local/bin/telegram-agent-remote-start
 /all/.local/bin/telegram-agent-watchdog

@@ -46,13 +46,15 @@ class Home:
         npm_bin = self.home / ".npm-global/bin"
         npm_bin.mkdir(parents=True)
         self.script(npm_bin / "bun", "exit 0\n")
-        self.script(self.bin / "claude-warm", (
-            "import json, os, sys\n"
-            f"json.dump({{'argv': sys.argv[1:], 'cwd': os.getcwd(), 'pid': os.getpid(),"
-            " 'agent': os.environ.get('CLAUDE_WARM_HERDR_AGENT'),"
-            " 'state': os.environ.get('TELEGRAM_STATE_DIR'), 'path': os.environ['PATH'],"
-            " 'guard': {k: v for k, v in os.environ.items() if k.startswith('CLAUDE_WARM_PRESERVATION_')}},"
-            f" open({str(self.record)!r}, 'w'))\n"), shebang="#!/usr/bin/env python3\n")
+        for warm in ("claude-warm", "mailcortex-claude-warm"):
+            self.script(self.bin / warm, (
+                "import json, os, sys\n"
+                f"json.dump({{'argv': sys.argv[1:], 'cwd': os.getcwd(), 'pid': os.getpid(),"
+                " 'warm': os.path.basename(sys.argv[0]), 'wake': os.environ.get('MAILCORTEX_CLAUDE_WAKE'),"
+                " 'agent': os.environ.get('CLAUDE_WARM_HERDR_AGENT'),"
+                " 'state': os.environ.get('TELEGRAM_STATE_DIR'), 'path': os.environ['PATH'],"
+                " 'guard': {k: v for k, v in os.environ.items() if k.startswith('CLAUDE_WARM_PRESERVATION_')}},"
+                f" open({str(self.record)!r}, 'w'))\n"), shebang="#!/usr/bin/env python3\n")
         for bot in BOTS:
             state = self.home / f".claude/channels/telegram-{bot}"
             state.mkdir(parents=True)
@@ -98,6 +100,9 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(rec["cwd"], str(box.home / "honey-work" / bot))
                 self.assertEqual(rec["state"], str(box.home / f".claude/channels/telegram-{bot}"))
                 self.assertEqual(rec["agent"], f"honey-{bot}-bot")
+                # Only Bunta's seat (opus) launches through the mail-wake launcher, opted in.
+                self.assertEqual((rec["warm"], rec["wake"]),
+                                 ("mailcortex-claude-warm", "1") if bot == "opus" else ("claude-warm", "0"))
                 self.assertIn(str(box.home / ".npm-global/bin"), rec["path"].split(":"))
                 self.assertIn(str(ROOT / "all/.local/bin"), rec["path"].split(":"), "fleet bin of the lane checkout")
                 self.assertTrue(rec["path"].startswith(str(box.bin)), "PATH must be appended to")
