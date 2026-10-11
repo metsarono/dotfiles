@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import types
@@ -48,7 +49,7 @@ class ClaudeWakeTests(unittest.TestCase):
         for leaf in ("new", "cur", "tmp"):
             (self.mailbox / leaf).mkdir(parents=True)
         self.owner = {"channel": "claude-" + "a" * 32, "session_id": "b" * 32,
-                      "supervisor_pid": 123, "epoch": 1, "pane_id": "%1", "pane_tty": "/dev/pts/1"}
+                      "supervisor_pid": 123, "supervisor_start_time": "12345", "epoch": 1, "pane_id": "%1", "pane_tty": "/dev/pts/1"}
 
     def mail(self, n):
         m = EmailMessage()
@@ -195,7 +196,11 @@ class ClaudeWakeTests(unittest.TestCase):
         return types.SimpleNamespace(now=lambda: 1000, write_all=mock.Mock())
 
     def fake_owner(self):
+        import contextlib
+        import threading
         return types.SimpleNamespace(channel=self.owner["channel"], session_id=self.owner["session_id"],
+            mailcortex_admission_lock=threading.RLock(), mailcortex_start_time="12345",
+            _mailcortex_barrier=contextlib.nullcontext, _mailcortex_refresh_screen=lambda: False,
             completed_turn_epoch=1, status="idle", screen_state="idle", last_normal_stop=10,
             last_local_input=None, last_lifecycle_activity=10, lifecycle_health="wired", compacting=False,
             recovery_pending=False, recovery_awaiting=False, transcript_gate_blocked=False,
@@ -259,8 +264,8 @@ class ClaudeWakeTests(unittest.TestCase):
 
     def test_resolve_owner_binds_private_runtime_to_exact_single_tmux_pane(self):
         import socket
-        target = dict(self.record["claude_target"], tmux_socket=str(self.base / "tmux.sock"),
-                      runtime_dir=str(self.base / "runtime"))
+        target = dict(self.record["claude_target"], tmux_socket=str(self.short_dir("tmux.sock") / "s"),
+                      runtime_dir=str(self.short_dir("runtime")))
         root = Path(target["runtime_dir"]) / "claude-idle-compaction" / self.owner["channel"]
         root.mkdir(parents=True)
         root.chmod(0o700); root.parent.chmod(0o700)
@@ -270,6 +275,7 @@ class ClaudeWakeTests(unittest.TestCase):
             ipc.bind(str(control)); control.chmod(0o600)
             state = root / "state.json"
             state.write_text(json.dumps(dict(self.owner, supervisor_pid=os.getpid(),
+                supervisor_start_time=self.c.process_start_time(os.getpid()),
                 completed_turn_epoch=1, control_socket=str(control))))
             state.chmod(0o600)
             row = f"YOUR_TMUX_SESSION\t%1\t{os.getpid()}\t/dev/pts/1\t0\t0\n"
@@ -305,13 +311,160 @@ class ClaudeWakeTests(unittest.TestCase):
         (self.mailbox / "new/bad").write_text("malformed")
         self.assertEqual(self.w.locked_scan(registry, factory, now=14), 0)
 
-    def start_pty(self):
+    def test_permission_appearing_between_check_and_write_never_gets_input(self):
+        import contextlib
+        o = self.fake_owner(); warm = self.fake_warm()
+        @contextlib.contextmanager
+        def barrier():
+            # The child emits a permission prompt after the initial poll.
+            self.assertTrue(o.mailcortex_admission_lock._is_owned())
+            o.screen_state = "blocked"
+            yield
+        o._mailcortex_barrier = barrier
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "busy")
+        warm.write_all.assert_not_called()
+        self.assertEqual(o.status, "idle")
+
+    def test_human_typing_during_admission_never_gets_a_wake(self):
+        import contextlib
+        o = self.fake_owner(); warm = self.fake_warm()
+        @contextlib.contextmanager
+        def barrier():
+            o.mailcortex_input_dirty = True
+            yield
+        o._mailcortex_barrier = barrier
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "busy")
+        warm.write_all.assert_not_called()
+
+    def test_admission_rereads_screen_instead_of_cached_idle(self):
+        o = self.fake_owner(); warm = self.fake_warm()
+        o._mailcortex_refresh_screen = lambda: setattr(o, "screen_state", "blocked")
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "busy")
+        warm.write_all.assert_not_called()
+
+    def test_missing_or_failed_barrier_fails_closed(self):
+        o = self.fake_owner(); warm = self.fake_warm()
+        o._mailcortex_barrier = mock.Mock(side_effect=OSError("cannot stop child"))
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "unavailable")
+        warm.write_all.assert_not_called()
+
+    def test_owner_instance_is_rechecked_at_write(self):
+        o = self.fake_owner(); warm = self.fake_warm()
+        with mock.patch.object(self.c, "owner_matches", side_effect=[True, False]), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "unavailable")
+        warm.write_all.assert_not_called()
+
+    def test_owner_requires_process_start_time(self):
+        self.assertFalse(self.c.valid_owner({k:v for k,v in self.owner.items() if k != "supervisor_start_time"}))
+        expected = dict(self.owner, supervisor_pid=os.getpid(),
+                        supervisor_start_time="wrong", pane_tty="/dev/pts/1")
+        with mock.patch.object(self.c.os, "ttyname", return_value="/dev/pts/1"), \
+             mock.patch.dict(os.environ, TMUX_PANE="%1"):
+            self.assertFalse(self.c.owner_matches(self.fake_owner(), expected))
+
+    def test_crash_after_injecting_is_recovered_and_alerted_without_retry(self):
+        self.mail(1); self.mail(2)
+        a = self.adapter()
+        self.w.locked_scan(self.registry, a, now=10)
+        a.deliver = mock.Mock(side_effect=SystemExit("watcher killed"))
+        with self.assertRaises(SystemExit):
+            self.w.locked_scan(self.registry, a, now=12)
+        self.assertEqual(self.receipt(1)["wake_state"], "injecting")
+        restarted = self.adapter()
+        with mock.patch.object(self.w, "report_error") as alert:
+            self.assertEqual(self.w.locked_scan(self.registry, restarted, now=15), 0)
+            self.assertEqual(alert.call_count, 2)
+        for n in (1, 2):
+            receipt = self.receipt(n)
+            self.assertEqual(receipt["wake_state"], "delivery_unknown")
+            self.assertEqual(receipt["reason"], "interrupted_attempt")
+            self.assertIn("attempt_id", receipt)
+            self.assertIn("attempt_start_time", receipt)
+        self.assertEqual(restarted.runner.call_count, 0)
+        with mock.patch.object(self.w, "report_error") as alert:
+            self.w.locked_scan(self.registry, restarted, now=300)
+            alert.assert_not_called()
+
+    def test_legacy_injecting_without_mail_is_also_recovered(self):
+        self.w.MAILCORTEX.write_wake_receipt("worker", "<m1@fixture.helm>", "injecting",
+                                            wake_updated_at=10)
+        with mock.patch.object(self.w, "report_error") as alert:
+            self.w.locked_scan(self.registry, self.adapter(), now=12)
+            alert.assert_called_once()
+        self.assertEqual(self.receipt(1)["wake_state"], "delivery_unknown")
+
+    def test_malformed_message_is_quarantined_and_valid_same_seat_continues(self):
+        (self.mailbox / "new/0bad").write_text("not a valid message")
+        self.mail(1); a = self.adapter()
+        with mock.patch.object(self.w, "report_error") as alert:
+            self.w.locked_scan(self.registry, a, now=10)
+            alert.assert_called_once()
+        self.assertFalse((self.mailbox / "new/0bad").exists())
+        quarantined = list((self.mailbox / "quarantine").iterdir())
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(quarantined[0].read_text(), "not a valid message")
+        diagnostics = list((self.base / "state/rejected/worker").glob("*.json"))
+        self.assertEqual(len(diagnostics), 1)
+        rejected = json.loads(diagnostics[0].read_text())
+        self.assertEqual(rejected["filename"], "0bad")
+        self.assertEqual(rejected["first_seen_at"], 10)
+        self.assertEqual(rejected["state"], "quarantined")
+        self.assertEqual(self.w.locked_scan(self.registry, a, now=12), 1)
+        self.assertEqual(self.receipt(1)["wake_state"], "injected")
+
+    def test_disabled_launcher_execs_original_with_exact_argv_and_environment(self):
+        args = ["--resume", "saved-session", "--control", "state"]
+        for flag in (None, "0", "false"):
+            with self.subTest(flag=flag), mock.patch.dict(os.environ, clear=True):
+                os.environ["PATH"] = "/usr/bin:/bin"
+                os.environ["FIXTURE_ENV"] = "preserved"
+                if flag is not None: os.environ["MAILCORTEX_CLAUDE_WAKE"] = flag
+                before = dict(os.environ)
+                with mock.patch.object(self.c.os, "execv", side_effect=SystemExit) as execute:
+                    with self.assertRaises(SystemExit): self.c.launch(args)
+                original = str(BIN / "claude-warm")
+                execute.assert_called_once_with(original, [original, *args])
+                self.assertEqual(dict(os.environ), before)
+
+    def test_disabled_launcher_help_control_and_failure_match_original(self):
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.base),
+               "XDG_RUNTIME_DIR": str(self.base / "runtime"),
+               "CLAUDE_IDLE_REAL_EXECUTABLE": str(self.base / "missing-executable"),
+               "MAILCORTEX_CLAUDE_WAKE": "0"}
+        for args in (["--help"], ["--control", "unsupported"], ["--resume", "saved-session"]):
+            results = [subprocess.run([str(BIN / name), *args], env=env, capture_output=True,
+                                      timeout=8) for name in ("claude-warm", "mailcortex-claude-warm")]
+            self.assertEqual([(r.returncode, r.stdout, r.stderr) for r in results[:1]],
+                             [(r.returncode, r.stdout, r.stderr) for r in results[1:]])
+
+    def short_dir(self, leaf):
+        """AF_UNIX sockets cap at 108 bytes; sandbox tempdirs can exceed that.
+        Runtime/socket dirs go under /tmp with short randomized names."""
+        # Budget: AF_UNIX caps at 108 bytes; claude-warm adds
+        # /claude-idle-compaction/claude-<32hex>/control.sock (~76 bytes)
+        # under XDG_RUNTIME_DIR, so the leaf path must stay under ~30.
+        import secrets
+        path = Path("/tmp") / f"mw{os.getpid()}-{secrets.token_hex(2)}-{leaf}"
+        path.mkdir(mode=0o700)
+        self.addCleanup(lambda: shutil.rmtree(path, ignore_errors=True))
+        return path
+
+    def start_pty(self, admission_race=False):
         import pty
         import select
         import time
-        runtime = self.base / "pty-runtime"
+        runtime = self.short_dir("rt")
         home = self.base / "pty-home"
-        runtime.mkdir(); home.mkdir()
+        home.mkdir()
         fake = self.base / "fake-claude"
         fake.write_text("#!/usr/bin/env python3\nimport os,sys,signal\n"
                         "signal.signal(signal.SIGUSR1, lambda *a: print('Do you want to proceed?', flush=True))\n"
@@ -321,17 +474,37 @@ class ClaudeWakeTests(unittest.TestCase):
         fake.chmod(0o755)
         master, slave = pty.openpty()
         tty = os.ttyname(slave)
-        env = dict(os.environ, HOME=str(home), XDG_RUNTIME_DIR=str(runtime),
-                   XDG_STATE_HOME=str(home / 'state'), TMUX_PANE='%1',
+        # XDG_STATE_HOME must ALSO be short: claude-warm puts its control
+        # socket under it (AF_UNIX 108-byte cap).
+        env = dict(os.environ, HOME=str(home), XDG_RUNTIME_DIR=str(runtime), MAILCORTEX_CLAUDE_WAKE='1',
+                   XDG_STATE_HOME=str(self.short_dir("st")), TMUX_PANE='%1',
                    CLAUDE_IDLE_REAL_EXECUTABLE=str(fake), CLAUDE_IDLE_CACHE_PROFILE='short',
                    CLAUDE_SHORT_CACHE_IDLE_COMPACT_SECONDS='600', CLAUDE_IDLE_WATCHED_SERVERS='',
                    CLAUDE_IDLE_COMPACT_TRANSCRIPT_QUIESCENCE_SECONDS='1')
         # Explicit allowlist: no credentials, interactive hooks, or real session endpoints.
-        env = {k:v for k,v in env.items() if k in {'PATH','HOME','XDG_RUNTIME_DIR','XDG_STATE_HOME','TMUX_PANE',
+        env = {k:v for k,v in env.items() if k in {'MAILCORTEX_CLAUDE_WAKE','PATH','HOME','XDG_RUNTIME_DIR','XDG_STATE_HOME','TMUX_PANE',
                 'CLAUDE_IDLE_REAL_EXECUTABLE','CLAUDE_IDLE_CACHE_PROFILE',
                 'CLAUDE_SHORT_CACHE_IDLE_COMPACT_SECONDS','CLAUDE_IDLE_WATCHED_SERVERS',
                 'CLAUDE_IDLE_COMPACT_TRANSCRIPT_QUIESCENCE_SECONDS'}}
-        process = subprocess.Popen([str(BIN / 'mailcortex-claude-warm')], stdin=slave,
+        launcher = BIN / 'mailcortex-claude-warm'
+        if admission_race:
+            # Force a real permission screen precisely after the cached idle check,
+            # before the actual kernel barrier. No production timing hook is added.
+            launcher = self.base / 'race-launcher'
+            launcher.write_text("#!/usr/bin/env python3\n"
+                "import contextlib,os,select,signal,sys\n"
+                "sys.path.insert(0," + repr(str(BIN)) + ")\n"
+                "import mailcortex_claude as c\n"
+                "original=c.paused_child\n"
+                "@contextlib.contextmanager\n"
+                "def raced(owner):\n"
+                " os.kill(owner.pid,signal.SIGUSR1)\n"
+                " assert select.select([owner.master_fd],[],[],2)[0]\n"
+                " with original(owner): yield\n"
+                "c.paused_child=raced\n"
+                "raise SystemExit(c.launch(sys.argv[1:]))\n")
+            launcher.chmod(0o755)
+        process = subprocess.Popen([str(launcher)], stdin=slave,
                                    stdout=slave, stderr=slave, env=env, start_new_session=True)
         os.close(slave)
         output = bytearray()
@@ -369,7 +542,7 @@ class ClaudeWakeTests(unittest.TestCase):
         import signal
         os.kill(state['pid'], signal.SIGUSR2)
         owner = dict(self.owner, channel=state['channel'], session_id=sid,
-                     supervisor_pid=process.pid, epoch=1, pane_tty=tty)
+                     supervisor_pid=process.pid, supervisor_start_time=state["supervisor_start_time"], epoch=1, pane_tty=tty)
         request = dict(self.request(), channel=state['channel'], owner=owner)
         # Status requests omit the admission-only text field.
         def status():
@@ -387,6 +560,40 @@ class ClaudeWakeTests(unittest.TestCase):
         drain(0.2)
         self.assertIn(b'RECEIVED:short wake', output)
         self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+
+    def test_real_pty_permission_between_idle_check_and_write_gets_no_wake(self):
+        control, request, event, master, output, drain, path = self.start_pty(admission_race=True)
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+        drain(0.2)
+        self.assertIn(b'Do you want to proceed?', output)
+        self.assertNotIn(b'RECEIVED:', output)
+        self.assertNotIn(b'short wake', output)
+        self.assertEqual(json.loads(path.read_text())['status'], 'idle')
+
+    def test_barrier_resumes_fake_child_when_supervisor_is_killed(self):
+        import signal
+        import time
+        child = subprocess.Popen(['/usr/bin/python3', '-c', 'import time; time.sleep(20)'])
+        self.addCleanup(lambda: (os.kill(child.pid, signal.SIGCONT), child.terminate(), child.wait(timeout=3)))
+        ready = self.base / 'barrier-ready'
+        # A disposable supervisor fixture, never the user's supervisor.
+        script = self.base / 'crash-owner.py'
+        script.write_text('import sys,time,types\nfrom pathlib import Path\n'
+            + 'sys.path.insert(0,' + repr(str(BIN)) + ')\nimport mailcortex_claude as c\n'
+            + 'owner=types.SimpleNamespace(pid=' + str(child.pid) + ',_pty_still_owned=lambda:True)\n'
+            + 'with c.paused_child(owner):\n Path(' + repr(str(ready)) + ').touch()\n time.sleep(20)\n')
+        supervisor = subprocess.Popen(['/usr/bin/python3', str(script)])
+        self.addCleanup(lambda: (supervisor.kill() if supervisor.poll() is None else None, supervisor.wait(timeout=3)))
+        deadline = time.monotonic() + 3
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(ready.exists())
+        stat_path = Path(f'/proc/{child.pid}/stat')
+        self.assertEqual(stat_path.read_text().rsplit(')',1)[1].split()[0], 'T')
+        supervisor.kill(); supervisor.wait(timeout=3)
+        while stat_path.read_text().rsplit(')',1)[1].split()[0] == 'T' and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertNotEqual(stat_path.read_text().rsplit(')',1)[1].split()[0], 'T')
 
     def test_real_pty_permission_screen_refuses(self):
         import signal

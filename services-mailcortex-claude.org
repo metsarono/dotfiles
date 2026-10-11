@@ -15,8 +15,12 @@ supervisor below an explicit private runtime root. Admission runs inside the
 existing supervisor through the opt-in =mailcortex-claude-warm= launcher. Both
 lifecycle idle and the supervisor's PTY screen classifier must agree. Pending
 terminal bytes, permission screens, any local input since the last normal Stop,
-transcript uncertainty, compaction and recovery refuse. The owner rechecks its
-live PTY and claims the turn before writing one ASCII line and Enter. It never
+transcript uncertainty, compaction and recovery refuse. The owner serializes admission with input, screen and lifecycle handling using
+one lock. A pidfd guardian pauses its child process tree and acknowledges all
+stopped threads before draining and reclassifying the screen. Any activity during
+acquisition refuses the wake. The final gate requires an empty prompt and no
+permission marker; it claims the turn before one bounded ASCII write plus Enter.
+The guardian resumes the tree on release or supervisor crash. It never
 uses =tmux send-keys=. This seam needs an approved relaunch; an older supervisor
 fails closed. Installing the files alone does not enable it.
 
@@ -59,7 +63,9 @@ provisioned noninteractive run-as rule. Do not grant blanket sudo or create keys
 
 At an operator-approved session boundary, use the existing launcher's environment,
 settings, real executable and saved resume identity, replacing only its
-=claude-warm= executable with =mailcortex-claude-warm=. Never terminate or replace
+=claude-warm= executable with =mailcortex-claude-warm= and explicitly set
+=MAILCORTEX_CLAUDE_WAKE=1= in that local launcher. Unset or any other value execs
+the original =claude-warm= with identical arguments and environment. Never terminate or replace
 a live turn as part of deployment. The runtime root and tmux target in the private
 registry must match this launcher. Confirm =/inbox= can reach the Maildir on the
 mail host before enabling the watcher lane; the wake does not replicate mail.
@@ -71,6 +77,11 @@ then restart only the existing watcher using its observed owner. No new boot
 service is needed. Test one authorized mail while the seat is idle, then busy,
 then at a permission prompt and with typed input. Busy mail must remain queued.
 Review =delivery_unknown= receipts manually; never delete them to force retries.
+Each scan under the singleton lock recovers leftover =injecting= receipts to
+=delivery_unknown= and emits an operator alert, retaining attempt identity/time.
+Malformed messages move to the mailbox's private =quarantine/= directory with
+an fsynced diagnosis under the runtime =rejected/SEAT/= directory; valid mail in
+the same seat continues. Inspect both paths when a quarantine alert is emitted.
 The exact private target values and operational sequence are in the worker's
 uncommitted review report, not public source.
 
@@ -78,6 +89,8 @@ uncommitted review report, not public source.
 """Conditional Claude mail wake: private SSH topology, PTY-owner admission."""
 from __future__ import annotations
 
+import array
+import contextlib
 import importlib.machinery
 import importlib.util
 import json
@@ -85,15 +98,18 @@ import math
 import os
 import re
 import select
+import signal
 import socket
 import stat
 import subprocess
 import sys
+import threading
+import time
 import types
 import uuid
 from pathlib import Path
 
-PROTOCOL = "claude.mailcortex_idle.v1"
+PROTOCOL = "claude.mailcortex_idle.v2"
 NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\Z")
 CHANNEL = re.compile(r"claude-[0-9a-f]{32}\Z")
 REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -169,16 +185,72 @@ class ClaudeSSHAdapter:
             raise self.error("Claude admission outcome unknown")
 
 
+def process_start_time(pid):
+    """Linux process-instance fence; never read command lines or environments."""
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+
+
+def recover_attempts(w, seat, now):
+    # Called under the watcher's scan flock: no current admission can own these.
+    # Reconcile even if the original mail has since moved out of new/.
+    directory = w.MAILCORTEX.runtime_root() / "receipts" / seat
+    for path in directory.glob("*.json"):
+        if path.is_symlink():
+            raise w.WatcherError("unsafe Claude wake receipt")
+        value = json.loads(path.read_text())
+        mid = value["message_id"]
+        receipt = w.safe_receipt(seat, mid)
+        if path != w.MAILCORTEX.receipt_path(seat, mid):
+            raise w.WatcherError("Claude wake receipt identity mismatch")
+        if receipt["wake_state"] == "injecting":
+            w.MAILCORTEX.write_wake_receipt(seat, mid, "delivery_unknown",
+                reason="interrupted_attempt", recovery_at=now,
+                # Retain the original attempt time for the cooldown.
+                wake_updated_at=receipt["wake_updated_at"],
+                wake_error="Interrupted Claude admission; operator review required; no automatic retry")
+            w.report_error(seat, receipt.get("filename", "batch"), w.WatcherError(
+                "Recovered interrupted Claude admission to delivery_unknown; operator review required"))
+
+
+def quarantine_message(w, seat, mailbox, path, error, now):
+    """Preserve invalid mail and a durable diagnostic; never let it starve a seat."""
+    quarantine = mailbox / "quarantine"
+    quarantine.mkdir(mode=0o700, exist_ok=True)
+    if quarantine.is_symlink() or not quarantine.is_dir():
+        raise w.WatcherError("unsafe Claude quarantine")
+    token = uuid.uuid4().hex
+    destination = quarantine / token
+    marker = w.MAILCORTEX.runtime_root() / "rejected" / seat / (token + ".json")
+    diagnostic = dict(schema="mailcortex.rejected.v1", seat=seat, filename=path.name,
+                      first_seen_at=now, reason=w.diagnostic(error),
+                      quarantine_filename=token, state="quarantine_pending")
+    # First persist the diagnosis. A crash before rename leaves reviewable evidence.
+    w.MAILCORTEX.atomic_json(marker, diagnostic)
+    path.rename(destination)
+    w.MAILCORTEX.fsync_directory(path.parent)
+    w.MAILCORTEX.fsync_directory(quarantine)
+    w.MAILCORTEX.atomic_json(marker, dict(diagnostic, state="quarantined"))
+    w.report_error(seat, path.name, w.WatcherError("Malformed Claude mail quarantined; operator review required"))
+
+
 def scan_batch(api, seat, record, adapter, now):
     """One durable, bounded-window wake for every pending Message-ID in a scan."""
     w = types.SimpleNamespace(**api)
     mailbox = w.MAILCORTEX.mail_root() / record["mailbox"]
+    recover_attempts(w, seat, now)
     pending = []
     seen = set()
     for path in sorted((mailbox / "new").iterdir()):
         if path.is_symlink() or not path.is_file() or path.name.startswith("."):
             continue
-        mid = w.message_id(path)
+        try:
+            mid = w.message_id(path)
+        except Exception as error:
+            try:
+                quarantine_message(w, seat, mailbox, path, error, now)
+            except Exception as quarantine_error:
+                w.report_error(seat, path.name, quarantine_error)
+            continue
         if mid in seen:
             continue
         seen.add(mid)
@@ -223,7 +295,9 @@ def scan_batch(api, seat, record, adapter, now):
         receipts("queued", reason="busy")
         return 0
     # Persist the ENTIRE batch before any admission request. A crash here cannot replay it.
-    receipts("injecting", pane_id=owner)
+    receipts("injecting", pane_id=owner, attempt_id=uuid.uuid4().hex,
+             attempt_pid=os.getpid(), attempt_start_time=process_start_time(os.getpid()),
+             attempt_started_at=now)
     prompt = (f"MailCortex: new mail is waiting in {record['mailbox']} on {record['host']}. "
               "Open /inbox, read all pending mail, and handle it with your harness tools.")
     try:
@@ -241,10 +315,12 @@ def scan_batch(api, seat, record, adapter, now):
 
 def valid_owner(owner):
     return (isinstance(owner, dict)
-            and set(owner) == {"channel", "session_id", "supervisor_pid", "epoch", "pane_id", "pane_tty"}
+            and set(owner) == {"channel", "session_id", "supervisor_pid", "supervisor_start_time", "epoch", "pane_id", "pane_tty"}
             and isinstance(owner["channel"], str) and CHANNEL.fullmatch(owner["channel"]) is not None
             and isinstance(owner["session_id"], str) and re.fullmatch(r"[A-Za-z0-9_.:-]{8,128}", owner["session_id"]) is not None
             and type(owner["supervisor_pid"]) is int and owner["supervisor_pid"] > 0
+            and isinstance(owner["supervisor_start_time"], str)
+            and re.fullmatch(r"[0-9]{1,32}", owner["supervisor_start_time"]) is not None
             and type(owner["epoch"]) is int and owner["epoch"] >= 0
             and isinstance(owner["pane_id"], str) and re.fullmatch(r"%[0-9]+", owner["pane_id"]) is not None
             and isinstance(owner["pane_tty"], str) and re.fullmatch(r"/dev/pts/[0-9]+", owner["pane_tty"]) is not None)
@@ -294,8 +370,12 @@ def resolve_owner(target):
         supervisor = state["supervisor_pid"]
         if type(supervisor) is not int or supervisor <= 0 or not descendant(supervisor, int(pid)):
             continue
+        started = state.get("supervisor_start_time")
+        if started != process_start_time(supervisor):
+            continue
         owner = {"channel": state["channel"], "session_id": state["session_id"],
-                 "supervisor_pid": supervisor, "epoch": state["completed_turn_epoch"],
+                 "supervisor_pid": supervisor, "supervisor_start_time": started,
+                 "epoch": state["completed_turn_epoch"],
                  "pane_id": pane, "pane_tty": tty}
         if not valid_owner(owner) or path.parent.name != owner["channel"]:
             raise ValueError("invalid Claude owner")
@@ -368,10 +448,12 @@ def owner_matches(owner, expected):
         return (valid_owner(expected) and expected["channel"] == owner.channel
                 and expected["session_id"] == owner.session_id
                 and expected["supervisor_pid"] == os.getpid()
+                and expected["supervisor_start_time"] == owner.mailcortex_start_time
+                and expected["supervisor_start_time"] == process_start_time(os.getpid())
                 and expected["epoch"] == owner.completed_turn_epoch
                 and expected["pane_id"] == os.environ.get("TMUX_PANE")
                 and expected["pane_tty"] == os.ttyname(sys.stdin.fileno()))
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         return False
 
 
@@ -393,11 +475,57 @@ def owner_control(owner, request, warm):
         if (not isinstance(text, str) or not 1 <= len(text) <= 400
                 or any(ord(c) < 32 or ord(c) > 126 for c in text)):
             return ack
-    if not owner_matches(owner, request["owner"]):
+    # One lock owns input forwarding, screen reads, lifecycle changes and admission.
+    # Legacy supervisors without the barrier are deliberately incapable of writing.
+    if not hasattr(owner, "mailcortex_admission_lock"):
         return dict(ack, status="unavailable")
-    # Reconcile transcript activity before the gate; unknown and partial records veto.
-    owner._record_transcript_activity()
-    if (owner.status != "idle" or owner.screen_state != "idle" or owner.lifecycle_health != "wired"
+    with owner.mailcortex_admission_lock:
+        if not owner_matches(owner, request["owner"]):
+            return dict(ack, status="unavailable")
+        owner._record_transcript_activity()
+        if admission_busy(owner) or pending_terminal(owner):
+            return dict(ack, status="busy")
+        if operation == "mailcortex-status":
+            return dict(ack, status="idle")
+        try:
+            # A mutex alone cannot stop the child producing a permission screen.
+            # Obtain a kernel-acknowledged pause of the child's process tree first.
+            with owner._mailcortex_barrier():
+                if owner._mailcortex_refresh_screen() or admission_busy(owner) or pending_terminal(owner):
+                    return dict(ack, status="busy")
+                owner._record_transcript_activity()
+                if not owner_matches(owner, request["owner"]):
+                    return dict(ack, status="unavailable")
+                if admission_busy(owner) or pending_terminal(owner):
+                    return dict(ack, status="busy")
+                # Claim in memory. No state-file I/O or callbacks between the last
+                # screen/input re-read and the write. The paused child cannot redraw;
+                # human bytes remain in the parent terminal until the lease ends.
+                if owner._mailcortex_refresh_screen() or pending_terminal(owner):
+                    return dict(ack, status="busy")
+                if owner.screen_state != "idle":
+                    return dict(ack, status="busy")
+                owner.status = "active"
+                owner.timer_deadline = None
+                owner.timer_kind = None
+                owner.timer_generation += 1
+                owner.last_lifecycle_activity = warm.now()
+                owner.last_state_transition = "mailcortex-admitted"
+                try:
+                    warm.write_all(owner.master_fd, (request["text"] + "\r").encode("ascii"))
+                except OSError:
+                    owner._write_state()
+                    return dict(ack, status="unknown")
+        except (OSError, ValueError, AttributeError, RuntimeError):
+            # If anything may already have been written, do not report non-admission.
+            return dict(ack, status="unknown" if owner.status == "active" else "unavailable")
+        owner._guard_log("mailcortex-admitted")
+        owner._write_state()
+        return dict(ack, status="accepted")
+
+
+def admission_busy(owner):
+    return (owner.status != "idle" or owner.screen_state != "idle" or owner.lifecycle_health != "wired"
             or owner.compacting or owner.recovery_pending or owner.recovery_awaiting
             or getattr(owner, "mailcortex_input_dirty", True)
             or owner.transcript_gate_blocked or owner.transcript_partial
@@ -405,30 +533,133 @@ def owner_control(owner, request, warm):
             or not owner.last_normal_stop
             or (owner.last_local_input is not None and owner.last_local_input >= owner.last_normal_stop)
             or (owner.last_lifecycle_activity is not None and owner.last_lifecycle_activity > owner.last_normal_stop)
-            or owner._gate_reason("manual") is not None or pending_terminal(owner)):
-        return dict(ack, status="busy")
-    if operation == "mailcortex-status":
-        return dict(ack, status="idle")
-    # This executes synchronously on the sole PTY owner's event loop. Claim before write.
-    owner.status = "active"
-    owner.timer_deadline = None
-    owner.timer_kind = None
-    owner.timer_generation += 1
-    owner.last_lifecycle_activity = warm.now()
-    owner.last_state_transition = "mailcortex-admitted"
-    owner._write_state()
+            or owner._gate_reason("manual") is not None)
+
+
+def barrier_guardian(descriptor):
+    """An isolated crash guardian owns the stop/resume pairs via pidfds only."""
+    handles = []
+    with socket.socket(fileno=descriptor) as connection:
+        try:
+            while True:
+                data, ancillary, flags, _address = connection.recvmsg(1, socket.CMSG_SPACE(4))
+                if not data or data == b"q":
+                    break
+                received = []
+                for level, kind, value in ancillary:
+                    if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                        fds = array.array("i")
+                        fds.frombytes(value[:len(value) - len(value) % fds.itemsize])
+                        received.extend(fds)
+                handles.extend(received)
+                if data != b"s" or len(received) != 1 or flags & socket.MSG_CTRUNC:
+                    raise ValueError("invalid barrier descriptor")
+                signal.pidfd_send_signal(received[0], signal.SIGSTOP)
+                connection.sendall(b"s")
+        finally:
+            failure = False
+            for handle in reversed(handles):
+                try:
+                    signal.pidfd_send_signal(handle, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    failure = True
+                finally:
+                    os.close(handle)
+            try:
+                connection.sendall(b"e" if failure else b"r")
+            except OSError:
+                pass
+
+
+@contextlib.contextmanager
+def crash_guard():
+    """Receive-stop acknowledgement precedes admission; EOF always resumes."""
+    parent, child = socket.socketpair()
+    process = None
     try:
-        warm.write_all(owner.master_fd, (request["text"] + "\r").encode("ascii"))
-    except OSError:
-        # Keep the claim: partial PTY writes are ambiguous and must not be retried.
-        return dict(ack, status="unknown")
-    owner._guard_log("mailcortex-admitted")
-    owner._write_state()
-    return dict(ack, status="accepted")
+        parent.settimeout(3)
+        process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
+                                    "--barrier-guardian", str(child.fileno())],
+            pass_fds=(child.fileno(),), close_fds=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin"})
+        child.close()
+        yield parent
+    finally:
+        child.close()
+        try:
+            if process is not None:
+                parent.sendall(b"q")
+                if parent.recv(1) != b"r":
+                    raise ValueError("child resume not acknowledged")
+        finally:
+            parent.close()
+            if process is not None:
+                process.wait(timeout=3)
+
+
+def write_wake(fd, data):
+    # No spinning against a paused child or replaying a partial write.
+    if os.write(fd, data) != len(data):
+        raise OSError("partial Claude wake write")
+
+
+@contextlib.contextmanager
+def paused_child(owner):
+    """Stop only this owned child tree via pidfds, acknowledging every thread.
+
+    No broad process scan or numeric-PID signal fallback. All process discovery
+    stays within explicit /proc/PID/task directories on the proc filesystem.
+    Failure to acquire the barrier refuses admission and resumes acquired stops.
+    """
+    if not owner._pty_still_owned() or not owner.pid:
+        raise ValueError("PTY ownership unavailable")
+    deadline = time.monotonic() + 0.5
+    with crash_guard() as guardian:
+        todo = [owner.pid]
+        seen = set()
+        while todo:
+            pid = todo.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            if len(seen) > 128 or time.monotonic() >= deadline:
+                raise ValueError("child barrier exceeded bound")
+            proc = Path(f"/proc/{pid}")
+            if proc.stat().st_uid != os.getuid():
+                raise ValueError("child owner changed")
+            started = process_start_time(pid)
+            handle = os.pidfd_open(pid)
+            try:
+                if process_start_time(pid) != started:
+                    raise ValueError("child instance changed")
+                # Never resume a process stopped by somebody else.
+                if proc.joinpath("stat").read_text().rsplit(")", 1)[1].split()[0] in {"T", "t"}:
+                    raise ValueError("child already stopped")
+                guardian.sendmsg([b"s"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [handle]))])
+                if guardian.recv(1) != b"s":
+                    raise ValueError("child stop request not acknowledged")
+            finally:
+                os.close(handle)
+            while True:
+                tasks = list(proc.joinpath("task").iterdir())
+                if tasks and all(t.joinpath("stat").read_text().rsplit(")", 1)[1].split()[0] == "T" for t in tasks):
+                    break
+                if time.monotonic() >= deadline:
+                    raise ValueError("child stop not acknowledged")
+                time.sleep(0.001)
+            for task in tasks:
+                todo.extend(int(value) for value in task.joinpath("children").read_text().split())
+        yield
 
 
 def launch(argv):
-    """Opt-in launcher: extend the existing PTY owner's control dispatch only."""
+    """Disabled by default: exec the original launcher with the original environment."""
+    if os.environ.get("MAILCORTEX_CLAUDE_WAKE") != "1":
+        original = str(Path(__file__).resolve().with_name("claude-warm"))
+        os.execv(original, [original, *argv])
     path = Path(__file__).resolve().with_name("claude-warm")
     loader = importlib.machinery.SourceFileLoader("mailcortex_warm_owner", str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -439,30 +670,92 @@ def launch(argv):
 
     class MailOwner(base):
         def __init__(self, *args, **kwargs):
+            self.mailcortex_admission_lock = threading.RLock()
+            self.mailcortex_start_time = process_start_time(os.getpid())
             self.mailcortex_input_dirty = False
             super().__init__(*args, **kwargs)
 
+        def state(self):
+            value = super().state()
+            value["supervisor_start_time"] = self.mailcortex_start_time
+            return value
+
+        def _mailcortex_barrier(self):
+            return paused_child(self)
+
+        def _mailcortex_refresh_screen(self):
+            # Drain under the same lock, without the base's development-channel
+            # auto-confirm path. Any output during acquisition aborts this wake.
+            changed = False
+            for _ in range(16):
+                ready, _, _ = select.select([self.master_fd], [], [], 0)
+                if not ready:
+                    break
+                data = os.read(self.master_fd, 65536)
+                if not data:
+                    raise ValueError("child PTY closed")
+                changed = True
+                self.screen_classifier.feed(data)
+                warm.write_all(sys.stdout.fileno(), data)
+            else:
+                raise ValueError("child output exceeds barrier bound")
+            visible = self.screen_classifier._visible_text()
+            self.screen_state = self.screen_classifier._classify(visible)
+            prompts = list(self.screen_classifier.PROMPT_RE.finditer(visible))
+            # The base classifier permits a draft. Admission requires an EMPTY
+            # final prompt and refuses blockers even alongside a prompt glyph.
+            if (not prompts or visible[prompts[-1].start():].strip() != "❯"
+                    or any(marker in visible.lower() for marker in self.screen_classifier.STRONG_BLOCKERS)):
+                self.screen_state = "unknown"
+            return changed
+
+        def _read_stdin(self):
+            with self.mailcortex_admission_lock:
+                return super()._read_stdin()
+
+        def _read_master(self):
+            with self.mailcortex_admission_lock:
+                return super()._read_master()
+
         def _record_input_observations(self, observations, forwarded=True):
+            with self.mailcortex_admission_lock:
+                return self._mailcortex_record_input(observations, forwarded)
+
+        def _mailcortex_record_input(self, observations, forwarded):
             if any(human for _kind, _length, human in observations):
                 self.mailcortex_input_dirty = True
             return super()._record_input_observations(observations, forwarded=forwarded)
 
         def _handle_event(self, message):
+            with self.mailcortex_admission_lock:
+                return self._mailcortex_event(message)
+
+        def _mailcortex_event(self, message):
             response = super()._handle_event(message)
             # A normal Stop resets the governor's activity timestamp, but must
             # NEVER erase unfinished input typed while the preceding turn ran.
-            if (response.get("ok") is True and not response.get("ignored")
+            if (isinstance(response, dict) and response.get("ok") is True and not response.get("ignored")
                     and message.get("event") == "user-prompt-submit"):
                 self.mailcortex_input_dirty = False
             return response
 
         def _handle_control(self, message):
+            with self.mailcortex_admission_lock:
+                return self._mailcortex_control(message)
+
+        def _mailcortex_control(self, message):
             if message.get("command") in {"mailcortex-status", "mailcortex-admit"}:
-                return owner_control(self, message, warm)
+                return owner_control(self, message, types.SimpleNamespace(now=warm.now, write_all=write_wake))
             return super()._handle_control(message)
 
     warm.Supervisor = MailOwner
     return warm.shell_exit_code(warm.main(argv))
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3 or sys.argv[1] != "--barrier-guardian":
+        raise SystemExit(2)
+    barrier_guardian(int(sys.argv[2]))
 #+END_SRC
 
 #+BEGIN_SRC python :tangle all/.local/bin/mailcortex-claude-warm :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
@@ -546,7 +839,7 @@ class ClaudeWakeTests(unittest.TestCase):
         for leaf in ("new", "cur", "tmp"):
             (self.mailbox / leaf).mkdir(parents=True)
         self.owner = {"channel": "claude-" + "a" * 32, "session_id": "b" * 32,
-                      "supervisor_pid": 123, "epoch": 1, "pane_id": "%1", "pane_tty": "/dev/pts/1"}
+                      "supervisor_pid": 123, "supervisor_start_time": "12345", "epoch": 1, "pane_id": "%1", "pane_tty": "/dev/pts/1"}
 
     def mail(self, n):
         m = EmailMessage()
@@ -693,7 +986,11 @@ class ClaudeWakeTests(unittest.TestCase):
         return types.SimpleNamespace(now=lambda: 1000, write_all=mock.Mock())
 
     def fake_owner(self):
+        import contextlib
+        import threading
         return types.SimpleNamespace(channel=self.owner["channel"], session_id=self.owner["session_id"],
+            mailcortex_admission_lock=threading.RLock(), mailcortex_start_time="12345",
+            _mailcortex_barrier=contextlib.nullcontext, _mailcortex_refresh_screen=lambda: False,
             completed_turn_epoch=1, status="idle", screen_state="idle", last_normal_stop=10,
             last_local_input=None, last_lifecycle_activity=10, lifecycle_health="wired", compacting=False,
             recovery_pending=False, recovery_awaiting=False, transcript_gate_blocked=False,
@@ -768,6 +1065,7 @@ class ClaudeWakeTests(unittest.TestCase):
             ipc.bind(str(control)); control.chmod(0o600)
             state = root / "state.json"
             state.write_text(json.dumps(dict(self.owner, supervisor_pid=os.getpid(),
+                supervisor_start_time=self.c.process_start_time(os.getpid()),
                 completed_turn_epoch=1, control_socket=str(control))))
             state.chmod(0o600)
             row = f"YOUR_TMUX_SESSION\t%1\t{os.getpid()}\t/dev/pts/1\t0\t0\n"
@@ -803,7 +1101,142 @@ class ClaudeWakeTests(unittest.TestCase):
         (self.mailbox / "new/bad").write_text("malformed")
         self.assertEqual(self.w.locked_scan(registry, factory, now=14), 0)
 
-    def start_pty(self):
+    def test_permission_appearing_between_check_and_write_never_gets_input(self):
+        import contextlib
+        o = self.fake_owner(); warm = self.fake_warm()
+        @contextlib.contextmanager
+        def barrier():
+            # The child emits a permission prompt after the initial poll.
+            self.assertTrue(o.mailcortex_admission_lock._is_owned())
+            o.screen_state = "blocked"
+            yield
+        o._mailcortex_barrier = barrier
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "busy")
+        warm.write_all.assert_not_called()
+        self.assertEqual(o.status, "idle")
+
+    def test_human_typing_during_admission_never_gets_a_wake(self):
+        import contextlib
+        o = self.fake_owner(); warm = self.fake_warm()
+        @contextlib.contextmanager
+        def barrier():
+            o.mailcortex_input_dirty = True
+            yield
+        o._mailcortex_barrier = barrier
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "busy")
+        warm.write_all.assert_not_called()
+
+    def test_admission_rereads_screen_instead_of_cached_idle(self):
+        o = self.fake_owner(); warm = self.fake_warm()
+        o._mailcortex_refresh_screen = lambda: setattr(o, "screen_state", "blocked")
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "busy")
+        warm.write_all.assert_not_called()
+
+    def test_missing_or_failed_barrier_fails_closed(self):
+        o = self.fake_owner(); warm = self.fake_warm()
+        o._mailcortex_barrier = mock.Mock(side_effect=OSError("cannot stop child"))
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "unavailable")
+        warm.write_all.assert_not_called()
+
+    def test_owner_instance_is_rechecked_at_write(self):
+        o = self.fake_owner(); warm = self.fake_warm()
+        with mock.patch.object(self.c, "owner_matches", side_effect=[True, False]), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            self.assertEqual(self.c.owner_control(o, self.request(), warm)["status"], "unavailable")
+        warm.write_all.assert_not_called()
+
+    def test_owner_requires_process_start_time(self):
+        self.assertFalse(self.c.valid_owner({k:v for k,v in self.owner.items() if k != "supervisor_start_time"}))
+        expected = dict(self.owner, supervisor_pid=os.getpid(),
+                        supervisor_start_time="wrong", pane_tty="/dev/pts/1")
+        with mock.patch.object(self.c.os, "ttyname", return_value="/dev/pts/1"), \
+             mock.patch.dict(os.environ, TMUX_PANE="%1"):
+            self.assertFalse(self.c.owner_matches(self.fake_owner(), expected))
+
+    def test_crash_after_injecting_is_recovered_and_alerted_without_retry(self):
+        self.mail(1); self.mail(2)
+        a = self.adapter()
+        self.w.locked_scan(self.registry, a, now=10)
+        a.deliver = mock.Mock(side_effect=SystemExit("watcher killed"))
+        with self.assertRaises(SystemExit):
+            self.w.locked_scan(self.registry, a, now=12)
+        self.assertEqual(self.receipt(1)["wake_state"], "injecting")
+        restarted = self.adapter()
+        with mock.patch.object(self.w, "report_error") as alert:
+            self.assertEqual(self.w.locked_scan(self.registry, restarted, now=15), 0)
+            self.assertEqual(alert.call_count, 2)
+        for n in (1, 2):
+            receipt = self.receipt(n)
+            self.assertEqual(receipt["wake_state"], "delivery_unknown")
+            self.assertEqual(receipt["reason"], "interrupted_attempt")
+            self.assertIn("attempt_id", receipt)
+            self.assertIn("attempt_start_time", receipt)
+        self.assertEqual(restarted.runner.call_count, 0)
+        with mock.patch.object(self.w, "report_error") as alert:
+            self.w.locked_scan(self.registry, restarted, now=300)
+            alert.assert_not_called()
+
+    def test_legacy_injecting_without_mail_is_also_recovered(self):
+        self.w.MAILCORTEX.write_wake_receipt("worker", "<m1@fixture.helm>", "injecting",
+                                            wake_updated_at=10)
+        with mock.patch.object(self.w, "report_error") as alert:
+            self.w.locked_scan(self.registry, self.adapter(), now=12)
+            alert.assert_called_once()
+        self.assertEqual(self.receipt(1)["wake_state"], "delivery_unknown")
+
+    def test_malformed_message_is_quarantined_and_valid_same_seat_continues(self):
+        (self.mailbox / "new/0bad").write_text("not a valid message")
+        self.mail(1); a = self.adapter()
+        with mock.patch.object(self.w, "report_error") as alert:
+            self.w.locked_scan(self.registry, a, now=10)
+            alert.assert_called_once()
+        self.assertFalse((self.mailbox / "new/0bad").exists())
+        quarantined = list((self.mailbox / "quarantine").iterdir())
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(quarantined[0].read_text(), "not a valid message")
+        diagnostics = list((self.base / "state/rejected/worker").glob("*.json"))
+        self.assertEqual(len(diagnostics), 1)
+        rejected = json.loads(diagnostics[0].read_text())
+        self.assertEqual(rejected["filename"], "0bad")
+        self.assertEqual(rejected["first_seen_at"], 10)
+        self.assertEqual(rejected["state"], "quarantined")
+        self.assertEqual(self.w.locked_scan(self.registry, a, now=12), 1)
+        self.assertEqual(self.receipt(1)["wake_state"], "injected")
+
+    def test_disabled_launcher_execs_original_with_exact_argv_and_environment(self):
+        args = ["--resume", "saved-session", "--control", "state"]
+        for flag in (None, "0", "false"):
+            with self.subTest(flag=flag), mock.patch.dict(os.environ, clear=True):
+                os.environ["PATH"] = "/usr/bin:/bin"
+                os.environ["FIXTURE_ENV"] = "preserved"
+                if flag is not None: os.environ["MAILCORTEX_CLAUDE_WAKE"] = flag
+                before = dict(os.environ)
+                with mock.patch.object(self.c.os, "execv", side_effect=SystemExit) as execute:
+                    with self.assertRaises(SystemExit): self.c.launch(args)
+                original = str(BIN / "claude-warm")
+                execute.assert_called_once_with(original, [original, *args])
+                self.assertEqual(dict(os.environ), before)
+
+    def test_disabled_launcher_help_control_and_failure_match_original(self):
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.base),
+               "XDG_RUNTIME_DIR": str(self.base / "runtime"),
+               "CLAUDE_IDLE_REAL_EXECUTABLE": str(self.base / "missing-executable"),
+               "MAILCORTEX_CLAUDE_WAKE": "0"}
+        for args in (["--help"], ["--control", "unsupported"], ["--resume", "saved-session"]):
+            results = [subprocess.run([str(BIN / name), *args], env=env, capture_output=True,
+                                      timeout=8) for name in ("claude-warm", "mailcortex-claude-warm")]
+            self.assertEqual([(r.returncode, r.stdout, r.stderr) for r in results[:1]],
+                             [(r.returncode, r.stdout, r.stderr) for r in results[1:]])
+
+    def start_pty(self, admission_race=False):
         import pty
         import select
         import time
@@ -819,17 +1252,35 @@ class ClaudeWakeTests(unittest.TestCase):
         fake.chmod(0o755)
         master, slave = pty.openpty()
         tty = os.ttyname(slave)
-        env = dict(os.environ, HOME=str(home), XDG_RUNTIME_DIR=str(runtime),
+        env = dict(os.environ, HOME=str(home), XDG_RUNTIME_DIR=str(runtime), MAILCORTEX_CLAUDE_WAKE='1',
                    XDG_STATE_HOME=str(home / 'state'), TMUX_PANE='%1',
                    CLAUDE_IDLE_REAL_EXECUTABLE=str(fake), CLAUDE_IDLE_CACHE_PROFILE='short',
                    CLAUDE_SHORT_CACHE_IDLE_COMPACT_SECONDS='600', CLAUDE_IDLE_WATCHED_SERVERS='',
                    CLAUDE_IDLE_COMPACT_TRANSCRIPT_QUIESCENCE_SECONDS='1')
         # Explicit allowlist: no credentials, interactive hooks, or real session endpoints.
-        env = {k:v for k,v in env.items() if k in {'PATH','HOME','XDG_RUNTIME_DIR','XDG_STATE_HOME','TMUX_PANE',
+        env = {k:v for k,v in env.items() if k in {'MAILCORTEX_CLAUDE_WAKE','PATH','HOME','XDG_RUNTIME_DIR','XDG_STATE_HOME','TMUX_PANE',
                 'CLAUDE_IDLE_REAL_EXECUTABLE','CLAUDE_IDLE_CACHE_PROFILE',
                 'CLAUDE_SHORT_CACHE_IDLE_COMPACT_SECONDS','CLAUDE_IDLE_WATCHED_SERVERS',
                 'CLAUDE_IDLE_COMPACT_TRANSCRIPT_QUIESCENCE_SECONDS'}}
-        process = subprocess.Popen([str(BIN / 'mailcortex-claude-warm')], stdin=slave,
+        launcher = BIN / 'mailcortex-claude-warm'
+        if admission_race:
+            # Force a real permission screen precisely after the cached idle check,
+            # before the actual kernel barrier. No production timing hook is added.
+            launcher = self.base / 'race-launcher'
+            launcher.write_text("#!/usr/bin/env python3\n"
+                "import contextlib,os,select,signal,sys\n"
+                "sys.path.insert(0," + repr(str(BIN)) + ")\n"
+                "import mailcortex_claude as c\n"
+                "original=c.paused_child\n"
+                "@contextlib.contextmanager\n"
+                "def raced(owner):\n"
+                " os.kill(owner.pid,signal.SIGUSR1)\n"
+                " assert select.select([owner.master_fd],[],[],2)[0]\n"
+                " with original(owner): yield\n"
+                "c.paused_child=raced\n"
+                "raise SystemExit(c.launch(sys.argv[1:]))\n")
+            launcher.chmod(0o755)
+        process = subprocess.Popen([str(launcher)], stdin=slave,
                                    stdout=slave, stderr=slave, env=env, start_new_session=True)
         os.close(slave)
         output = bytearray()
@@ -867,7 +1318,7 @@ class ClaudeWakeTests(unittest.TestCase):
         import signal
         os.kill(state['pid'], signal.SIGUSR2)
         owner = dict(self.owner, channel=state['channel'], session_id=sid,
-                     supervisor_pid=process.pid, epoch=1, pane_tty=tty)
+                     supervisor_pid=process.pid, supervisor_start_time=state["supervisor_start_time"], epoch=1, pane_tty=tty)
         request = dict(self.request(), channel=state['channel'], owner=owner)
         # Status requests omit the admission-only text field.
         def status():
@@ -885,6 +1336,40 @@ class ClaudeWakeTests(unittest.TestCase):
         drain(0.2)
         self.assertIn(b'RECEIVED:short wake', output)
         self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+
+    def test_real_pty_permission_between_idle_check_and_write_gets_no_wake(self):
+        control, request, event, master, output, drain, path = self.start_pty(admission_race=True)
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+        drain(0.2)
+        self.assertIn(b'Do you want to proceed?', output)
+        self.assertNotIn(b'RECEIVED:', output)
+        self.assertNotIn(b'short wake', output)
+        self.assertEqual(json.loads(path.read_text())['status'], 'idle')
+
+    def test_barrier_resumes_fake_child_when_supervisor_is_killed(self):
+        import signal
+        import time
+        child = subprocess.Popen(['/usr/bin/python3', '-c', 'import time; time.sleep(20)'])
+        self.addCleanup(lambda: (os.kill(child.pid, signal.SIGCONT), child.terminate(), child.wait(timeout=3)))
+        ready = self.base / 'barrier-ready'
+        # A disposable supervisor fixture, never the user's supervisor.
+        script = self.base / 'crash-owner.py'
+        script.write_text('import sys,time,types\nfrom pathlib import Path\n'
+            + 'sys.path.insert(0,' + repr(str(BIN)) + ')\nimport mailcortex_claude as c\n'
+            + 'owner=types.SimpleNamespace(pid=' + str(child.pid) + ',_pty_still_owned=lambda:True)\n'
+            + 'with c.paused_child(owner):\n Path(' + repr(str(ready)) + ').touch()\n time.sleep(20)\n')
+        supervisor = subprocess.Popen(['/usr/bin/python3', str(script)])
+        self.addCleanup(lambda: (supervisor.kill() if supervisor.poll() is None else None, supervisor.wait(timeout=3)))
+        deadline = time.monotonic() + 3
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(ready.exists())
+        stat_path = Path(f'/proc/{child.pid}/stat')
+        self.assertEqual(stat_path.read_text().rsplit(')',1)[1].split()[0], 'T')
+        supervisor.kill(); supervisor.wait(timeout=3)
+        while stat_path.read_text().rsplit(')',1)[1].split()[0] == 'T' and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertNotEqual(stat_path.read_text().rsplit(')',1)[1].split()[0], 'T')
 
     def test_real_pty_permission_screen_refuses(self):
         import signal
