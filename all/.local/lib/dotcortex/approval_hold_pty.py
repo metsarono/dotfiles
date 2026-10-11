@@ -1,179 +1,103 @@
 #!/usr/bin/env python3
-"""Universal PTY hold-with-timeout: the approval gate through the PTY owner.
+"""Deny a timed permission prompt through its PTY owner, then record it.
 
-The Admiral's design (Telegram 6257-6259, brief /tmp/lane-briefs/pty-hold.md,
-branch pty-hold-20261012): when a harness shows a permission prompt and the
-same prompt is still on screen after unattended.hold_timeout_minutes, the
-process that OWNS the session's PTY answers NO through the PTY, then writes
-the request into the smart approval queue (reason hold_timeout) and stamps a
-ledger. Replaces the Telegram-plugin patch hold (holds.patch,
-approval-holds.ts): the harness's own native relay shows the prompt; nothing
-in any plugin changes.
-
-HARD RULES (never violable):
-- The holder may ONLY ever answer No/Deny — never Yes, never any other key.
-- Only to the exact prompt it timed: the prompt identity (text hash plus
-  position) recorded at first sight must match the re-read screen at the
-  moment of the write, under the same owner lock the mail wake uses, with the
-  child barrier-paused and the screen drained and re-classified first.
-- Any change (new prompt, user typing, prompt gone, compaction, recovery)
-  aborts without writing. The Admiral answering first makes the prompt
-  disappear; the timer then does nothing.
-
-UNIVERSAL: everything harness-specific is a PROFILE — data, not forks. Each
-profile says how to recognise a permission prompt (prompt_markers), how to
-compute its identity (identity(visible)), and the deny key sequence
-(deny_keys). Claude Code is the first profile; a FIXTURE profile proves the
-interface is not Claude-specific. Herdr panes, the Emacs integration and
-Codex/OpenCode TUIs plug in by adding profiles.
-
-DotCortex is PUBLIC: placeholders only. No network, no secrets.
+Profiles carry harness-specific recognition and a single cancellation key.
+The owner supplies the shared lock, acknowledged process-tree barrier,
+bounded screen drain, pending-input check and attributed screen classifier.
 """
 from __future__ import annotations
 
+from collections import namedtuple
 import hashlib
+import math
+import os
 import re
 
 
-# ----------------------------------------------------------------- profiles
+def _deny_keys(keys):
+    # One cancellation key only: a second key could reach a dismissed dialog's
+    # successor. Arbitrary printable bytes and terminal sequences are refused.
+    if not isinstance(keys, (tuple, list)) or len(keys) != 1:
+        raise ValueError("profile requires one deny key")
+    if not isinstance(keys[0], bytes) or keys[0] not in (b"\x1b", b"n"):
+        raise ValueError("profile deny key must be ESC or n")
+    return tuple(keys)
 
-class HoldProfile:
-    """Per-harness screen profile: prompt recognition, identity, deny keys.
 
-    Profiles are DATA. Adding a harness is a new HoldProfile instance in the
-    PROFILES registry, never a code fork.
-    """
+class HoldProfile(namedtuple("ProfileData", "name prompt_markers deny_keys marker_flags required_markers")):
+    """Immutable harness profile; construction and every write validate keys."""
+    __slots__ = ()
 
-    def __init__(self, name, prompt_markers, deny_keys, marker_flags=re.IGNORECASE):
-        if not name or not isinstance(name, str):
+    def __new__(cls, name, prompt_markers, deny_keys, marker_flags=re.IGNORECASE,
+                required_markers=()):
+        if not isinstance(name, str) or not name:
             raise ValueError("profile name")
-        if not isinstance(prompt_markers, (list, tuple)) or not prompt_markers:
-            raise ValueError("profile prompt markers")
-        if not isinstance(deny_keys, (list, tuple)) or not deny_keys:
-            raise ValueError("profile deny keys")
-        for marker in prompt_markers:
-            if not isinstance(marker, str) or not marker:
-                raise ValueError("profile prompt marker")
-        for keys in deny_keys:
-            if not isinstance(keys, bytes) or not keys:
-                raise ValueError("profile deny keys")
-            # DENY-ONLY, enforced structurally: the deny sequence may never
-            # contain Enter/newline (confirm), y/Y (yes), or printable
-            # letters other than n (deny).
-            if b"\r" in keys or b"\n" in keys or b"y" in keys.lower() or b"Y" in keys:
-                raise ValueError("profile deny keys must be deny-only")
-        self.name = name
-        self.prompt_markers = [m.lower() for m in prompt_markers]
-        self.deny_keys = [keys for keys in deny_keys]
-        self.marker_flags = marker_flags
+        def markers(values, required=False):
+            if (not isinstance(values, (list, tuple)) or required and not values
+                    or any(not isinstance(value, str) or not value for value in values)):
+                raise ValueError("profile prompt markers")
+            return tuple(value.lower() for value in values)
+        return super().__new__(cls, name, markers(prompt_markers, True),
+                               _deny_keys(deny_keys), marker_flags, markers(required_markers))
 
     def matches(self, visible):
-        """True when the screen shows this harness's permission prompt."""
         if not isinstance(visible, str) or not visible:
             return False
         lowered = visible.lower()
-        return any(marker in lowered for marker in self.prompt_markers)
+        return (any(marker in lowered for marker in self.prompt_markers)
+                and all(marker in lowered for marker in self.required_markers))
 
     def identity(self, visible):
-        """Screen identity of the timed prompt: prompt-text hash plus the
-        position of the marker in the visible screen. A moved or rewritten
-        prompt is a DIFFERENT prompt and must never receive the timed deny."""
-        if not isinstance(visible, str) or not visible:
+        """Bind all visible request text and marker position, including context
+        above a generic confirmation question and choices below it."""
+        if not self.matches(visible):
             return None
         lowered = visible.lower()
-        positions = [lowered.find(marker) for marker in self.prompt_markers
-                     if marker in lowered]
-        if not positions:
-            return None
-        position = min(positions)
-        # the prompt text: from the marker to the end of the line, hashed
-        line_end = visible.find("\n", position)
-        prompt_text = visible[position:line_end if line_end >= 0 else len(visible)]
-        digest = hashlib.sha256(prompt_text.encode("utf-8", "replace")).hexdigest()
+        position = min(lowered.index(marker) for marker in self.prompt_markers if marker in lowered)
+        digest = hashlib.sha256(visible.encode("utf-8", "replace")).hexdigest()
         return f"{digest}@{position}"
 
 
-# Claude Code's permission dialog: the native relay the Admiral already taps
-# shows it; the dialog itself offers "esc to cancel" (the same cue the screen
-# classifier trusts as a strong blocker). ESC denies/cancels the dialog and
-# can NEVER confirm anything — the deny-only rule holds structurally.
 CLAUDE_CODE_PROFILE = HoldProfile(
-    name="claude-code",
-    prompt_markers=(
-        "do you want to proceed?",
-        "would you like to proceed?",
-        "allow command?",
-        "enter to confirm",
-        "esc to cancel",
-    ),
-    deny_keys=(b"\x1b",),  # ESC: deny/cancel only
-)
-
-# Fixture profile: a generic non-Claude TUI dialog, proving the interface is
-# harness-neutral. Herdr/Emacs/Codex/OpenCode profiles follow the same shape.
-FIXTURE_PROFILE = HoldProfile(
-    name="fixture-dialog",
-    prompt_markers=("fixTURE DIALOG:".lower(),),
-    deny_keys=(b"\x1b", b"n"),  # ESC then n on a [y/n] dialog: deny-only
-)
-
+    "claude-code", ("do you want to proceed?", "would you like to proceed?", "allow command?"),
+    (b"\x1b",), required_markers=("esc to cancel",))
+FIXTURE_PROFILE = HoldProfile("fixture-dialog", ("fixture dialog:",), (b"n",))
 PROFILES = {profile.name: profile for profile in (CLAUDE_CODE_PROFILE, FIXTURE_PROFILE)}
 
 
 def deny_bytes(profile):
-    """The exact deny sequence for a profile (never a confirm key)."""
-    return b"".join(profile.deny_keys)
+    return b"".join(_deny_keys(profile.deny_keys))
 
 
 def hold_timeout_seconds(unattended_section, default_minutes=10):
-    """unattended.hold_timeout_minutes as seconds (mirrors the queue's
-    _hold_seconds; accepts the same manifest section shape)."""
-    minutes = default_minutes
-    if isinstance(unattended_section, dict):
-        raw = unattended_section.get("hold_timeout_minutes", default_minutes)
-        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
-            minutes = raw
-    return float(minutes) * 60.0
+    raw = unattended_section.get("hold_timeout_minutes", default_minutes) if isinstance(unattended_section, dict) else default_minutes
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw <= 0:
+        raw = default_minutes
+    return float(raw) * 60
 
-
-# -------------------------------------------------------------------- timer
 
 class PtyHoldTimer:
-    """Records the first sight of a permission prompt and times it out.
-
-    The timer holds AT MOST ONE prompt: the one currently on screen. A new,
-    different prompt identity replaces the record (its own clock starts);
-    the same identity re-seen keeps the original first_seen (no reset).
-    """
-
+    """Time one exact screen; changed or absent prompts reset the deadline."""
     def __init__(self, timeout):
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("hold timeout")
         self.timeout = float(timeout)
-        self._identity = None
-        self._first_seen = None
+        self.clear()
 
     def record(self, visible, profile, now):
-        """Feed the current screen. Returns True when a NEW prompt identity
-        was recorded (the caller may notify), False when unchanged/absent."""
-        identity = profile.identity(visible) if profile.matches(visible) else None
+        identity = profile.identity(visible)
         if identity is None:
-            # no permission prompt on this screen: the timed prompt is gone
-            # (answered by the Admiral, dismissed, or redrawn) — clear
             self.clear()
             return False
         if identity == self._identity:
-            return False  # same prompt still on screen; clock keeps running
+            return False
         self._identity = identity
         self._first_seen = float(now)
         return True
 
     def expired(self, now):
-        """True when the recorded prompt is still pending and its deadline
-        passed. No recorded prompt (cleared/answered) is never expired."""
-        if self._identity is None or self._first_seen is None:
-            return False
-        return float(now) >= self._first_seen + self.timeout
+        return (self._identity is not None and self._first_seen is not None
+                and float(now) >= self._first_seen + self.timeout)
 
     def identity(self):
         return self._identity
@@ -183,94 +107,74 @@ class PtyHoldTimer:
         self._first_seen = None
 
 
-# ------------------------------------------------------------ guarded write
-
 def _owner_busy(owner):
-    """Any anomaly aborts the deny write: compaction, recovery, or typed
-    input pending. A permission prompt DURING an active turn (status
-    'active') is the hold's raison d'être, so turn status is NOT a refusal
-    here; the screen identity check is the authority for what receives the
-    deny."""
-    return bool(
-        getattr(owner, "compacting", False)
-        or getattr(owner, "recovery_pending", False)
-        or getattr(owner, "recovery_awaiting", False)
-        or getattr(owner, "mailcortex_input_dirty", False)
-    )
+    return bool(getattr(owner, "compacting", False)
+                or getattr(owner, "recovery_pending", False)
+                or getattr(owner, "recovery_awaiting", False)
+                or getattr(owner, "mailcortex_input_dirty", True)
+                or getattr(owner, "status", None) not in {"active", "idle"})
 
 
 def deny_expired_prompt(owner, timer, profile, read_screen, now, queue_write):
-    """Deny the timed prompt through the PTY, then queue the request.
+    """One bounded deny write, only after all owner guards succeed.
 
-    ALL of the hard rules live here:
-    - under the same owner lock the mail wake uses (mailcortex_admission_lock),
-      with the child barrier-paused (owner._mailcortex_barrier) and the
-      screen re-read (read_screen) AFTER the pause;
-    - the re-read screen must still match the timed prompt identity EXACTLY;
-    - any anomaly (typed input, compaction, recovery, turn running) aborts
-      without writing;
-    - the write is deny_bytes(profile) — deny-only, never a confirm key;
-    - only after a successful write does the request enter the smart queue
-      (reason hold_timeout) and the ledger get stamped (queue_write).
-    Returns True when the deny was written, False on any abort.
+    Missing guards, acquisition failures, pending input/output, changed screens
+    and write errors abort. No spinning or replay of a failed write. The queue
+    callback runs after the barrier releases, with the identity already cleared.
     """
-    if not timer.expired(now()):
-        return False
     expected = timer.identity()
-    if expected is None:
-        return False
     lock = getattr(owner, "mailcortex_admission_lock", None)
-    if lock is None:
-        return False  # no owner lock: fail closed, never write
+    if lock is None or expected is None or not timer.expired(now()):
+        return False
     with lock:
-        if _owner_busy(owner):
-            timer.clear()
+        if timer.identity() != expected or not timer.expired(now()):
             return False
-        barrier = getattr(owner, "_mailcortex_barrier", None)
-        if barrier is None:
-            timer.clear()
-            return False
-        with barrier():
-            # re-read the screen immediately before the write, AFTER the
-            # child is paused and drained (the wake guardian's discipline)
+        written = False
+        try:
+            pending = getattr(owner, "_hold_input_pending", None)
+            barrier = getattr(owner, "_mailcortex_barrier", None)
             drain = getattr(owner, "_mailcortex_refresh_screen", None)
-            if callable(drain) and drain():
-                timer.clear()
-                return False  # output arrived while acquiring: abort
-            if _owner_busy(owner):
+            if not all(callable(guard) for guard in (pending, barrier, drain)):
                 timer.clear()
                 return False
-            visible = read_screen()
-            if not profile.matches(visible) or profile.identity(visible) != expected:
-                # prompt gone, changed, or a NEWER prompt: not our timed one
-                timer.record(visible, profile, now())
-                return False
-            # the exact timed prompt is still on screen, child paused, no
-            # input pending: write the deny sequence — deny-only by profile
-            import os as _os
-            try:
-                write_all = getattr(owner, "_mailcortex_write_all", None)
-                if write_all is None:
-                    # fall back to the fleet's write_all convention on the
-                    # owner's master fd
-                    fd = getattr(owner, "master_fd", None)
-                    if fd is None:
-                        timer.clear()
-                        return False
-                    data = deny_bytes(profile)
-                    while data:
-                        written = _os.write(fd, data)
-                        data = data[written:]
-                else:
-                    write_all(getattr(owner, "master_fd"), deny_bytes(profile))
-            except OSError:
-                # the write may have partially landed; the prompt was timed
-                # out anyway — queue it so the Admiral sees it either way
-                queue_write(expected)
+            if _owner_busy(owner) or pending():
                 timer.clear()
-                return True
-            # deny landed: write the request into the smart queue (reason
-            # hold_timeout, deduped by the queue's own upsert) and stamp
-            queue_write(expected)
+                return False
+            with barrier():
+                if drain() or _owner_busy(owner) or pending():
+                    timer.clear()
+                    return False
+                visible = read_screen()
+                if profile.identity(visible) != expected:
+                    timer.record(visible, profile, now())
+                    return False
+                # No callback or state-file I/O between the final drain/input
+                # check and the single write. The acknowledged tree is paused.
+                data = deny_bytes(profile)
+                fd = owner.master_fd
+                if os.get_blocking(fd):
+                    raise ValueError("PTY deny requires a nonblocking owner descriptor")
+                if drain() or _owner_busy(owner) or pending():
+                    timer.clear()
+                    return False
+                if os.write(fd, data) != len(data):
+                    raise OSError("partial PTY deny write")
+                written = True
+                timer.clear()
+        except (OSError, ValueError, AttributeError, RuntimeError, TypeError):
             timer.clear()
-            return True
+            if not written:
+                return False
+            # A failed resume acknowledgement does not erase an already
+            # completed deny. Preserve its request once and report the fault.
+            logger = getattr(owner, "_guard_log", None)
+            if callable(logger):
+                logger("pty-hold-resume-failed")
+        try:
+            queue_write(expected)
+        except Exception:
+            # The deny landed. Never repeat it because recording failed.
+            logger = getattr(owner, "_guard_log", None)
+            if callable(logger):
+                logger("pty-hold-queue-failed")
+        return True

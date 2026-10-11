@@ -9,10 +9,14 @@ only, never Yes), then writes the request into the smart queue.
 
 No network, no live harnesses, no secrets. Real PTY fixtures with a fake
 child that implements the permission-dialog contract. These tests start
-RED: approval_hold_pty.py does not exist yet.
+Regression suite for the canonical module and the shared owner seam.
 """
 import importlib.machinery
 import importlib.util
+import contextlib
+import threading
+import sys
+from unittest import mock
 import json
 import os
 import shutil
@@ -77,19 +81,19 @@ class PtyHoldTests(unittest.TestCase):
 
     def test_identity_binds_prompt_text_and_position(self):
         profile = self.hold.CLAUDE_CODE_PROFILE
-        a = profile.identity("before\n\nDo you want to proceed?")
-        b = profile.identity("Do you want to proceed?")
+        a = profile.identity("before\n\nDo you want to proceed? (esc to cancel)")
+        b = profile.identity("Do you want to proceed? (esc to cancel)")
         # same text, different position -> different identity
         self.assertNotEqual(a, b)
         # identical text and position -> stable identity
         self.assertEqual(a, a)
-        self.assertEqual(profile.identity("Do you want to proceed? (1)"), profile.identity("Do you want to proceed? (1)"))
+        self.assertEqual(profile.identity("Do you want to proceed? (esc to cancel) (1)"), profile.identity("Do you want to proceed? (esc to cancel) (1)"))
 
     # ------------------------------------------------------------- timer
     def test_timer_records_and_expires_only_same_identity(self):
         timer = self.hold.PtyHoldTimer(timeout=self.timeout)
         profile = self.hold.CLAUDE_CODE_PROFILE
-        visible = "Do you want to proceed?"
+        visible = "Do you want to proceed? (esc to cancel)"
         ident = profile.identity(visible)
         self.assertTrue(timer.record(visible, profile, now=0.0))  # new prompt recorded
         # not expired before the deadline
@@ -97,7 +101,7 @@ class PtyHoldTests(unittest.TestCase):
         # expired at the deadline with the SAME prompt still recorded
         self.assertTrue(timer.expired(now=self.timeout + 0.01))
         # a different prompt resets the timer, not extends it
-        timer.record("Allow command? rm -rf /", profile, now=self.timeout)
+        timer.record("Allow command? rm -rf / (esc to cancel)", profile, now=self.timeout)
         self.assertFalse(timer.expired(now=self.timeout + self.timeout - 0.01))
         self.assertTrue(timer.expired(now=self.timeout + self.timeout + 0.02))
         # prompt gone clears the timer
@@ -114,6 +118,7 @@ class PtyHoldTests(unittest.TestCase):
         import pty
         import threading
         master, slave = pty.openpty()
+        os.set_blocking(master, False)
         # raw-mode slave: no ECHO (ECHOCTL renders ESC as '^['), no ICANON
         # (a lone ESC is not a line; canonical mode would block the child's
         # read forever). The master then sees ONLY the reader child's
@@ -124,7 +129,7 @@ class PtyHoldTests(unittest.TestCase):
         attrs[1] &= ~termios.OPOST
         termios.tcsetattr(slave, termios.TCSANOW, attrs)
         reader = subprocess.Popen(
-            ["/bin/python3.13", "-c",
+            [sys.executable, "-c",
              "import os\n"
              "import time\n"
              "deadline = time.monotonic() + 5.0\n"
@@ -138,7 +143,11 @@ class PtyHoldTests(unittest.TestCase):
              "os.write(1, data)\n"],
             stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
         os.close(slave)
-        self.addCleanup(reader.kill)
+        def reap():
+            if reader.poll() is None:
+                reader.kill()
+            reader.wait(timeout=5)
+        self.addCleanup(reap)
         owner = types.SimpleNamespace(
             master_fd=master,
             mailcortex_admission_lock=threading.RLock(),
@@ -148,9 +157,10 @@ class PtyHoldTests(unittest.TestCase):
             recovery_awaiting=False,
             mailcortex_input_dirty=False,
         )
-        owner.pid = pid or os.getpid()
+        owner.pid = pid or reader.pid
         owner._mailcortex_barrier = contextlib.nullcontext
         owner._mailcortex_refresh_screen = lambda: False
+        owner._hold_input_pending = lambda: False
         return owner, master, None
 
     def _pty(self):
@@ -160,9 +170,9 @@ class PtyHoldTests(unittest.TestCase):
 
     def test_unanswered_prompt_is_denied_at_deadline_and_queued(self):
         profile = self.hold.CLAUDE_CODE_PROFILE
-        owner, master, slave = self.deny_owner("Do you want to proceed?")
+        owner, master, slave = self.deny_owner("Do you want to proceed? (esc to cancel)")
         timer = self.hold.PtyHoldTimer(timeout=self.timeout)
-        visible = "Do you want to proceed?"
+        visible = "Do you want to proceed? (esc to cancel)"
         timer.record(visible, profile, now=0.0)
         # the fake child reads what the holder writes
         written = bytearray()
@@ -188,7 +198,7 @@ class PtyHoldTests(unittest.TestCase):
         profile = self.hold.CLAUDE_CODE_PROFILE
         owner, master, slave = self.deny_owner("x")
         timer = self.hold.PtyHoldTimer(timeout=self.timeout)
-        timer.record("Do you want to proceed?", profile, now=0.0)
+        timer.record("Do you want to proceed? (esc to cancel)", profile, now=0.0)
         result = self.hold.deny_expired_prompt(
             owner, timer, profile,
             read_screen=lambda: "❯ ",  # prompt gone, idle
@@ -206,10 +216,10 @@ class PtyHoldTests(unittest.TestCase):
         profile = self.hold.CLAUDE_CODE_PROFILE
         owner, master, slave = self.deny_owner("x")
         timer = self.hold.PtyHoldTimer(timeout=self.timeout)
-        timer.record("Do you want to proceed?", profile, now=0.0)
+        timer.record("Do you want to proceed? (esc to cancel)", profile, now=0.0)
         result = self.hold.deny_expired_prompt(
             owner, timer, profile,
-            read_screen=lambda: "Allow command? dangerous --flag\nDo you want to proceed?",
+            read_screen=lambda: "Allow command? dangerous --flag\nDo you want to proceed? (esc to cancel)",
             now=lambda: self.timeout + 0.02,
             queue_write=lambda ident: self._queue_write("never"),
         )
@@ -224,7 +234,7 @@ class PtyHoldTests(unittest.TestCase):
         owner, master, slave = self.deny_owner("x")
         owner.mailcortex_input_dirty = True  # typed input pending
         timer = self.hold.PtyHoldTimer(timeout=self.timeout)
-        visible = "Do you want to proceed?"
+        visible = "Do you want to proceed? (esc to cancel)"
         timer.record(visible, profile, now=0.0)
         result = self.hold.deny_expired_prompt(
             owner, timer, profile,
@@ -245,7 +255,7 @@ class PtyHoldTests(unittest.TestCase):
                 owner, master, slave = self.deny_owner("x")
                 setattr(owner, field, True)
                 timer = self.hold.PtyHoldTimer(timeout=self.timeout)
-                visible = "Do you want to proceed?"
+                visible = "Do you want to proceed? (esc to cancel)"
                 timer.record(visible, profile, now=0.0)
                 result = self.hold.deny_expired_prompt(
                     owner, timer, profile,
@@ -323,7 +333,7 @@ class PtyHoldTests(unittest.TestCase):
         profile = self.hold.CLAUDE_CODE_PROFILE
         owner, master, slave = self.deny_owner("x")
         timer = self.hold.PtyHoldTimer(timeout=self.timeout)
-        visible = "Do you want to proceed?"
+        visible = "Do you want to proceed? (esc to cancel)"
         timer.record(visible, profile, now=0.0)
         self.hold.deny_expired_prompt(
             owner, timer, profile,
@@ -343,7 +353,7 @@ class PtyHoldTests(unittest.TestCase):
         # denies, queues. Uses the real supervisor loop pieces we can drive.
         warm = load("warm", BIN / "claude-warm")
         classifier = warm.ClaudeScreenClassifier()
-        data = ("\x1b[2J\x1b[H" + "tool use: Bash\nDo you want to proceed?\n❯ 1. Yes  2. Yes, and don't ask again  3. No  (esc to cancel)").encode()
+        data = ("\x1b[2J\x1b[H" + "tool use: Bash\nDo you want to proceed? (esc to cancel)\n❯ 1. Yes\n  2. Yes, and don't ask again\n  3. No\nEsc to cancel").encode()
         classifier.feed(data)
         self.assertEqual(classifier._classify(classifier._visible_text()), "blocked")
         # the hold seam uses the same classifier
@@ -354,51 +364,26 @@ class PtyHoldTests(unittest.TestCase):
 
 
     def test_supervisor_seam_records_and_times_out_real_dialog(self):
-        # the claude-warm supervisor seam: classifier feeds a real permission
-        # dialog; _hold_maybe_record records it; at the deadline the guarded
-        # deny fires (with the seam's own screen re-read) and the deny bytes
-        # land in the PTY child.
-        import pty as _pty
-        import select as _select
         warm = load("warm_seam", BIN / "claude-warm")
-        hold = self.hold
-        supervisor = types.SimpleNamespace(
-            screen_classifier=warm.ClaudeScreenClassifier(),
-            session_id="fixture-session",
-            hold_timer=None,
-            mailcortex_admission_lock=__import__("threading").RLock(),
-            compacting=False, recovery_pending=False, recovery_awaiting=False,
-            mailcortex_input_dirty=False, status="active",
-        )
-        supervisor._hold_maybe_record = warm.Supervisor._hold_maybe_record.__get__(supervisor)
-        supervisor._hold_expire = warm.Supervisor._hold_expire.__get__(supervisor)
-        supervisor._mailcortex_barrier = warm.Supervisor._mailcortex_barrier.__get__(supervisor)
-        supervisor._mailcortex_refresh_screen = warm.Supervisor._mailcortex_refresh_screen.__get__(supervisor)
-        # a REAL PTY with a child that never reads: the deny write must still
-        # land in the PTY (the line discipline queues it)
-        master, slave = _pty.openpty()
-        supervisor.master_fd = master
-        supervisor.pid = None  # barrier no-ops; screen is the authority
-        # the screen: permission dialog, painted via the real classifier
-        dialog = ("\x1b[2J\x1b[Htool use: Bash\nDo you want to proceed?\n"
-                  "\u276f 1. Yes  2. Yes, and don't ask again  3. No  (esc to cancel)")
-        supervisor.screen_classifier.feed(dialog.encode())
-        supervisor._hold_maybe_record("blocked")
-        self.assertIsNotNone(supervisor.hold_timer)
-        # shrink the timeout for the test
-        supervisor.hold_timer.timeout = 0.05
-        # fast-forward: after the deadline the seam denies
+        owner, master, _slave = self.deny_owner("x")
+        self.addCleanup(lambda: os.close(master))
+        owner.screen_classifier = warm.ClaudeScreenClassifier()
+        owner.session_id = "fixture-session"
+        owner.hold_timer = None
+        owner._hold_screen = warm.Supervisor._hold_screen.__get__(owner)
+        owner._hold_maybe_record = warm.Supervisor._hold_maybe_record.__get__(owner)
+        owner._hold_expire = warm.Supervisor._hold_expire.__get__(owner)
+        dialog = "\x1b[2J\x1b[Hrm OLD\nDo you want to proceed?\n❯ 1. Yes\n 2. No\nEsc to cancel"
+        owner.screen_classifier.feed(dialog.encode())
+        with mock.patch.object(warm, "_hold_now", return_value=100):
+            owner._hold_maybe_record("blocked")
+        owner.hold_timer.timeout = 1
         queued = []
-        warm._hold_queue_write = lambda sup, profile, ident: queued.append(ident)
-        import time as _time
-        _time.sleep(0.08)
-        supervisor._hold_expire()
-        # deny bytes landed in the PTY (queued by the line discipline even
-        # with no reader; flush them via a spawned reader is overkill — check
-        # the write side by the queue + ledger path)
-        self.assertTrue(queued, "queue_write must fire after the deny")
-        os.close(master)
-        os.close(slave)
+        with mock.patch.object(warm, "_hold_now", return_value=101), \
+             mock.patch.object(warm, "_hold_queue_write", side_effect=lambda *args: queued.append(args)):
+            owner._hold_expire()
+        self.assertEqual(self.read_master(master, 1), b"\x1b")
+        self.assertEqual(len(queued), 1)
 
     def test_supervisor_seam_clears_when_prompt_answered(self):
         # the Admiral answers: the dialog disappears; the timer clears; at
@@ -412,8 +397,9 @@ class PtyHoldTests(unittest.TestCase):
             compacting=False, recovery_pending=False, recovery_awaiting=False,
             mailcortex_input_dirty=False, status="idle",
         )
+        supervisor._hold_screen = warm.Supervisor._hold_screen.__get__(supervisor)
         supervisor._hold_maybe_record = warm.Supervisor._hold_maybe_record.__get__(supervisor)
-        dialog = "Do you want to proceed? (esc to cancel)"
+        dialog = "Do you want to proceed? (esc to cancel) (esc to cancel)"
         supervisor.screen_classifier.feed(dialog.encode())
         supervisor._hold_maybe_record("blocked")
         self.assertIsNotNone(supervisor.hold_timer)
@@ -421,6 +407,317 @@ class PtyHoldTests(unittest.TestCase):
         supervisor.screen_classifier.feed("\u276f ".encode())
         supervisor._hold_maybe_record("idle")
         self.assertFalse(supervisor.hold_timer.expired(now=10000.0))
+
+    def test_profile_rejects_every_confirm_or_multikey_sequence(self):
+        for keys in [(b'y',), (b'Y',), (b'\r',), (b'\n',), (b' ',), (b'\x1b[B',), (b'1',), (b'n', b'\x1b')]:
+            with self.subTest(keys=keys), self.assertRaises(ValueError):
+                self.hold.HoldProfile('test', ['dialog'], keys)
+        profile = self.hold.CLAUDE_CODE_PROFILE
+        with self.assertRaises(AttributeError):
+            profile.deny_keys = (b'y',)
+        # Even namedtuple replacement cannot bypass validation at the write.
+        with self.assertRaises(ValueError):
+            self.hold.deny_bytes(profile._replace(deny_keys=(b'y',)))
+
+    def test_claude_requires_permission_question_and_explicit_cancel_cue(self):
+        profile = self.hold.CLAUDE_CODE_PROFILE
+        for screen in ['Do you want to proceed?', 'enter to confirm', 'some modal (esc to cancel)']:
+            self.assertFalse(profile.matches(screen), screen)
+
+    def test_identity_binds_command_above_and_choices_below_generic_question(self):
+        profile = self.hold.CLAUDE_CODE_PROFILE
+        question = 'Do you want to proceed?\n1. Yes\nEsc to cancel'
+        for old, new in [('rm OLD\n'+question, 'rm NEW\n'+question),
+                         ('rm OLD\n'+question, 'rm OLD\n'+question.replace('1. Yes','1. Other'))]:
+            self.assertNotEqual(profile.identity(old), profile.identity(new))
+
+    def test_invalid_nonfinite_timeouts_are_bounded(self):
+        for timeout in [True, False, 0, -1, float('nan'), float('inf')]:
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                self.hold.PtyHoldTimer(timeout)
+            self.assertEqual(self.hold.hold_timeout_seconds({'hold_timeout_minutes': timeout}), 600)
+
+    def guarded_fixture(self):
+        read_fd, write_fd = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+        self.addCleanup(lambda: os.close(read_fd))
+        self.addCleanup(lambda: os.close(write_fd))
+        owner = types.SimpleNamespace(master_fd=write_fd, mailcortex_admission_lock=threading.RLock(),
+            status='active', compacting=False, recovery_pending=False, recovery_awaiting=False,
+            mailcortex_input_dirty=False, _mailcortex_barrier=contextlib.nullcontext,
+            _mailcortex_refresh_screen=lambda: False, _hold_input_pending=lambda: False)
+        profile = self.hold.CLAUDE_CODE_PROFILE
+        visible = 'rm OLD\nDo you want to proceed?\nEsc to cancel'
+        timer = self.hold.PtyHoldTimer(1)
+        timer.record(visible, profile, now=0)
+        queue = mock.Mock()
+        def deny():
+            return self.hold.deny_expired_prompt(owner, timer, profile,
+                read_screen=lambda: visible, now=lambda: 1, queue_write=queue)
+        return owner, timer, queue, deny
+
+    def test_missing_owner_guards_abort(self):
+        for field in ['mailcortex_admission_lock', '_mailcortex_barrier', '_mailcortex_refresh_screen',
+                      '_hold_input_pending', 'mailcortex_input_dirty']:
+            owner, timer, queue, deny = self.guarded_fixture()
+            delattr(owner, field)
+            with self.subTest(field=field), mock.patch.object(os,'write') as write:
+                self.assertFalse(deny())
+                write.assert_not_called(); queue.assert_not_called()
+
+    def test_pending_input_before_during_and_after_pause_aborts(self):
+        for values in [[True], [False, True], [False, False, True]]:
+            owner, timer, queue, deny = self.guarded_fixture()
+            owner._hold_input_pending = mock.Mock(side_effect=values)
+            with self.subTest(values=values), mock.patch.object(os,'write') as write:
+                self.assertFalse(deny())
+                write.assert_not_called(); queue.assert_not_called()
+
+    def test_output_in_either_drain_aborts(self):
+        for values in [[True], [False, True]]:
+            owner, timer, queue, deny = self.guarded_fixture()
+            owner._mailcortex_refresh_screen = mock.Mock(side_effect=values)
+            with self.subTest(values=values), mock.patch.object(os,'write') as write:
+                self.assertFalse(deny())
+                write.assert_not_called(); queue.assert_not_called()
+
+    def test_failed_pause_or_input_arriving_inside_barrier_aborts(self):
+        for failure in [OSError('stop refused'), ValueError('ownership lost')]:
+            owner, timer, queue, deny = self.guarded_fixture()
+            owner._mailcortex_barrier = mock.Mock(side_effect=failure)
+            with self.subTest(failure=failure), mock.patch.object(os,'write') as write:
+                self.assertFalse(deny())
+                write.assert_not_called(); queue.assert_not_called()
+        owner, timer, queue, deny = self.guarded_fixture()
+        @contextlib.contextmanager
+        def barrier():
+            self.assertTrue(owner.mailcortex_admission_lock._is_owned())
+            owner.mailcortex_input_dirty = True
+            yield
+        owner._mailcortex_barrier = barrier
+        with mock.patch.object(os,'write') as write:
+            self.assertFalse(deny()); write.assert_not_called(); queue.assert_not_called()
+
+    def test_timer_changed_while_waiting_for_lock_aborts(self):
+        owner, timer, queue, deny = self.guarded_fixture()
+        @contextlib.contextmanager
+        def lock():
+            timer.record('rm NEW\nDo you want to proceed?\nEsc to cancel', self.hold.CLAUDE_CODE_PROFILE, 0)
+            yield
+        owner.mailcortex_admission_lock = lock()
+        with mock.patch.object(os,'write') as write:
+            self.assertFalse(deny()); write.assert_not_called(); queue.assert_not_called()
+
+    def test_failed_zero_or_partial_write_never_reports_a_deny(self):
+        # The profile writes exactly one byte, so any short write is zero.
+        for result in [0, OSError('PTY unavailable'), BlockingIOError('PTY full')]:
+            owner, timer, queue, deny = self.guarded_fixture()
+            with self.subTest(result=result), mock.patch.object(os,'write') as write:
+                if isinstance(result, Exception): write.side_effect = result
+                else: write.return_value = result
+                self.assertFalse(deny()); queue.assert_not_called()
+                self.assertEqual(write.call_count, 1)
+                self.assertFalse(timer.expired(10))
+
+    def test_queue_failure_after_write_never_replays_deny(self):
+        owner, timer, queue, deny = self.guarded_fixture()
+        owner._guard_log = mock.Mock()
+        queue.side_effect = OSError('recording failed')
+        with mock.patch.object(os,'write',return_value=1) as write:
+            self.assertTrue(deny())
+            self.assertFalse(deny())
+            self.assertEqual(write.call_count, 1)
+            owner._guard_log.assert_called_once_with('pty-hold-queue-failed')
+
+    def screen_owner(self, warm, text):
+        supervisor = types.SimpleNamespace(screen_classifier=warm.ClaudeScreenClassifier(),
+            session_id='fixture-session', hold_timer=None, mailcortex_input_dirty=False)
+        supervisor._hold_screen = warm.Supervisor._hold_screen.__get__(supervisor)
+        supervisor._hold_maybe_record = warm.Supervisor._hold_maybe_record.__get__(supervisor)
+        supervisor.screen_classifier.feed(('\x1b[2J\x1b[H'+text).encode())
+        return supervisor
+
+    def test_shared_classifier_distinguishes_selection_drafts_and_rendered_hints(self):
+        warm = load('review_screen', BIN/'claude-warm')
+        for row, expected in [('❯ 1. Yes', True), ('❯ rm something', False),
+                              ('❯ \x1b[2mrendered hint\x1b[0m', True)]:
+            text='Do you want to proceed?\n'+row+'\n────────\nEsc to cancel'
+            supervisor=self.screen_owner(warm,text)
+            self.assertEqual(supervisor._hold_screen() is not None,expected,row)
+            if row == '❯ 1. Yes':
+                self.assertEqual(supervisor.screen_classifier.prompt_input_state(), 'typed')
+                self.assertEqual(supervisor.screen_classifier.prompt_input_state(permission_selection=True), 'empty')
+        supervisor=self.screen_owner(warm,'Do you want to proceed?\n❯ 1. Yes\nEsc to cancel')
+        supervisor.screen_classifier.feed(b'\x1b[')
+        self.assertIsNone(supervisor._hold_screen())
+
+    def test_unchanged_screen_state_does_not_clear_or_extend_hold(self):
+        warm=load('review_redraw',BIN/'claude-warm')
+        supervisor=self.screen_owner(warm,'rm OLD\nDo you want to proceed?\n❯ 1. Yes\nEsc to cancel')
+        with mock.patch.object(warm,'_hold_now',return_value=100):
+            supervisor._hold_maybe_record('blocked')
+        identity=supervisor.hold_timer.identity()
+        with mock.patch.object(warm,'_hold_now',return_value=200):
+            supervisor._hold_maybe_record(None)
+        self.assertEqual(supervisor.hold_timer.identity(),identity)
+        self.assertEqual(supervisor.hold_timer._first_seen,100)
+
+    def test_screen_reclassified_after_pause_rejects_typed_draft(self):
+        warm=load('review_reclassify',BIN/'claude-warm')
+        supervisor=self.screen_owner(warm,'rm OLD\nDo you want to proceed?\n❯ 1. Yes\nEsc to cancel')
+        with mock.patch.object(warm,'_hold_now',return_value=0):
+            supervisor._hold_maybe_record('blocked')
+        supervisor.hold_timer.timeout=1
+        owner,timer,queue,deny=self.guarded_fixture()
+        owner.master_fd=123
+        def reclassify():
+            supervisor.screen_classifier.feed('\x1b[2J\x1b[HDo you want to proceed?\n❯ typed draft\n────────\nEsc to cancel'.encode())
+            return supervisor._hold_screen()
+        with mock.patch.object(os,'write') as write:
+            self.assertFalse(self.hold.deny_expired_prompt(owner,supervisor.hold_timer,
+                self.hold.CLAUDE_CODE_PROFILE,read_screen=reclassify,now=lambda:1,queue_write=queue))
+            write.assert_not_called(); queue.assert_not_called()
+
+    def test_plain_owner_uses_same_lock_and_cancels_hold_on_human_input(self):
+        warm=load('review_input_owner',BIN/'claude-warm')
+        owner=warm.Supervisor.__new__(warm.Supervisor)
+        lock=threading.RLock();owner.mailcortex_admission_lock=lock
+        with mock.patch.object(warm,'runtime_root',return_value=self.short), \
+             mock.patch.object(warm,'persistent_state_root',return_value=self.base):
+            warm.Supervisor.__init__(owner,[], '/usr/bin/true')
+        self.addCleanup(owner.socket.close);self.addCleanup(owner.selector.close)
+        self.assertIs(owner.mailcortex_admission_lock,lock)
+        owner.session_id='fixture-session'
+        owner.hold_timer=self.hold.PtyHoldTimer(1)
+        owner.hold_timer.record('Do you want to proceed? Esc to cancel',self.hold.CLAUDE_CODE_PROFILE,0)
+        owner._record_input_observations([('focus',3,False)])
+        self.assertFalse(owner.mailcortex_input_dirty)
+        self.assertTrue(owner.hold_timer.expired(1))
+        owner._record_input_observations([('keyboard',1,True)])
+        self.assertTrue(owner.mailcortex_input_dirty)
+        self.assertFalse(owner.hold_timer.expired(1))
+        owner._handle_event({'kind':'event','channel':owner.channel,'event':'user-prompt-submit','session_id':'fixture-session'})
+        self.assertFalse(owner.mailcortex_input_dirty)
+
+    def test_plain_owner_reuses_acknowledged_mail_guardian_and_input_probe(self):
+        warm=load('review_guard',BIN/'claude-warm')
+        owner=types.SimpleNamespace()
+        guardian=types.SimpleNamespace(paused_child=mock.Mock(return_value=contextlib.nullcontext()),
+                                       pending_terminal=mock.Mock(return_value=True))
+        with mock.patch.object(warm,'_hold_guardian_module',return_value=guardian):
+            warm.Supervisor._mailcortex_barrier(owner)
+            self.assertTrue(warm.Supervisor._hold_input_pending(owner))
+        guardian.paused_child.assert_called_once_with(owner)
+        guardian.pending_terminal.assert_called_once_with(owner)
+
+    def test_bounded_drain_reclassifies_and_refuses_excess_output(self):
+        warm=load('review_drain',BIN/'claude-warm')
+        owner=types.SimpleNamespace(master_fd=123,screen_classifier=warm.ClaudeScreenClassifier(),screen_state='idle')
+        with mock.patch('select.select',side_effect=[([123],[],[]),([],[],[])]), \
+             mock.patch.object(warm.os,'read',return_value=b'Do you want to proceed? Esc to cancel'), \
+             mock.patch.object(warm,'write_all'):
+            self.assertTrue(warm.Supervisor._mailcortex_refresh_screen(owner))
+            self.assertEqual(owner.screen_state,'blocked')
+        with mock.patch('select.select',return_value=([123],[],[])), \
+             mock.patch.object(warm.os,'read',return_value=b'x'), mock.patch.object(warm,'write_all'), \
+             self.assertRaises(ValueError):
+            warm.Supervisor._mailcortex_refresh_screen(owner)
+
+    def test_real_queue_preserves_full_requests_dedupes_and_stamps_private_ledger(self):
+        warm=load('review_queue',BIN/'claude-warm')
+        errors=[]
+        supervisor=types.SimpleNamespace(session_id='fixture-session',
+            screen_classifier=warm.ClaudeScreenClassifier(),_guard_log=lambda *args:errors.append(args))
+        manifest=self.base/'manifest.json'
+        manifest.write_text(json.dumps({'coordinator_ops':{'seat_account':'YOUR_SEAT@YOUR_HOST.helm'}}))
+        queue=self.base/'queue.jsonl'
+        env={'HOME':str(self.base),'SO_APPROVAL_KIKIN_MANIFEST':str(manifest),'SO_APPROVAL_MORNING_QUEUE':str(queue)}
+        with mock.patch.dict(os.environ,env):
+            for command in ['rm OLD','rm OLD','rm NEW']:
+                supervisor.screen_classifier.feed(('\x1b[2J\x1b[H'+command+'\nDo you want to proceed?\nEsc to cancel').encode())
+                visible=supervisor.screen_classifier._visible_text()
+                identity=self.hold.CLAUDE_CODE_PROFILE.identity(visible)
+                warm._hold_queue_write(supervisor,self.hold.CLAUDE_CODE_PROFILE,identity)
+            runtime=__import__('sys').modules['claude_approval_runtime']
+            with queue.open() as handle:records=runtime._queue_read(handle)
+        self.assertEqual(errors,[])
+        self.assertEqual(len(records),2)
+        self.assertEqual(records[0]['count'],2)
+        self.assertIn('rm OLD',records[0]['request']['tool_input']['screen_text'])
+        self.assertIn('rm NEW',records[1]['request']['tool_input']['screen_text'])
+        self.assertEqual({row['reason'] for row in records},{'hold_timeout'})
+        ledger=self.base/'.local/state/dotcortex/pty-hold-ledger.jsonl'
+        self.assertEqual(ledger.stat().st_mode & 0o777,0o600)
+        self.assertEqual(len(ledger.read_text().splitlines()),3)
+        self.assertEqual(json.loads(ledger.read_text().splitlines()[-1])['queue_id'],records[-1]['id'])
+
+    def test_real_hold_write_waits_for_acknowledged_pause_and_resumes_child(self):
+        warm=load('review_real_pause',BIN/'claude-warm')
+        owner,master,_slave=self.deny_owner('x')
+        self.addCleanup(lambda:os.close(master))
+        owner._pty_still_owned=lambda:True
+        owner._mailcortex_barrier=warm.Supervisor._mailcortex_barrier.__get__(owner)
+        visible='rm OLD\nDo you want to proceed?\nEsc to cancel'
+        timer=self.hold.PtyHoldTimer(1)
+        timer.record(visible,self.hold.CLAUDE_CODE_PROFILE,0)
+        original_write=os.write
+        def state():
+            return Path(f'/proc/{owner.pid}/stat').read_text().rsplit(')',1)[1].split()[0]
+        def write(fd,data):
+            self.assertEqual(state(),'T','child must acknowledge stop before deny')
+            self.assertTrue(owner.mailcortex_admission_lock._is_owned())
+            return original_write(fd,data)
+        queued=[]
+        def queue(identity):
+            self.assertNotEqual(state(),'T','queue I/O must follow child resume')
+            queued.append(identity)
+        with mock.patch.object(os,'write',side_effect=write):
+            self.assertTrue(self.hold.deny_expired_prompt(owner,timer,self.hold.CLAUDE_CODE_PROFILE,
+                read_screen=lambda:visible,now=lambda:1,queue_write=queue))
+        self.assertEqual(self.read_master(master,1),b'\x1b')
+        self.assertEqual(len(queued),1)
+
+    def test_resume_failure_preserves_completed_deny_without_replaying_it(self):
+        owner, timer, queue, deny = self.guarded_fixture()
+        owner._guard_log = mock.Mock()
+        @contextlib.contextmanager
+        def barrier():
+            yield
+            raise ValueError('resume acknowledgement lost')
+        owner._mailcortex_barrier = barrier
+        with mock.patch.object(os, 'write', return_value=1) as write:
+            self.assertTrue(deny())
+            self.assertFalse(deny())
+            self.assertEqual(write.call_count, 1)
+            queue.assert_called_once()
+            owner._guard_log.assert_called_once_with('pty-hold-resume-failed')
+
+    def test_hold_timeout_uses_selected_seat_manifest(self):
+        warm = load('review_manifest', BIN / 'claude-warm')
+        manifest = self.base / 'seat.json'
+        manifest.write_text(json.dumps({'unattended': {'hold_timeout_minutes': 2}}))
+        with mock.patch.dict(os.environ, {'SO_APPROVAL_KIKIN_MANIFEST': str(manifest)}):
+            self.assertEqual(warm._hold_timeout_seconds(), 120)
+            manifest.write_text('{invalid')
+            self.assertEqual(warm._hold_timeout_seconds(), 600)
+
+
+    def test_blocking_owner_descriptor_aborts_before_write(self):
+        owner, timer, queue, deny = self.guarded_fixture()
+        os.set_blocking(owner.master_fd, True)
+        with mock.patch.object(os, 'write') as write:
+            self.assertFalse(deny())
+            write.assert_not_called()
+            queue.assert_not_called()
+
+    def test_plain_hold_recording_errors_reach_private_guard_log(self):
+        warm = load('review_plain_log', BIN / 'claude-warm')
+        owner = types.SimpleNamespace(watched_servers=(), development_channel_opt_ins=(),
+            channel='claude-' + '0' * 32, channel_health='none',
+            guard_log_path=self.base / 'guard.jsonl', _debug=mock.Mock())
+        warm.Supervisor._guard_log(owner, 'pty-hold-record-failed')
+        self.assertEqual(json.loads(owner.guard_log_path.read_text())['event'], 'pty-hold-record-failed')
+        self.assertEqual(owner.guard_log_path.stat().st_mode & 0o777, 0o600)
+
 
 
 if __name__ == "__main__":

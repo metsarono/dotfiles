@@ -681,7 +681,9 @@ if [ -n "$week_pct" ] || [ -n "$week_days" ]; then
   [ -n "$week_days" ] && out="${out} ${week_days}d"
   row2="${row2}${row2:+ }$(printf '\033[38;5;59m%s\033[0m' "$out")"
 fi
-[ -n "$row2" ] && printf "\n%s" "$row2"
+if [ -n "$row2" ]; then
+  printf "\n%s" "$row2"
+fi
 #+END_SRC
 
 * AGY settings
