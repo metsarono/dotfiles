@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Disposable local sparse worktrees; publish only task branches to x230."""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+class LaneError(Exception):
+    pass
+
+
+def require(condition, message):
+    if not condition:
+        raise LaneError(message)
+
+
+def run(*args, cwd=None, allowed=(0,), input=None):
+    result = subprocess.run(args, cwd=cwd, text=True, input=input,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode not in allowed:
+        raise LaneError(f"{args[0]} failed ({result.returncode}): "
+                        + (result.stderr or result.stdout).strip())
+    if result.stderr:
+        print(result.stderr.rstrip(), file=sys.stderr)
+    if "--filter=blob:none" in args and "filtering not recognized by server" in result.stderr:
+        raise LaneError("server did not support partial clone; incomplete clone retained for inspection")
+    return result.stdout.strip()
+
+
+def local_owned(path):
+    """Probe an exact existing path; never walk an ancestor tree or an NFS mount."""
+    require(path == path.resolve(), f"symlink path refused: {path}")
+    probe = path
+    while not probe.exists():
+        probe = probe.parent
+    fs = run("findmnt", "--noheadings", "--output", "FSTYPE", "--target", str(probe))
+    require(fs in {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "tmpfs", "overlay", "f2fs"},
+            f"local disk required; filesystem {fs!r} refused at {probe}")
+    require(probe.stat().st_uid == os.getuid(), f"invoking user must own {probe}")
+    return fs
+
+
+def atomic_json(path, data):
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("x") as stream:
+        json.dump(data, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+
+
+class Lane:
+    def __init__(self, root):
+        self.root = root
+        self.repo = root / "repo"
+        self.tasks = root / "tasks"
+
+    def git(self, *args, cwd=None, **kwargs):
+        return run("git", "-C", str(cwd or self.repo), *args, **kwargs)
+
+    def load(self):
+        self.state = json.loads((self.root / "lane.json").read_text())
+        require(self.state["version"] == 1, "unknown lane version")
+        local_owned(self.repo)
+        local_owned(self.tasks)
+        local_owned(self.root / "wt")
+        require(self.git("rev-parse", "--show-toplevel") == str(self.repo), "wrong cache root")
+        require(self.git("rev-parse", "refs/heads/master") == self.state["clone_master"],
+                "immutable clone master changed; inspect lane before continuing")
+        require(self.git("symbolic-ref", "-q", "HEAD", allowed=(0, 1)) == "",
+                "cache HEAD must remain detached")
+        require(self.git("remote", "get-url", "--all", "x230") == self.state["remote"],
+                "fetch remote changed; inspect lane")
+        require(self.git("remote", "get-url", "--push", "--all", "x230") == self.state["remote"],
+                "push remote changed; inspect lane")
+
+    def init(self):
+        require(not (self.root / "lane.json").exists(), "lane already initialized")
+        require(not self.repo.exists(), "incomplete/existing clone retained; inspect it before retrying")
+        remote = os.environ.get("HELMCORTEX_LANE_REMOTE", "")
+        require(remote and "YOUR_" not in remote and not remote.startswith("-"),
+                "set HELMCORTEX_LANE_REMOTE to the private canonical Git URL before init")
+        require(remote.startswith(("file://", "ssh://", "/")) or
+                re.fullmatch(r"[A-Za-z0-9_.@-]+:[A-Za-z0-9_./~-]+", remote),
+                "only SSH or local fixture Git URLs are supported")
+        if remote.startswith("/"):
+            remote = Path(remote).as_uri()
+        run("git", "clone", "--filter=blob:none", "--no-checkout", "--single-branch",
+            "--branch", "master", "--no-tags", "--origin", "x230", remote, str(self.repo))
+        sha = self.git("rev-parse", "refs/remotes/x230/master")
+        # Clone creates a local snapshot master. Detach without checking it out
+        # or changing that ref; every later write targets a task branch only.
+        self.git("update-ref", "--no-deref", "HEAD", sha)
+        self.git("config", "push.default", "nothing")
+        self.git("config", "push.followTags", "false")
+        self.git("sparse-checkout", "init", "--cone", "--no-sparse-index")
+        self.git("sparse-checkout", "set", "--cone", "--no-sparse-index", "--stdin", input="")
+        for directory in (self.tasks, self.root / "wt"):
+            directory.mkdir(mode=0o700)
+        atomic_json(self.root / "lane.json", {"version": 1, "remote": remote,
+                    "clone_master": sha, "fetched": time.time()})
+        print(f"initialized: {self.root}")
+
+    def fetch(self):
+        # An explicit refspec cannot update a local branch, fetch task refs or
+        # inherit a broad user configured fetch. No prune or remote deletion.
+        self.git("fetch", "--no-tags", "x230",
+                 "refs/heads/master:refs/remotes/x230/master")
+        self.state["fetched"] = time.time()
+        atomic_json(self.root / "lane.json", self.state)
+        return self.git("rev-parse", "refs/remotes/x230/master")
+
+    def remote_sha(self, task):
+        ref = f"refs/heads/{task}"
+        output = self.git("ls-remote", "--refs", "x230", ref)
+        rows = [row.split() for row in output.splitlines() if row]
+        require(not rows or (len(rows) == 1 and rows[0][1] == ref),
+                "unexpected remote branch response")
+        return rows[0][0] if rows else None
+
+    def task_path(self, task):
+        require(task.lower() != "master" and
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", task),
+                "task must be a flat branch name other than master")
+        self.git("check-ref-format", f"refs/heads/{task}")
+        return self.root / "wt" / task
+
+    def sparse_directories(self, paths, base):
+        directories = set()
+        for value in paths:
+            parts = value.split("/")
+            require(value and not value.startswith(("/", "-")) and
+                    all(p not in ("", ".", "..", ".git") and
+                        re.fullmatch(r"[A-Za-z0-9_. -]+", p) for p in parts),
+                    f"unsafe repo-relative sparse path: {value!r}")
+            kind = self.git("cat-file", "-t", f"{base}:{value}")
+            require(kind in ("tree", "blob"), f"unsupported sparse path: {value}")
+            if kind == "tree":
+                directories.add(value)
+            elif len(parts) > 1:
+                directories.add("/".join(parts[:-1]))
+        return sorted(directories)
+
+    def start(self, task, paths):
+        worktree = self.task_path(task)
+        require(not worktree.exists() and not worktree.is_symlink(), "task worktree already exists")
+        require(not (self.tasks / f"{task}.json").exists(), "task record already exists")
+        require(not self.git("for-each-ref", "--format=%(refname)", f"refs/heads/{task}"),
+                "local task branch already exists")
+        base = self.fetch()
+        require(self.remote_sha(task) is None, "remote task branch already exists; choose a fresh task")
+        directories = self.sparse_directories(paths, base)
+        self.git("worktree", "add", "--no-checkout", "--no-track", "-b", task,
+                 str(worktree), "x230/master")
+        self.git("sparse-checkout", "set", "--cone", "--no-sparse-index", "--stdin",
+                 cwd=worktree, input="".join(p + "\n" for p in directories))
+        # A worktree created with --no-checkout needs its initial index populated.
+        self.git("read-tree", "-mu", "HEAD", cwd=worktree)
+        atomic_json(self.tasks / f"{task}.json", {"base": base, "paths": directories,
+                    "pushed": None})
+        print(worktree)
+
+    def inspect_task(self, task):
+        worktree = self.task_path(task)
+        require(worktree.is_dir(), "task worktree missing")
+        local_owned(worktree)
+        require(self.git("rev-parse", "--show-toplevel", cwd=worktree) == str(worktree),
+                "wrong task worktree root")
+        common = self.git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=worktree)
+        require(Path(common).resolve() == self.repo / ".git", "task belongs to another repository")
+        require(self.git("symbolic-ref", "-q", "HEAD", cwd=worktree, allowed=(0, 1)) ==
+                f"refs/heads/{task}", "task worktree is detached or on a different branch")
+        require(not self.git("status", "--porcelain=v1", "--untracked-files=all", cwd=worktree),
+                "task worktree is dirty (tracked, staged or untracked files)")
+        sha = self.git("rev-parse", "HEAD", cwd=worktree)
+        record = json.loads((self.tasks / f"{task}.json").read_text())
+        return worktree, sha, record
+
+    def push(self, task):
+        worktree, sha, record = self.inspect_task(task)
+        base = self.fetch()
+        require(int(self.git("rev-list", "--count", f"{base}..{sha}")) > 0,
+                "no commits beyond current x230/master")
+        # Pin the reviewed commit, disable mirror/tags even if user config drifted.
+        # There is deliberately no force option, '+' refspec, or deletion refspec.
+        self.git("-c", "remote.x230.mirror=false", "-c", "push.followTags=false",
+                 "push", "--porcelain", "--recurse-submodules=no", "x230",
+                 f"{sha}:refs/heads/{task}")
+        require(self.remote_sha(task) == sha, "push not verified at the same remote SHA; worktree retained")
+        require(self.git("rev-parse", "HEAD", cwd=worktree) == sha,
+                "task changed during push; worktree retained")
+        record["pushed"] = sha
+        atomic_json(self.tasks / f"{task}.json", record)
+        print(f"pushed {task} {sha}")
+
+    def done(self, task):
+        worktree, sha, record = self.inspect_task(task)
+        require(record["pushed"] == sha, "no successful lane push recorded for current task SHA")
+        require(self.remote_sha(task) == sha, "remote task branch missing or SHA changed; worktree retained")
+        # Git's plain removal is the final dirty/locked/submodule safety gate.
+        self.git("worktree", "remove", str(worktree))
+        self.git("branch", "-D", task)
+        (self.tasks / f"{task}.json").unlink()
+        print(f"removed local task {task}; remote branch retained at {sha}")
+
+    def status(self):
+        age = max(0, int(time.time() - self.state["fetched"]))
+        print(f"health: ok (local ownership, detached cache, remote URL and master snapshot verified)")
+        print(f"lane: {self.root}")
+        print(f"fetch age: {age}s (last successful fetch; no network probe)")
+        print("active worktrees:")
+        print(self.git("worktree", "list", "--porcelain"))
+        for record_path in sorted(self.tasks.glob("*.json")):
+            record = json.loads(record_path.read_text())
+            print(f"task: {record_path.stem} pushed: {record['pushed'] or 'none'}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    verbs = parser.add_subparsers(dest="verb", required=True)
+    for verb in ("init", "status"):
+        verbs.add_parser(verb)
+    start = verbs.add_parser("start")
+    start.add_argument("task")
+    start.add_argument("--paths", nargs="+", default=[])
+    for verb in ("push", "done"):
+        verbs.add_parser(verb).add_argument("task")
+    args = parser.parse_args()
+    # Caller Git variables must not redirect any operation outside this lane.
+    for name in list(os.environ):
+        if name.startswith("GIT_") and name not in {
+            "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}:
+            del os.environ[name]
+    os.environ["GIT_TERMINAL_PROMPT"] = "0"
+    os.environ["LC_ALL"] = "C"
+    os.environ["GIT_SSH_COMMAND"] = (
+        "/usr/bin/ssh -o BatchMode=yes -o PasswordAuthentication=no "
+        "-o KbdInteractiveAuthentication=no -o PreferredAuthentications=publickey "
+        "-o ConnectTimeout=10 -o ConnectionAttempts=1 -o IdentitiesOnly=yes "
+        "-o StrictHostKeyChecking=yes -o ForwardAgent=no -o ClearAllForwardings=yes")
+    os.umask(0o077)
+    root = Path(os.path.abspath(os.path.expanduser(os.environ.get(
+        "HELMCORTEX_LANE_ROOT", str(Path.home() / "helmcortex-lane")))))
+    local_owned(root)
+    if args.verb == "init":
+        root.mkdir(mode=0o700, exist_ok=True)
+    require(root.is_dir(), "lane not initialized; run init after key setup")
+    lock_path = root / "lane.lock"
+    require(not lock_path.is_symlink(), "symlink lock refused")
+    with lock_path.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise LaneError("another lane command is running; retry after it finishes") from error
+        lane = Lane(root)
+        if args.verb == "init":
+            lane.init()
+        else:
+            lane.load()
+            if args.verb == "start":
+                lane.start(args.task, args.paths)
+            elif args.verb == "status":
+                lane.status()
+            else:
+                getattr(lane, args.verb)(args.task)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (LaneError, OSError, ValueError, KeyError) as error:
+        print(f"helmcortex-remote-lane: FATAL: {error}", file=sys.stderr)
+        sys.exit(1)
