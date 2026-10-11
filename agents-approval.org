@@ -1096,7 +1096,45 @@ then classes, then grey zone.
       "enabled": false,
       "tool_names": []
     }
-  ]
+  ],
+  "unattended": {
+    "enabled": false,
+    "away_flag": "~/.config/dotcortex/approval-away",
+    "quiet_hours": {
+      "enabled": true,
+      "start": "23:00",
+      "end": "08:00",
+      "timezone": "Australia/Melbourne"
+    }
+  },
+  "coordinator_ops": {
+    "classes": {
+      "mail_send": false,
+      "worktree": false,
+      "integrate": false,
+      "commit": false,
+      "codex_dispatch": false,
+      "scratch_scp": false
+    },
+    "seat_account": "YOUR_SEAT@YOUR_HOST.helm",
+    "repo_roots": [
+      "/home/YOUR_AGENT_CLAUDE/DotCortex"
+    ],
+    "worktree_roots": [
+      "/home/YOUR_AGENT_CLAUDE/DotCortex-wt-YOUR_HOST"
+    ],
+    "scratch_roots": [
+      "/tmp",
+      "/home/YOUR_AGENT_CLAUDE/.claude/scratchpad"
+    ],
+    "build_host": "YOUR_BUILD_HOST",
+    "remote_scratch_roots": [
+      "/tmp/YOUR_SEAT"
+    ],
+    "remote_scratch_prefixes": [
+      "YOUR_SEAT-"
+    ]
+  }
 }
 #+END_SRC
 
@@ -2105,7 +2143,45 @@ authorize local Kikin reads or writes.
         }
       ]
     }
-  ]
+  ],
+  "unattended": {
+    "enabled": false,
+    "away_flag": "~/.config/dotcortex/approval-away",
+    "quiet_hours": {
+      "enabled": true,
+      "start": "23:00",
+      "end": "08:00",
+      "timezone": "Australia/Melbourne"
+    }
+  },
+  "coordinator_ops": {
+    "classes": {
+      "mail_send": false,
+      "worktree": false,
+      "integrate": false,
+      "commit": false,
+      "codex_dispatch": false,
+      "scratch_scp": false
+    },
+    "seat_account": "YOUR_SEAT@YOUR_HOST.helm",
+    "repo_roots": [
+      "/home/YOUR_USER/DotCortex"
+    ],
+    "worktree_roots": [
+      "/home/YOUR_USER/DotCortex-wt-YOUR_HOST"
+    ],
+    "scratch_roots": [
+      "/tmp",
+      "/home/YOUR_USER/.claude/scratchpad"
+    ],
+    "build_host": "YOUR_BUILD_HOST",
+    "remote_scratch_roots": [
+      "/tmp/YOUR_SEAT"
+    ],
+    "remote_scratch_prefixes": [
+      "YOUR_SEAT-"
+    ]
+  }
 }
 #+END_SRC
 
@@ -2212,7 +2288,7 @@ def _unreviewed_home_path(value, roots=()):
 # filesystem-writing find options. SYNTAX-only refusals (heredocs, redirections
 # inside the roots, $() substitution, unparsable quoting) are now Decider-eligible
 # instead of hard-refused: they are plumbing, not substance.
-def _true_floor(event, manifest=None):
+def _true_floor(event, manifest=None, coordinator=None):
     try:
         raw = json.dumps(event.get("tool_input", {}), ensure_ascii=False, sort_keys=True).casefold()
     except (TypeError, ValueError):
@@ -2222,6 +2298,11 @@ def _true_floor(event, manifest=None):
     tool_input = event.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     roots = (tuple(manifest.get("roots") or ()) + tuple(manifest.get("scratch_roots") or ())) if manifest is not None else ()
+    if coordinator is not None and manifest is not None:
+        config = _coordinator_config(manifest)
+        if config is not None:
+            # Only a proven coordinator command may use these reviewed roots.
+            roots += tuple(config['repo_roots'] + config['worktree_roots'] + config['scratch_roots'])
     if not isinstance(command, str):
         return _unreviewed_home_path(raw, roots)
     if _protected(command):
@@ -2275,7 +2356,7 @@ def _true_floor(event, manifest=None):
                     segment_words = shlex.split(line, posix=True)
                 except ValueError:
                     continue
-                if segment_words and _floor_verb([w.casefold() for w in segment_words]):
+                if segment_words and _floor_verb([w if w == "-C" else w.casefold() for w in segment_words], coordinator):
                     return True
     else:
         for line in command.replace(";", "\n").split("\n"):
@@ -2283,14 +2364,14 @@ def _true_floor(event, manifest=None):
                 line_words = shlex.split(line, posix=True)
             except ValueError:
                 continue
-            if line_words and _floor_verb([w.casefold() for w in line_words]):
+            if line_words and _floor_verb([w if w == "-C" else w.casefold() for w in line_words], coordinator):
                 return True
     if words is None:
         # Unparseable as one shell command: the line scans above already
         # checked every parseable line; anything left unparsed is floor.
         return True
-    lowered = [word.casefold() for word in words]
-    if any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    lowered = [word if word == "-C" else word.casefold() for word in words]
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         # 2026-10-10 shared-engine carve-out: the ssh_readonly class (p3 port)
         # may allow a parser-PROVEN readonly ssh command to the reviewed host.
         # The proof runs here, inside the floor, so no other REMOTE shape and
@@ -2300,10 +2381,10 @@ def _true_floor(event, manifest=None):
         return True
     if any(word in SERVICE or word in {"pkill", "killall"} for word in lowered):
         return True
-    return _floor_verb(lowered)
+    return _floor_verb(lowered, coordinator)
 
 
-def _floor_verb(lowered):
+def _floor_verb(lowered, coordinator=None):
     """Absolute floor checks on a command's (or compound segment's) word list.
 
     Shared by the whole-command path and the per-segment scan so a floor verb
@@ -2325,7 +2406,7 @@ def _floor_verb(lowered):
     ):
         return True
     # Remote and service control also floor per segment ('cd X && ssh y'):
-    if any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         return True
     if any(word in SERVICE or word in {"pkill", "killall"} for word in lowered):
         return True
@@ -2333,9 +2414,13 @@ def _floor_verb(lowered):
     # history loss, branch deletion and forced updates can never be
     # Decider-eligible. Reads (status, log, diff) stay with the classes above.
     if lowered and lowered[0] == "git":
+        if lowered[1:2] == ["-C"] and len(lowered) >= 4:
+            lowered = ["git", *lowered[3:]]
+        elif len(lowered) > 1 and lowered[1].startswith("-"):
+            return True  # unreviewed global configuration can change every effect
         sub = lowered[1] if len(lowered) > 1 else ""
         rest = lowered[2:]
-        if sub in {"push", "pull", "fetch", "clone", "rebase", "clean", "submodule"}:
+        if sub in {"push", "pull", "fetch", "clone", "rebase", "clean", "submodule"} and not (sub == "push" and coordinator == "coordinator_integrate"):
             return True  # any form, per review
         if sub == "reset" and any(word in {"--hard", "--merge"} or word.startswith("--hard") or word.startswith("--merge") for word in rest):
             return True  # review lists --hard / --merge forms
@@ -2352,14 +2437,14 @@ def _floor_verb(lowered):
             return True
         if sub == "commit" and "--amend" in rest:
             return True
-        if sub == "worktree" and any(word in {"prune", "remove", "delete"} for word in rest):
+        if sub == "worktree" and coordinator != "coordinator_worktree" and any(word in {"prune", "remove", "delete"} for word in rest):
             return True
         if sub in {"filter-branch", "filter-repo"}:
             return True
         # "the canonical branch name" (review): a git subcommand that NAMES the
         # canonical branch as a word is floor — switching, merging or moving it is
         # the fleet's protected spine. Reads never carry it as a bare word.
-        if sub and any(word in {"master"} for word in lowered[2:]):
+        if sub and coordinator not in {"coordinator_worktree", "coordinator_integrate"} and any(word == "master" for word in lowered[2:]):
             return True
     # Disk and permission tools (2026-10-10 review): irreversible or system-wide.
     disk_verbs = {"dd", "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mkfs.btrfs", "mkfs.xfs", "mkfs.vfat", "mkfs.fat", "mkfs.ntfs", "cryptsetup", "wipefs", "fdisk", "parted", "shred", "truncate", "mount", "umount", "crontab"}
@@ -2514,10 +2599,14 @@ def _scratch(raw, cwd, roots):
     return resolved if any(_inside(resolved, root) and resolved != root for root in roots) else None
 
 
-def _load_manifest():
+def _manifest_path():
     override = os.environ.get("SO_APPROVAL_KIKIN_MANIFEST")
-    path = Path(override) if override else Path(__file__).resolve().parents[3] / ".config/dotcortex/claude-approval-canary.kikin.v1.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
+    return Path(override) if override else Path(__file__).resolve().parents[3] / ".config/dotcortex/claude-approval-canary.kikin.v1.json"
+
+
+def _load_manifest(data=None):
+    if data is None:
+        data = json.loads(_manifest_path().read_text(encoding="utf-8"))
     # 2026-10-09 decider-in-the-loop: v2 manifests may carry a "decider" section
     # (honey_url/kikin_url/timeout_ms/min_allow_confidence/enabled). v1 manifests
     # load unchanged with the decider path disabled.
@@ -2525,7 +2614,7 @@ def _load_manifest():
     version = data.get("manifest_version") if isinstance(data, dict) else None
     if version == "claude-approval-canary.kikin.v2":
         allowed_keys = allowed_keys | {"decider"}
-    if not isinstance(data, dict) or set(data) != allowed_keys or data.get("schema") != SCHEMA or version not in (VERSION, "claude-approval-canary.kikin.v2"):
+    if not isinstance(data, dict) or not allowed_keys <= set(data) or (set(data) - allowed_keys - {"unattended", "coordinator_ops"}) or data.get("schema") != SCHEMA or version not in (VERSION, "claude-approval-canary.kikin.v2"):
         raise ValueError("invalid Kikin manifest")
     if not isinstance(data["hard_floor_ids"], list) or not isinstance(data["classes"], list) or not 4 <= len(data["classes"]) <= len(CLASS_NAMES):
         raise ValueError("invalid Kikin manifest classes")
@@ -3394,6 +3483,282 @@ def _outbound_tool_match(event, manifest):
     return False
 
 
+# Coordinator authority is a separate opt-in policy surface. A failed proof is
+# deterministic ASK; the Decider cannot repair a near-match or disabled class.
+COORDINATOR_CLASSES = ('mail_send', 'worktree', 'integrate', 'commit', 'codex_dispatch', 'scratch_scp')
+COORDINATOR_ATOM = re.compile(r'^[A-Za-z0-9_./-]+$')
+COORDINATOR_BRANCH = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+DISPATCH_RE = re.compile(
+    r'^nohup codex exec --model ([A-Za-z0-9_./:-]+) --approve-for-me --skip-git-repo-check '
+    r'"\$\(cat ([A-Za-z0-9_./-]+)\)" < /dev/null > ([A-Za-z0-9_./-]+) 2>&1 &$'
+)
+
+
+def _coordinator_config(manifest):
+    config = manifest.get('coordinator_ops')
+    if not isinstance(config, dict):
+        return None
+    if set(config) != {'classes', 'seat_account', 'repo_roots', 'worktree_roots', 'scratch_roots',
+                       'build_host', 'remote_scratch_roots', 'remote_scratch_prefixes'}:
+        return None
+    flags = config.get('classes')
+    if not isinstance(flags, dict) or set(flags) != set(COORDINATOR_CLASSES) or any(type(v) is not bool for v in flags.values()):
+        return None
+    for key in ('repo_roots', 'worktree_roots', 'scratch_roots', 'remote_scratch_roots'):
+        roots = config.get(key)
+        if not isinstance(roots, list) or not roots or any(
+            not isinstance(root, str) or not root.startswith('/') or root == '/'
+            or not COORDINATOR_ATOM.fullmatch(root) or '..' in Path(root).parts or _protected(root)
+            for root in roots
+        ):
+            return None
+    if any(root == '/tmp' or not root.startswith('/tmp/') for root in config['remote_scratch_roots']):
+        return None
+    prefixes = config.get('remote_scratch_prefixes')
+    if not isinstance(prefixes, list) or any(not isinstance(p, str) or not re.fullmatch(r'[A-Za-z0-9_]+-', p) for p in prefixes):
+        return None
+    if not isinstance(config.get('seat_account'), str) or not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', config['seat_account']):
+        return None
+    if not isinstance(config.get('build_host'), str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', config['build_host']):
+        return None
+    return config
+
+
+def _coordinator_path(raw, roots, *, regular=False, exists=True):
+    if not isinstance(raw, str) or not raw.startswith('/') or not COORDINATOR_ATOM.fullmatch(raw):
+        return None
+    if '..' in Path(raw).parts or _protected(raw) or _unreviewed_home_path(raw, roots) or '.git' in Path(raw).parts:
+        return None
+    path = os.path.realpath(raw)
+    if _protected(path) or _unreviewed_home_path(path, roots) or not any(_inside(path, os.path.realpath(root)) for root in roots):
+        return None
+    if exists and not os.path.exists(path):
+        return None
+    if regular:
+        try:
+            info = os.lstat(raw)
+        except OSError:
+            return None
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return None
+    return path
+
+
+def _coordinator_git(repo, *args):
+    """Read-only bounded probes; no shell, hooks, prompts, or optional locks."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    env.update(GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/bin/false', SSH_ASKPASS='/bin/false',
+               GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=1', LC_ALL='C')
+    try:
+        p = subprocess.run(['git', '--no-optional-locks', '-c', 'core.fsmonitor=false',
+                            '-C', repo, *args], stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, env=env, timeout=0.7, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return p.stdout.strip() if p.returncode == 0 else None
+
+
+def _coordinator_repo(raw, cwd, config):
+    if not isinstance(raw, str):
+        return None
+    if not raw.startswith('/'):
+        raw = posixpath.join(cwd, raw)
+    roots = config['repo_roots'] + config['worktree_roots']
+    path = _coordinator_path(raw, roots)
+    if path is None or not os.path.isdir(path):
+        return None
+    top = _coordinator_git(path, 'rev-parse', '--show-toplevel')
+    if top is None or os.path.realpath(top) != path:
+        return None  # no ancestor discovery across unrelated or mounted trees
+    canonical = [os.path.realpath(root) for root in config['repo_roots']]
+    if path in canonical:
+        return path
+    common = _coordinator_git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    return path if common is not None and any(os.path.realpath(common) == root + '/.git' for root in canonical) else None
+
+
+def _coordinator_worktree_path(raw, config, repo, *, adding=False):
+    path = _coordinator_path(raw, config['worktree_roots'], exists=False)
+    if path is None:
+        return None
+    # Exactly one named child of an explicit root. Only new additions need
+    # <repo>-wt-* naming; removal/prune may cover explicitly listed legacy roots.
+    for root in config['worktree_roots']:
+        if ((not adding or Path(root).name.startswith(Path(repo).name + '-wt-'))
+                and Path(raw).parent == Path(root)
+                and Path(path).parent == Path(os.path.realpath(root))
+                and COORDINATOR_BRANCH.fullmatch(Path(raw).name)):
+            return path
+    return None
+
+
+def _coordinator_remote_path(raw, config):
+    if (not isinstance(raw, str) or not raw.startswith('/tmp/') or not COORDINATOR_ATOM.fullmatch(raw)
+            or '..' in Path(raw).parts or _protected(raw)):
+        return False
+    path = posixpath.normpath(raw)
+    return any(path == root or path.startswith(root.rstrip('/') + '/') for root in config['remote_scratch_roots']) or any(
+        Path(path).parts[2].startswith(prefix) and len(Path(path).parts[2]) > len(prefix)
+        for prefix in config['remote_scratch_prefixes']
+    )
+
+
+def _coordinator_remote_proof(config, paths, regular_input=None):
+    """Resolve remote destinations too: lexical /tmp paths may be symlinks.
+
+    The generated proof contains only fixed operators and shell-quoted paths;
+    it never runs the requested dispatch or copy. A timeout produces ASK.
+    """
+    if not paths or not all(_coordinator_remote_path(p, config) for p in paths):
+        return False
+    proof = 'realpath -m -- ' + ' '.join(shlex.quote(p) for p in paths)
+    if regular_input is not None:
+        proof = 'test -f ' + shlex.quote(regular_input) + ' && test ! -L ' + shlex.quote(regular_input) + ' && ' + proof
+    try:
+        p = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=1', config['build_host'], proof],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=0.7, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    resolved = p.stdout.splitlines()
+    return p.returncode == 0 and p.stdout.endswith('\n') and len(resolved) == len(paths) and all(
+        _coordinator_remote_path(path, config) for path in resolved
+    )
+
+
+def _coordinator_push(repo):
+    if _coordinator_git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD') != 'master':
+        return False
+    # These config options change the exact command's effects or destination.
+    for key in ('remote.origin.mirror', 'push.followTags', 'remote.origin.receivepack', 'push.pushOption'):
+        if _coordinator_git(repo, 'config', '--get-all', key) not in (None, '', 'false'):
+            return False
+    urls = _coordinator_git(repo, 'remote', 'get-url', '--push', '--all', 'origin')
+    if urls is None or len(urls.splitlines()) != 1 or urls.startswith('-') or '::' in urls:
+        return False
+    # Query the push destination, not origin/master: that cached ref may be stale.
+    remote = _coordinator_git(repo, 'ls-remote', '--refs', urls, 'refs/heads/master')
+    if remote is None or not re.fullmatch(r'[0-9a-f]{40,64}\s+refs/heads/master', remote):
+        return False
+    tip = remote.split()[0]
+    return _coordinator_git(repo, 'merge-base', '--is-ancestor', tip, 'refs/heads/master') == ''
+
+
+def _coordinator_candidate(command):
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not words:
+        return False
+    if words[0] == 'git':
+        args = words[1:]
+        if args[:1] == ['-C']:
+            args = args[2:]
+        return bool(args and args[0] in {'commit', 'worktree', 'merge', 'push'})
+    return words[0] in {'codex', 'nohup', 'scp'} or words[:2] == ['mailcortex', 'send']
+
+
+def _coordinator_match(event, manifest):
+    config = _coordinator_config(manifest)
+    tool_input, cwd = event.get('tool_input'), event.get('cwd')
+    if (config is None or event.get('tool_name') != 'Bash' or not isinstance(tool_input, dict)
+            or not set(tool_input) <= TOOL_INPUT_KEYS or not isinstance(cwd, str) or not cwd.startswith('/')):
+        return None
+    command = tool_input.get('command')
+    if not isinstance(command, str) or not command.isascii() or any(ord(c) < 32 or ord(c) == 127 for c in command):
+        return None
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not words or not any(_inside(os.path.realpath(cwd), os.path.realpath(root)) for root in config['repo_roots'] + config['worktree_roots'] + config['scratch_roots']):
+        return None
+    flags = config['classes']
+    if words[:2] == ['mailcortex', 'send'] and flags['mail_send'] and not SHELL_META.search(command):
+        if (len(words) == 10 and words[2::2] == ['--from', '--to', '--subject', '--body-file']
+                and words[3] == config['seat_account'] and re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', words[5])
+                and words[7] and _coordinator_path(words[9], config['scratch_roots'], regular=True)):
+            return 'coordinator_mail_send'
+        return None
+    dispatch = DISPATCH_RE.fullmatch(command)
+    if dispatch and flags['codex_dispatch']:
+        _model, prompt, log = dispatch.groups()
+        if (_coordinator_path(prompt, config['scratch_roots'], regular=True)
+                and _coordinator_path(log, config['scratch_roots'], exists=False)):
+            return 'coordinator_codex_dispatch'
+        return None
+    remote = re.fullmatch(r"ssh -o BatchMode=yes -o ConnectTimeout=3 ([A-Za-z0-9_.-]+) '([^'\n]+)'", command)
+    if remote and flags['codex_dispatch'] and remote.group(1) == config['build_host']:
+        dispatch = DISPATCH_RE.fullmatch(remote.group(2))
+        if dispatch:
+            _model, prompt, log = dispatch.groups()
+            if all(_coordinator_remote_path(path, config) for path in (prompt, log)) and _coordinator_remote_proof(config, [prompt, log], regular_input=prompt):
+                return 'coordinator_codex_dispatch'
+        return None
+    if words[:1] == ['scp'] and flags['scratch_scp'] and len(words) == 3 and not SHELL_META.search(command):
+        dest = words[2].split(':', 1)
+        if (len(dest) == 2 and dest[0] == config['build_host']
+                and _coordinator_path(words[1], config['scratch_roots'], regular=True)
+                and _coordinator_remote_path(dest[1], config)
+                and _coordinator_remote_proof(config, [dest[1]])):
+            return 'coordinator_scratch_scp'
+        return None
+    if words[0] != 'git' or SHELL_META.search(command):
+        return None
+    routing = {'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+               'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_CONFIG', 'GIT_CONFIG_COUNT',
+               'GIT_CONFIG_PARAMETERS', 'GIT_SSH', 'GIT_SSH_COMMAND'}
+    if routing.intersection(os.environ):
+        return None  # the probe and the eventual command must refer to the same Git context
+    args = words[1:]
+    repo_raw = cwd
+    explicit_c = args[:1] == ['-C']
+    if explicit_c:
+        if len(args) < 3:
+            return None
+        repo_raw, args = args[1], args[2:]
+    repo = _coordinator_repo(repo_raw, cwd, config)
+    if repo is None:
+        return None
+    canonical = [os.path.realpath(root) for root in config['repo_roots']]
+    owner = repo if repo in canonical else next((root for root in canonical if _coordinator_git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir') == root + '/.git'), None)
+    if owner is None:
+        return None
+    if args[:2] == ['worktree', 'add'] and flags['worktree']:
+        if (len(args) == 6 and args[3] == '-b' and args[5] == 'master'
+                and COORDINATOR_BRANCH.fullmatch(args[4]) and args[4] != 'master'
+                and Path(args[2]).name == args[4] and _coordinator_worktree_path(args[2], config, owner, adding=True)):
+            return 'coordinator_worktree'
+    if args[:2] == ['worktree', 'remove'] and flags['worktree']:
+        if len(args) == 3 and _coordinator_worktree_path(args[2], config, owner) and _coordinator_repo(args[2], cwd, config):
+            return 'coordinator_worktree'
+    if args == ['worktree', 'prune'] and flags['worktree']:
+        listing = _coordinator_git(repo, 'worktree', 'list', '--porcelain')
+        paths = [line[9:] for line in (listing or '').splitlines() if line.startswith('worktree ')]
+        if paths and all(path == owner or _coordinator_worktree_path(path, config, owner) for path in paths):
+            return 'coordinator_worktree'
+    if args[:2] == ['merge', '--ff-only'] and flags['integrate']:
+        if (explicit_c and repo in canonical and len(args) == 3 and COORDINATOR_BRANCH.fullmatch(args[2])
+                and args[2] != 'master' and _coordinator_git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD') == 'master'
+                and _coordinator_git(repo, 'merge-base', '--is-ancestor', 'HEAD', 'refs/heads/' + args[2]) == ''):
+            return 'coordinator_integrate'
+    if args == ['push', 'origin', 'master'] and flags['integrate'] and repo in canonical and _coordinator_push(repo):
+        return 'coordinator_integrate'
+    if args[:1] == ['commit'] and flags['commit']:
+        if len(args) < 5 or args[1] not in {'-m', '-F'} or not args[2] or args[3] != '--':
+            return None
+        if args[1] == '-F' and not _coordinator_path(args[2], config['scratch_roots'], regular=True):
+            return None
+        for raw in args[4:]:
+            if (not raw or raw.startswith(('/', '~', ':', '-')) or raw in {'.', '..'}
+                    or not COORDINATOR_ATOM.fullmatch(raw) or '..' in Path(raw).parts
+                    or not _coordinator_path(posixpath.join(repo, raw), [repo], exists=False)
+                    or os.path.isdir(posixpath.join(repo, raw))):
+                return None
+        return 'coordinator_commit'
+    return None
+
+
 def classify(event, manifest):
     """Return (allow, reason). The reason names the class that matched, or why none did.
 
@@ -3403,8 +3768,15 @@ def classify(event, manifest):
     Decider for those."""
     if not isinstance(event, dict) or event.get("hook_event_name") != "PermissionRequest":
         return False, "not_permission_request"
-    if _true_floor(event, manifest):
+    floor = _true_floor(event, manifest)
+    coordinator = _coordinator_match(event, manifest)
+    # Only the proven exact command can narrow the overlapping remote/git
+    # floor clauses. All protected paths, services, packages and writers are
+    # scanned again on the FULL original request and still win.
+    if floor and (coordinator is None or _true_floor(event, manifest, coordinator)):
         return False, "true_floor"
+    if coordinator is not None:
+        return True, coordinator
     tool_input = event.get("tool_input")
     if event.get("tool_name") == "Bash" and isinstance(tool_input, dict) and set(tool_input) <= TOOL_INPUT_KEYS and isinstance(tool_input.get("command"), str) and _routes_compound(tool_input["command"]):
         allow, reason = _compound(event, manifest)
@@ -3412,6 +3784,8 @@ def classify(event, manifest):
             return True, reason
         if reason.endswith("_disabled"):
             return False, reason
+        if any(_coordinator_candidate(text) for _separator, text in (_split_compound(tool_input["command"]) or [])):
+            return False, "coordinator_refused"
         return False, "no_match_decider" if reason == "no_match" else reason
     for matcher in (_local_match, _git_match, _centre_match, _safe_commit,
                     _ssh_readonly_match, _local_test_match, _outbound_tool_match):
@@ -3423,6 +3797,8 @@ def classify(event, manifest):
             if manifest["entries"][name]["enabled"] is True:
                 return True, name
             return False, f"{name}_disabled"
+    if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str) and _coordinator_candidate(tool_input["command"]):
+        return False, "coordinator_refused"
     if _syntax_refusal(event):
         return False, "syntax"
     return False, "no_match_decider"
@@ -3872,45 +4248,164 @@ def _log_decision(event, allow, reason):
         pass
 
 
+DEFERRED_MESSAGE = "deferred: queued for the Admiral's morning review; continue with other work, do not retry or rephrase this command"
+
+
+def _away_status(manifest, now=None):
+    """Flag OR Melbourne quiet hours. Old manifests retain interactive behavior.
+
+    Published templates are disabled until each seat reviews its private copy.
+    With unattended.enabled true, the default window is 23:00 through 08:00.
+    Invalid enabled configuration conservatively defers rather than hanging.
+    """
+    import datetime
+    from zoneinfo import ZoneInfo
+    section = manifest.get('unattended', {}) if isinstance(manifest, dict) else {}
+    if not isinstance(section, dict):
+        return True, 'invalid_unattended'
+    if section.get('enabled') is False:
+        return False, 'disabled'
+    try:
+        flag = section.get('away_flag', '~/.config/dotcortex/approval-away')
+        if not isinstance(flag, str) or not flag:
+            raise ValueError('away flag')
+        if Path(flag).expanduser().exists():
+            return True, 'away_flag'
+        quiet = section.get('quiet_hours', {})
+        if not isinstance(quiet, dict):
+            raise ValueError('quiet hours')
+        if quiet.get('enabled', bool(section)) is False:
+            return False, 'present'
+        zone = ZoneInfo(quiet.get('timezone', 'Australia/Melbourne'))
+        current = (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(zone)
+        def minutes(raw):
+            if not isinstance(raw, str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', raw):
+                raise ValueError('quiet time')
+            hour, minute = map(int, raw.split(':'))
+            return hour * 60 + minute
+        start, end = minutes(quiet.get('start', '23:00')), minutes(quiet.get('end', '08:00'))
+        if start == end:
+            raise ValueError('empty quiet window')
+        clock = current.hour * 60 + current.minute
+        away = start <= clock < end if start < end else clock >= start or clock < end
+        return away, 'quiet_hours' if away else 'present'
+    except (ValueError, TypeError, OSError, KeyError):
+        return True, 'invalid_unattended'
+
+
+def _morning_queue_path():
+    return Path(os.environ.get('SO_APPROVAL_MORNING_QUEUE') or Path.home() / '.local/state/dotcortex/approval-morning-queue.jsonl')
+
+
+@__import__('contextlib').contextmanager
+def _morning_queue_file():
+    """Private regular file, no symlink/hardlink, bounded interprocess locking.
+
+    Clear truncates the same inode under this lock; it never unlinks a queue
+    that an appender may already have opened. Content stays outside the ledger.
+    """
+    import fcntl
+    import time
+    path = _morning_queue_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise OSError('queue is not a private regular file')
+        os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + 0.25
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('queue lock deadline')
+                time.sleep(0.005)
+        with os.fdopen(fd, 'a+', encoding='utf-8') as file:
+            fd = None
+            yield file
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _queue_morning(event, reason, away_reason):
+    import datetime
+    payload = event if isinstance(event, dict) else {}
+    tool_input = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
+    record = {
+        'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
+        'tool': payload.get('tool_name'), 'command': tool_input.get('command'),
+        'cwd': payload.get('cwd'), 'session': payload.get('session_id'),
+        'reason': reason, 'away_reason': away_reason, 'request': event,
+    }
+    try:
+        with _morning_queue_file() as file:
+            file.write(json.dumps(record, ensure_ascii=True, separators=(',', ':')) + '\n')
+            file.flush()
+        return True
+    except (OSError, ValueError, TypeError, TimeoutError):
+        return False
+
+
+def _deny_output(message):
+    return {'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
+            'decision': {'behavior': 'deny', 'message': message, 'interrupt': False}}}
+
+
 def _deadline(_signal, _frame):
     raise TimeoutError("approval deadline")
 
 
 def main():
+    event, manifest, allow, reason = None, {}, False, 'error:initialization'
+    away, away_reason = _away_status(manifest)
+    _log_decision.extras = {}
+    previous = None
     try:
         previous = signal.signal(signal.SIGALRM, _deadline)
         signal.setitimer(signal.ITIMER_REAL, 3.0)
-    except Exception:
-        return 0
-    try:
+        # Capture the request even if the manifest fails. Determine away
+        # before policy validation/classification so deadlines still defer.
         raw = sys.stdin.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
-            raise ValueError("input too large")
-        event = json.loads(raw)
-        manifest = _load_manifest()
+        event = {'raw_input': raw}
+        parsed = True
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            parsed = False
+        manifest = json.loads(_manifest_path().read_text(encoding='utf-8'))
+        away, away_reason = _away_status(manifest)
+        if len(raw) > 1024 * 1024 or not parsed:
+            raise ValueError('invalid or oversized input')
+        manifest = _load_manifest(manifest)
         allow, reason = classify(event, manifest)
-        # Decider-in-the-loop: grey-zone reasons only. The true floor and every
-        # deterministic class are decided above and are never revisited.
-        if not allow and reason in ("no_match_decider", "syntax"):
+        if not allow and reason in ('no_match_decider', 'syntax'):
             config = _decider_config(manifest)
             if config is not None:
-                # Reversible writer prompts that survive the true floor are
-                # judged with the destructive question too (dual); opaque
-                # interpreter bodies have already been floored above.
-                if config["mode"] == "single" and _write_capable(event):
-                    config = {**config, "mode": "dual"}
+                if config['mode'] == 'single' and _write_capable(event):
+                    config = {**config, 'mode': 'dual'}
                 decider_allow, status, latency_ms, verdict = _decider_decide(event, config)
-                _log_decision.extras = {"decider_status": status, "verdict": verdict, "latency_ms": latency_ms}
+                _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
                 if decider_allow:
-                    allow, reason = True, "decider_allow"
-        if allow:
-            sys.stdout.write(json.dumps(ALLOW_OUTPUT, separators=(",", ":")) + "\n")
-        _log_decision(event, allow, reason)
+                    allow, reason = True, 'decider_allow'
     except Exception as exc:
-        _log_decision(None, False, f"error:{type(exc).__name__}")
+        allow, reason = False, f'error:{type(exc).__name__}'
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        if previous is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+    if allow:
+        sys.stdout.write(json.dumps(ALLOW_OUTPUT, separators=(',', ':')) + '\n')
+    elif away:
+        queued = _queue_morning(event, reason, away_reason)
+        message = DEFERRED_MESSAGE if queued else (
+            "deferred: morning queue unavailable; continue with other work, do not retry or rephrase this command")
+        sys.stdout.write(json.dumps(_deny_output(message), separators=(',', ':')) + '\n')
+        _log_decision.extras.update(decision='deny', away_reason=away_reason, morning_queued=queued)
+    _log_decision(event, allow, reason)
     return 0
 
 
@@ -4816,4 +5311,633 @@ class BuntaReplayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+#+END_SRC
+
+* Unattended coordinator RED/GREEN harness
+
+The initial 24-test replay is RED before the implementation below is enabled.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-claude-approval-unattended.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""Exact coordinator grants and unattended denials; all fixtures are synthetic."""
+import contextlib
+import datetime as dt
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+REPO = Path(__file__).resolve().parents[5]
+ENGINE = REPO / 'all/.local/lib/dotcortex/claude_approval_kikin.py'
+READER = REPO / 'all/.local/bin/approval-morning-queue'
+SPEC = importlib.util.spec_from_file_location('unattended_engine', ENGINE)
+e = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(e)
+NAMES = ('mail_send', 'worktree', 'integrate', 'commit', 'codex_dispatch', 'scratch_scp')
+
+
+class UnattendedCoordinatorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='approval-unattended.')
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.repo = self.base / 'DotCortex'
+        self.repo.mkdir()
+        self.wt = self.base / 'DotCortex-wt-test'
+        self.wt.mkdir()
+        self.scratch = self.base / 'scratch'
+        self.scratch.mkdir()
+        self.prompt = self.scratch / 'prompt.txt'
+        self.prompt.write_text('synthetic work')
+        self.message = self.scratch / 'message.txt'
+        self.message.write_text('test: synthetic')
+        os.chmod(self.message, 0o600)
+        self.log = self.scratch / 'worker.log'
+        self.flag = self.base / 'away'
+        self.queue = self.base / 'queue.jsonl'
+        self.ledger = self.base / 'ledger.jsonl'
+        self.git('init', '-b', 'master')
+        self.git('config', 'user.name', 'YOUR_TEST_USER')
+        self.git('config', 'user.email', 'YOUR_USER@YOUR_HOST.helm')
+        (self.repo / 'README.org').write_text('synthetic')
+        self.git('add', '--', 'README.org')
+        self.git('commit', '-m', 'test: fixture', '--', 'README.org')
+        self.git('branch', 'topic')
+        self.manifest = json.loads((REPO / 'all/.config/dotcortex/claude-approval-canary.kikin.v1.json').read_text())
+        self.manifest['roots'] = [str(self.repo), str(self.wt)]
+        self.manifest['scratch_roots'] = [str(self.scratch)]
+        self.manifest['decider']['enabled'] = False
+        for entry in self.manifest['classes']:
+            entry['enabled'] = False
+        self.manifest['coordinator_ops'] = {
+            'classes': {name: True for name in NAMES},
+            'seat_account': 'YOUR_SEAT@YOUR_HOST.helm',
+            'repo_roots': [str(self.repo)],
+            'worktree_roots': [str(self.wt)],
+            'scratch_roots': [str(self.scratch)],
+            'build_host': 'YOUR_BUILD_HOST',
+            'remote_scratch_roots': ['/tmp/YOUR_SEAT'],
+            'remote_scratch_prefixes': ['YOUR_SEAT-'],
+        }
+        self.manifest['unattended'] = {
+            'enabled': True, 'away_flag': str(self.flag),
+            'quiet_hours': {'enabled': False, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'},
+        }
+        self.path = self.base / 'manifest.json'
+
+    def git(self, *args):
+        return subprocess.run(['git', '-C', str(self.repo), *args], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+
+    def event(self, command, **extra):
+        return {'hook_event_name': 'PermissionRequest', 'tool_name': 'Bash',
+                'tool_input': {'command': command}, 'cwd': str(self.repo),
+                'session_id': 'YOUR_SESSION', **extra}
+
+    def loaded(self):
+        self.path.write_text(json.dumps(self.manifest))
+        with mock.patch.dict(os.environ, {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path)}):
+            return e._load_manifest()
+
+    def run_hook(self, command, **extra):
+        self.path.write_text(json.dumps(self.manifest))
+        env = {**os.environ, 'SO_APPROVAL_KIKIN_MANIFEST': str(self.path),
+               'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        p = subprocess.run(['/usr/bin/python3', str(ENGINE)], input=json.dumps(self.event(command, **extra)),
+                           env=env, capture_output=True, text=True, timeout=5, check=True)
+        return json.loads(p.stdout)['hookSpecificOutput']['decision'] if p.stdout.strip() else {'behavior': 'ask'}
+
+    def allow(self, command):
+        result = e.classify(self.event(command), self.loaded())
+        self.assertTrue(result[0], (command, result))
+        self.assertTrue(result[1].startswith('coordinator_'), result)
+
+    def ask(self, command):
+        self.assertEqual(self.run_hook(command)['behavior'], 'ask', command)
+
+    def mail(self):
+        return f'mailcortex send --from YOUR_SEAT@YOUR_HOST.helm --to YOUR_REVIEWER@YOUR_REVIEW_HOST.helm --subject "review ready" --body-file {self.prompt}'
+
+    def dispatch(self):
+        return f'nohup codex exec --model YOUR_MODEL --approve-for-me --skip-git-repo-check "$(cat {self.prompt})" < /dev/null > {self.log} 2>&1 &'
+
+    def remote_dispatch(self):
+        return "ssh -o BatchMode=yes -o ConnectTimeout=3 YOUR_BUILD_HOST 'nohup codex exec --model YOUR_MODEL --approve-for-me --skip-git-repo-check \"$(cat /tmp/YOUR_SEAT/prompt.txt)\" < /dev/null > /tmp/YOUR_SEAT/worker.log 2>&1 &'"
+
+    def test_away_ask_denies_and_queues_full_request(self):
+        self.flag.touch()
+        decision = self.run_hook('unknown-command --argument')
+        self.assertEqual(decision['behavior'], 'deny')
+        self.assertIs(decision['interrupt'], False)
+        self.assertIn('deferred: queued', decision['message'])
+        self.assertIn('do not retry or rephrase', decision['message'])
+        record = json.loads(self.queue.read_text())
+        self.assertEqual(record['tool'], 'Bash')
+        self.assertEqual(record['command'], 'unknown-command --argument')
+        self.assertEqual(record['cwd'], str(self.repo))
+        self.assertEqual(record['session'], 'YOUR_SESSION')
+        self.assertEqual(record['request'], self.event('unknown-command --argument'))
+        self.assertIn('timestamp', record)
+        self.assertEqual(self.queue.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.ledger.read_text())['decision'], 'deny')
+
+    def test_away_floor_denies_and_queues(self):
+        self.flag.touch()
+        self.assertEqual(self.run_hook('rm -rf /tmp/YOUR_TEST')['behavior'], 'deny')
+        self.assertEqual(json.loads(self.queue.read_text())['reason'], 'true_floor')
+
+    def test_present_ask_unchanged(self):
+        self.ask('unknown-command')
+        self.assertFalse(self.queue.exists())
+
+    def test_away_does_not_change_class_allow(self):
+        self.flag.touch()
+        self.assertEqual(self.run_hook(self.mail())['behavior'], 'allow')
+        self.assertFalse(self.queue.exists())
+
+    def test_quiet_hours_boundaries_timezone_and_flag_or(self):
+        self.manifest['unattended']['quiet_hours']['enabled'] = True
+        manifest = self.loaded()
+        for hour, minute, expected in [(22, 59, False), (23, 0, True), (7, 59, True), (8, 0, False)]:
+            with self.subTest(hour=hour, minute=minute):
+                # January UTC +11: these values are Melbourne-local.
+                instant = dt.datetime(2026, 1, 2, hour, minute, tzinfo=dt.timezone(dt.timedelta(hours=11)))
+                self.assertEqual(e._away_status(manifest, now=instant)[0], expected)
+        self.flag.touch()
+        self.assertTrue(e._away_status(manifest, now=dt.datetime(2026, 1, 2, 12, tzinfo=dt.timezone(dt.timedelta(hours=11))))[0])
+
+    def test_quiet_hours_day_window_and_dst(self):
+        q = self.manifest['unattended']['quiet_hours']
+        q.update(enabled=True, start='09:00', end='17:00')
+        m = self.loaded()
+        for utc, expected in [(dt.datetime(2026, 7, 1, 0, tzinfo=dt.timezone.utc), True),
+                              (dt.datetime(2026, 7, 1, 7, tzinfo=dt.timezone.utc), False)]:
+            self.assertEqual(e._away_status(m, now=utc)[0], expected)
+
+    def test_queue_symlink_failure_still_denies(self):
+        self.flag.touch()
+        victim = self.base / 'victim.txt'
+        victim.write_text('keep me')
+        self.queue.symlink_to(victim)
+        decision = self.run_hook('unknown-command')
+        self.assertEqual(decision['behavior'], 'deny')
+        self.assertIn('queue unavailable', decision['message'])
+        self.assertEqual(victim.read_text(), 'keep me')
+
+    def test_queue_existing_permissions_are_restricted(self):
+        self.flag.touch()
+        self.queue.touch(mode=0o644)
+        self.run_hook('unknown-command')
+        self.assertEqual(self.queue.stat().st_mode & 0o777, 0o600)
+
+    def test_queue_reader_groups_and_clear(self):
+        self.flag.touch()
+        self.run_hook('unknown-command')
+        self.run_hook('another-command', session_id='YOUR_SECOND_SESSION')
+        env = {**os.environ, 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        args = ['/usr/bin/python3', str(READER)]
+        read = subprocess.run(args, env=env, text=True, capture_output=True, timeout=3, check=True)
+        self.assertIn('YOUR_SESSION', read.stdout)
+        self.assertIn('YOUR_SECOND_SESSION', read.stdout)
+        self.assertIn('unknown-command', read.stdout)
+        self.assertEqual(len(self.queue.read_text().splitlines()), 2)
+        subprocess.run(args + ['--clear'], env=env, capture_output=True, timeout=3, check=True)
+        self.assertEqual(self.queue.read_text(), '')
+        self.assertEqual(self.queue.stat().st_mode & 0o777, 0o600)
+
+    def test_coordinator_home_paths_keep_reviewed_boundary(self):
+        root = '/home/YOUR_USER/DotCortex'
+        path = root + '/README.org'
+        self.assertEqual(e._coordinator_path(path, [root], exists=False), path)
+        for outside in [root + '-other/README.org', '/home/YOUR_OTHER_USER/notes.md',
+                        root + '/.env', root + '/../notes.md']:
+            self.assertIsNone(e._coordinator_path(outside, [root], exists=False), outside)
+        with mock.patch.object(e.os.path, 'realpath', return_value='/home/YOUR_OTHER_USER/notes.md'):
+            self.assertIsNone(e._coordinator_path(path, [root], exists=False))
+
+    def test_proven_worktree_home_root_keeps_other_homes_on_floor(self):
+        manifest = self.loaded()
+        root = '/home/YOUR_USER/DotCortex-wt-test'
+        manifest['coordinator_ops']['worktree_roots'] = [root]
+        payload = self.event(f'git worktree add {root}/worker -b worker master')
+        self.assertTrue(e._true_floor(payload, manifest))
+        self.assertFalse(e._true_floor(payload, manifest, 'coordinator_worktree'))
+        for outside in [root + '-other', '/home/YOUR_OTHER_USER/DotCortex-wt-test']:
+            bad = self.event(f'git worktree add {outside}/worker -b worker master')
+            self.assertTrue(e._true_floor(bad, manifest, 'coordinator_worktree'))
+        manifest['coordinator_ops']['classes']['worktree'] = False
+        self.assertFalse(e.classify(payload, manifest)[0])
+
+    def test_mail_exact_and_deviations(self):
+        self.allow(self.mail())
+        for bad in [self.mail().replace('YOUR_SEAT@', 'YOUR_OTHER@'),
+                    self.mail().replace('YOUR_REVIEW_HOST.helm', 'example.invalid'),
+                    self.mail().replace(str(self.prompt), str(self.repo / 'README.org')),
+                    self.mail() + ' --cc YOUR_OTHER@YOUR_HOST.helm',
+                    self.mail() + '; rm README.org']:
+            self.ask(bad)
+
+    def test_worktree_add_exact_and_deviations(self):
+        command = f'git worktree add {self.wt}/worker -b worker master'
+        self.allow(command)
+        self.allow(f'git -C {self.repo} worktree add {self.wt}/worker -b worker master')
+        for bad in [command + ' --force', command.replace('-b worker', '-B worker'),
+                    command.replace('-b worker', '-b wrong'), command.replace(' master', ' HEAD'),
+                    command.replace(str(self.wt), str(self.base / 'other'))]:
+            self.ask(bad)
+
+    def test_worktree_remove_and_prune_exact(self):
+        path = self.wt / 'worker'
+        self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
+        self.allow(f'git worktree remove {path}')
+        self.allow('git worktree prune')
+        self.ask(f'git worktree remove --force {path}')
+        self.ask(f'git worktree remove {self.repo}')
+        self.ask('git worktree prune --expire now')
+
+    def test_worktree_symlink_escape_and_wrong_repo(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (self.wt / 'escape').symlink_to(outside, target_is_directory=True)
+        self.ask(f'git worktree add {self.wt}/escape/worker -b worker master')
+        self.ask(f'git -C {outside} worktree prune')
+
+    def test_ff_merge_requires_master_and_exact_shape(self):
+        command = f'git -C {self.repo} merge --ff-only topic'
+        self.allow(command)
+        self.ask(command.replace('--ff-only', '--no-ff'))
+        self.ask('git merge --ff-only topic')
+        self.git('checkout', 'topic')
+        self.ask(command)
+
+    def test_ff_push_uses_current_remote_tip_and_non_ff_asks(self):
+        remote = self.base / 'origin.git'
+        subprocess.run(['git', 'init', '--bare', str(remote)], capture_output=True, check=True)
+        self.git('remote', 'add', 'origin', str(remote))
+        self.git('push', 'origin', 'master')
+        self.allow('git push origin master')
+        for bad in ['git push --force origin master', 'git push origin topic', 'git push', 'git push --all origin']:
+            self.ask(bad)
+        # Move the real remote to a divergent commit WITHOUT updating origin/master.
+        self.git('checkout', 'topic')
+        (self.repo / 'README.org').write_text('remote divergence')
+        self.git('commit', '-am', 'test: divergence')
+        divergent = self.git('rev-parse', 'HEAD')
+        self.git('push', 'origin', 'topic')  # transfer the object without refreshing origin/master
+        subprocess.run(['git', '--git-dir', str(remote), 'update-ref', 'refs/heads/master', divergent], capture_output=True, check=True)
+        self.git('checkout', 'master')
+        self.ask('git push origin master')
+
+    def test_commit_explicit_paths_and_deviations(self):
+        for prefix in ['git', f'git -C {self.repo}']:
+            self.allow(f'{prefix} commit -m "test: scoped" -- README.org')
+            self.allow(f'{prefix} commit -F {self.message} -- README.org')
+        for bad in ['git commit -m x --', 'git commit -m x', 'git commit -am x -- README.org',
+                    'git commit --amend -m x -- README.org', 'git commit -m x -- .',
+                    'git commit -m x -- :/', 'git commit -m x -- ../other',
+                    f'git commit -F {self.repo}/README.org -- README.org']:
+            self.ask(bad)
+
+    def test_commit_inside_owned_worktree(self):
+        path = self.wt / 'worker'
+        self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
+        payload = self.event('git commit -m "test: scoped" -- README.org', cwd=str(path))
+        self.assertEqual(e.classify(payload, self.loaded()), (True, 'coordinator_commit'))
+
+    def test_codex_dispatch_requires_null_stdin_and_scoped_files(self):
+        self.allow(self.dispatch())
+        for bad in [self.dispatch().replace(' < /dev/null', ''),
+                    self.dispatch().replace('--approve-for-me ', ''),
+                    self.dispatch().replace(str(self.prompt), str(self.repo / 'README.org')),
+                    self.dispatch().replace(str(self.log), '/etc/worker.log'),
+                    self.dispatch() + ' rm README.org', self.dispatch().replace('$(cat ', '$(rm '),
+                    self.dispatch().replace('YOUR_MODEL', 'YOUR_MODEL;id')]:
+            self.ask(bad)
+
+    def test_remote_codex_dispatch_proof_and_deviations(self):
+        with mock.patch.object(e, '_coordinator_remote_proof', return_value=True) as proof:
+            self.allow(self.remote_dispatch())
+            self.assertTrue(proof.called)
+            self.assertFalse(e.classify(self.event(self.remote_dispatch().replace('YOUR_BUILD_HOST', 'YOUR_OTHER_HOST')), self.loaded())[0])
+            self.assertFalse(e.classify(self.event(self.remote_dispatch().replace(' < /dev/null', '')), self.loaded())[0])
+        with mock.patch.object(e, '_coordinator_remote_proof', return_value=False):
+            self.assertFalse(e.classify(self.event(self.remote_dispatch()), self.loaded())[0])
+
+    def test_scp_exact_scope_and_deviations(self):
+        command = f'scp {self.prompt} YOUR_BUILD_HOST:/tmp/YOUR_SEAT/prompt.txt'
+        with mock.patch.object(e, '_coordinator_remote_proof', return_value=True):
+            self.allow(command)
+            self.allow(command.replace('/tmp/YOUR_SEAT/', '/tmp/YOUR_SEAT-job/'))
+            for bad in [command.replace('/tmp/YOUR_SEAT/prompt.txt', '/etc/file'),
+                        command.replace(str(self.prompt), str(self.repo / 'README.org')),
+                        command.replace('scp ', 'scp -r '),
+                        command.replace('YOUR_BUILD_HOST:', 'YOUR_OTHER_HOST:')]:
+                self.assertFalse(e.classify(self.event(bad), self.loaded())[0], bad)
+        with mock.patch.object(e, '_coordinator_remote_proof', return_value=False):
+            self.assertFalse(e.classify(self.event(command), self.loaded())[0])
+
+    def test_disabled_classes_do_not_grant(self):
+        self.manifest['coordinator_ops']['classes'] = {name: False for name in NAMES}
+        for command in [self.mail(), self.dispatch(), 'git worktree prune', 'git commit -m x -- README.org']:
+            self.ask(command)
+
+    def test_secret_symlink_and_floor_always_win(self):
+        secret = self.base / '.env'
+        secret.write_text('synthetic floor fixture')
+        self.prompt.unlink()
+        self.prompt.symlink_to(secret)
+        self.ask(self.mail())
+        self.ask(self.dispatch())
+        for command in ['sudo true', 'git reset --hard HEAD', 'git -C ' + str(self.repo) + ' reset --hard HEAD',
+                        'pip install example', 'cat ~/.ssh/id_rsa', 'cat KEEPASS.kdbx']:
+            self.ask(command)
+
+    def test_worst_case_always_allow_decider_cannot_approve_danger_or_bad_shapes(self):
+        self.manifest['decider']['enabled'] = True
+        self.manifest['decider']['kikin_url'] = 'https://YOUR_DECIDER.invalid/decide'
+        self.loaded()
+        commands = ['rm README.org', 'sudo true', 'git push --force origin master',
+                    'git commit -m x --', self.mail().replace('YOUR_SEAT@', 'YOUR_OTHER@'),
+                    self.dispatch().replace(' < /dev/null', ''),
+                    f'scp {self.prompt} YOUR_BUILD_HOST:/etc/file',
+                    'git -C ' + str(self.repo) + ' reset --hard HEAD', 'cat .env',
+                    "python3 -c 'import os'", self.mail() + '; rm README.org']
+        for away in (False, True):
+            if away:
+                self.flag.touch()
+            for command in commands:
+                out = io.StringIO()
+                env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger),
+                       'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+                with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event(command)))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(True, 'accepted', 1, 'allow')) as decider:
+                    e.main()
+                result = json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'] if out.getvalue().strip() else 'ask'
+                self.assertEqual(result, 'deny' if away else 'ask', command)
+                decider.assert_not_called()
+
+    def test_timeout_while_away_denies_and_preserves_request(self):
+        self.flag.touch()
+        self.loaded()
+        out = io.StringIO()
+        env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('unknown-command')))), contextlib.redirect_stdout(out), mock.patch.object(e, 'classify', side_effect=TimeoutError('fixture deadline')):
+            e.main()
+        self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], 'deny')
+        self.assertEqual(json.loads(self.queue.read_text())['request'], self.event('unknown-command'))
+
+    def test_manifest_error_while_away_retains_full_request(self):
+        self.flag.touch()
+        self.manifest['schema'] = 'INVALID_SCHEMA'
+        self.assertEqual(self.run_hook('unknown-command')['behavior'], 'deny')
+        self.assertEqual(json.loads(self.queue.read_text())['request'], self.event('unknown-command'))
+        self.path.write_text('{invalid-manifest')
+        env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger),
+               'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        with mock.patch.dict(os.environ, env), mock.patch.object(e, '_away_status', return_value=(True, 'away_flag')), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('second-command')))), contextlib.redirect_stdout(io.StringIO()):
+            e.main()
+        self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['request'], self.event('second-command'))
+
+    def test_default_quiet_window_and_invalid_quiet_config(self):
+        self.manifest['unattended'].pop('quiet_hours')
+        instant = dt.datetime(2026, 1, 2, 14, tzinfo=dt.timezone.utc)  # Melbourne 01:00
+        self.assertTrue(e._away_status(self.loaded(), now=instant)[0])
+        self.manifest['unattended']['quiet_hours'] = {'enabled': True, 'start': 'bad-time'}
+        self.assertEqual(e._away_status(self.loaded(), now=instant), (True, 'invalid_unattended'))
+
+    def test_commit_directory_and_git_routing_overrides_are_refused(self):
+        directory = self.repo / 'bundle'
+        directory.mkdir()
+        (directory / '.env').write_text('synthetic')
+        self.ask('git commit -m x -- bundle')
+        with mock.patch.dict(os.environ, {'GIT_DIR': str(self.base / 'other.git')}):
+            self.assertFalse(e.classify(self.event('git commit -m x -- README.org'), self.loaded())[0])
+
+    def test_codex_log_symlink_escape_is_refused(self):
+        target = self.base / 'outside.log'
+        target.touch()
+        self.log.symlink_to(target)
+        self.ask(self.dispatch())
+
+    def test_remote_proof_fixed_argv_and_symlink_escape(self):
+        config = self.manifest['coordinator_ops']
+        paths = ['/tmp/YOUR_SEAT/prompt.txt', '/tmp/YOUR_SEAT/log.txt']
+        completed = subprocess.CompletedProcess([], 0, '\n'.join(paths) + '\n', '')
+        with mock.patch.object(e.subprocess, 'run', return_value=completed) as run:
+            self.assertTrue(e._coordinator_remote_proof(config, paths, regular_input=paths[0]))
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[:6], ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=1', 'YOUR_BUILD_HOST'])
+            self.assertIn('test ! -L', argv[-1])
+            self.assertEqual(run.call_args.kwargs['stdin'], subprocess.DEVNULL)
+            self.assertLessEqual(run.call_args.kwargs['timeout'], 1)
+        for stdout in ['/etc/passwd\n/tmp/YOUR_SEAT/log.txt\n', 'malformed', '\n'.join(paths + paths) + '\n']:
+            with mock.patch.object(e.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout, '')):
+                self.assertFalse(e._coordinator_remote_proof(config, paths))
+        with mock.patch.object(e.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ssh', 1)):
+            self.assertFalse(e._coordinator_remote_proof(config, paths))
+
+    def test_concurrent_queue_appends_keep_complete_json_records(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with mock.patch.dict(os.environ, {'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = list(pool.map(lambda i: e._queue_morning(self.event(f'fixture-{i}'), 'true_floor', 'away_flag'), range(20)))
+        self.assertTrue(all(results))
+        records = [json.loads(line) for line in self.queue.read_text().splitlines()]
+        self.assertEqual({r['command'] for r in records}, {f'fixture-{i}' for i in range(20)})
+        self.assertEqual(len(records), 20)
+
+    def test_queue_lock_contention_denies_without_hanging(self):
+        import fcntl
+        self.flag.touch()
+        self.queue.touch()
+        with self.queue.open('a') as file:
+            fcntl.flock(file, fcntl.LOCK_EX)
+            decision = self.run_hook('unknown-command')
+        self.assertEqual(decision['behavior'], 'deny')
+        self.assertIn('queue unavailable', decision['message'])
+        self.assertEqual(self.queue.read_text(), '')
+
+    def test_away_decider_ask_denies_but_decider_allow_is_unchanged(self):
+        self.flag.touch()
+        self.manifest['decider']['enabled'] = True
+        self.manifest['decider']['kikin_url'] = 'https://YOUR_DECIDER.invalid/decide'
+        self.loaded()
+        for verdict, expected in [(False, 'deny'), (True, 'allow')]:
+            env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('true')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
+                e.main()
+            self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], expected)
+
+
+    def test_configured_legacy_worktree_remove_and_prune(self):
+        legacy = self.base / 'DotCortex-wt'
+        legacy.mkdir()
+        self.manifest['coordinator_ops']['worktree_roots'].append(str(legacy))
+        self.manifest['roots'].append(str(legacy))
+        path = legacy / 'worker'
+        self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
+        self.allow(f'git worktree remove {path}')
+        self.allow('git worktree prune')
+        # New additions retain the requested <repo>-wt-* root shape.
+        self.ask(f'git worktree add {legacy}/new-worker -b new-worker master')
+
+
+
+if __name__ == '__main__':
+    unittest.main()
+#+END_SRC
+
+* Unattended PermissionRequest contract and morning review
+
+Current Claude Code hook semantics, checked 2026-10-11 against
+[[https://code.claude.com/docs/en/hooks#permissionrequest-decision-control][the official PermissionRequest reference]]: return JSON on stdout and exit
+zero. The decision object belongs under =hookSpecificOutput=, with
+=hookEventName= set to =PermissionRequest=. =behavior: deny= refuses the
+operation, =message= reaches Claude, and =interrupt: false= lets it continue.
+An exit-code-two response without this decision object leaves the prompt flow
+unchanged; it cannot implement unattended mode.
+
+#+BEGIN_EXAMPLE
+{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"deferred: queued for the Admiral's morning review; continue with other work, do not retry or rephrase this command","interrupt":false}}}
+#+END_EXAMPLE
+
+Enable =unattended.enabled= in each seat's PRIVATE manifest. The away flag
+=~/.config/dotcortex/approval-away= OR the configured half-open quiet window
+(default 23:00 to 08:00 Australia/Melbourne, with DST) decides away. Disabling
+quiet hours leaves the flag available; removing the flag during quiet hours
+still means away. A manifest without this section retains its old behavior
+except for the explicit default away flag. Published templates stay disabled
+until their private copies are reviewed. Away changes only a final ASK into
+DENY, including floor refusals and errors/timeouts; ALLOW is unchanged.
+
+The full original request, tool, command, cwd, session, UTC timestamp, refusal
+reason and away reason append to =~/.local/state/dotcortex/approval-morning-queue.jsonl=.
+It is a private 0600 regular file; symlink/hardlink destinations are refused.
+A bounded lock protects append and clear. Queue failure still returns DENY,
+with an honest queue-unavailable message and =morning_queued: false= in the
+hashed decision ledger. =SO_APPROVAL_MORNING_QUEUE= overrides the path for
+fixtures or private installations. The ordinary ledger never acquires full
+commands. =approval-morning-queue= prints complete requests grouped by session;
+=--clear= prints then truncates the same inode under the lock. It never
+executes or replays queued requests.
+
+** Coordinator class boundary
+
+Each =coordinator_ops.classes= boolean is independently enabled in a seat's
+private manifest. The six new classes are disabled in public templates.
+=seat_account= is that seat's own mail identity; =repo_roots= lists exact
+canonical repositories; =worktree_roots= lists exact sibling roots (new additions require =<repo>-wt-*=);
+=scratch_roots= belongs to that seat; =build_host= is the only remote target;
+remote scratch is restricted to explicit =/tmp/<name>= roots and configured
+seat prefixes (for example =YOUR_SEAT-=). These fields carry placeholders
+only; no live users, hosts, home paths or endpoints are added to public source.
+
+Exact forms: mail has only =--from=, =--to=, =--subject= and =--body-file= in
+that order; recipients end in =.helm= and body inputs are owned regular scratch
+files. Worktree add uses matching directory/branch names, =-b= and =master=;
+remove has no force flags and must belong to a configured repository; explicit
+legacy worktree roots can also be reviewed for removal/prune. Prune
+requires every registered worktree to be under the configured roots. Merge
+requires explicit =git -C <canonical-repo>=, =master= checkout, =--ff-only=,
+and an ancestry proof. Push accepts only =git push origin master=, proves the
+CURRENT push destination's master tip with =ls-remote= and =merge-base=, and
+refuses effect-changing push configuration. Missing objects, unavailable
+remote proofs and deadlines are ASK; Git itself still rejects a raced non-FF.
+
+Commits take exactly one =-m= message or =-F= owned scratch file, then =--=
+and nonempty literal file pathspecs within a configured repository/worktree.
+Directory and Git-magic pathspecs are refused; routing environment overrides
+also refuse a coordinator grant.
+Codex accepts only the documented =nohup codex exec --model <model>
+--approve-for-me --skip-git-repo-check "$(cat <scratch-prompt>)" < /dev/null
+> <scratch-log> 2>&1 &= form. Remote dispatch wraps that whole command in
+single quotes after =ssh -o BatchMode=yes -o ConnectTimeout=3 YOUR_BUILD_HOST=.
+SCP accepts one owned local scratch file and one remote scratch destination.
+Remote scratch endpoints receive bounded realpath proofs, including existing
+symlinks; remote dispatch also proves its prompt is a regular nonsymlink file.
+No requested operation runs during classification.
+
+Only a fully proven enabled shape narrows the overlapping remote/git floor
+clauses. The full original request is still scanned for protected paths,
+privacy, service/package control, destructive options and unsafe writers.
+Failed coordinator proofs never visit the probabilistic Decider. Existing
+legacy class grants are retained. Unattended mode never broadens authority.
+
+** Deploy after coordinator review, separately for both seats
+
+From each reviewed checkout, tangle =agents-approval.org= with that checkout's
+=tangle-one= and run the five suites (kikin-hook, bunta-honey, honey-reads,
+p3-hook, unattended). Set each wrapper's engine override to the candidate
+engine during testing; otherwise an installed older engine may shadow it.
+Create a versioned installation with the shared engine, existing wrapper and
+morning reader. Back up the private manifest and hook settings before editing.
+Fill all =YOUR_*= placeholders only in that seat's private manifest; enable
+=unattended= and just the reviewed coordinator booleans. Preserve existing
+roots, class flags and private Decider configuration. Keep the shared engine's
+=SO_APPROVAL_KIKIN_MANIFEST= override on both seats. Strict-parse the manifest
+and settings. Start a fresh session using the versioned engine; test an
+unknown harmless fixture once while present and once with the away flag.
+The latter must DENY, queue one full record, and let Claude continue. Review
+and clear that fixture with =approval-morning-queue --clear=. No push, remote
+pull, live settings edit or session restart is performed by this branch.
+
+#+BEGIN_SRC python :tangle all/.local/bin/approval-morning-queue :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""Print the private morning queue by session; --clear consumes it under lock."""
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--clear', action='store_true', help='print and clear the queue atomically')
+    args = parser.parse_args()
+    override = os.environ.get('DOTCORTEX_APPROVAL_ENGINE')
+    here = Path(__file__).resolve()
+    candidates = [Path(override)] if override else [
+        here.parent / 'claude_approval_kikin.py',
+        here.parents[1] / 'lib/dotcortex/claude_approval_kikin.py',
+        Path.home() / '.local/lib/dotcortex/claude_approval_kikin.py',
+    ]
+    engine = next((path for path in candidates if path.is_file()), None)
+    if engine is None:
+        parser.error('shared approval engine not found')
+    spec = importlib.util.spec_from_file_location('morning_queue_engine', engine)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        with module._morning_queue_file() as file:
+            file.seek(0)
+            records = [json.loads(line) for line in file if line.strip()]
+            sessions = {}
+            for record in records:
+                if not isinstance(record, dict):
+                    raise ValueError('invalid queue record')
+                sessions.setdefault(record.get('session') or '(unknown session)', []).append(record)
+            if not records:
+                print('No queued requests.')
+            for session, entries in sessions.items():
+                print('Session ' + json.dumps(session, ensure_ascii=True) + f' ({len(entries)} requests)')
+                for record in entries:
+                    # JSON escaping also prevents control sequences from reaching the terminal.
+                    print(json.dumps(record, ensure_ascii=True, sort_keys=True))
+            sys.stdout.flush()
+            if args.clear:
+                file.seek(0)
+                file.truncate(0)
+    except (OSError, ValueError, TypeError, TimeoutError) as exc:
+        print('Morning queue unavailable: ' + type(exc).__name__, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
 #+END_SRC

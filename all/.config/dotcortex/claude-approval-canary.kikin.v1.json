@@ -79,5 +79,43 @@
         }
       ]
     }
-  ]
+  ],
+  "unattended": {
+    "enabled": false,
+    "away_flag": "~/.config/dotcortex/approval-away",
+    "quiet_hours": {
+      "enabled": true,
+      "start": "23:00",
+      "end": "08:00",
+      "timezone": "Australia/Melbourne"
+    }
+  },
+  "coordinator_ops": {
+    "classes": {
+      "mail_send": false,
+      "worktree": false,
+      "integrate": false,
+      "commit": false,
+      "codex_dispatch": false,
+      "scratch_scp": false
+    },
+    "seat_account": "YOUR_SEAT@YOUR_HOST.helm",
+    "repo_roots": [
+      "/home/YOUR_USER/DotCortex"
+    ],
+    "worktree_roots": [
+      "/home/YOUR_USER/DotCortex-wt-YOUR_HOST"
+    ],
+    "scratch_roots": [
+      "/tmp",
+      "/home/YOUR_USER/.claude/scratchpad"
+    ],
+    "build_host": "YOUR_BUILD_HOST",
+    "remote_scratch_roots": [
+      "/tmp/YOUR_SEAT"
+    ],
+    "remote_scratch_prefixes": [
+      "YOUR_SEAT-"
+    ]
+  }
 }

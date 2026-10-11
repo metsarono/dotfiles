@@ -101,7 +101,7 @@ def _unreviewed_home_path(value, roots=()):
 # filesystem-writing find options. SYNTAX-only refusals (heredocs, redirections
 # inside the roots, $() substitution, unparsable quoting) are now Decider-eligible
 # instead of hard-refused: they are plumbing, not substance.
-def _true_floor(event, manifest=None):
+def _true_floor(event, manifest=None, coordinator=None):
     try:
         raw = json.dumps(event.get("tool_input", {}), ensure_ascii=False, sort_keys=True).casefold()
     except (TypeError, ValueError):
@@ -111,6 +111,11 @@ def _true_floor(event, manifest=None):
     tool_input = event.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     roots = (tuple(manifest.get("roots") or ()) + tuple(manifest.get("scratch_roots") or ())) if manifest is not None else ()
+    if coordinator is not None and manifest is not None:
+        config = _coordinator_config(manifest)
+        if config is not None:
+            # Only a proven coordinator command may use these reviewed roots.
+            roots += tuple(config['repo_roots'] + config['worktree_roots'] + config['scratch_roots'])
     if not isinstance(command, str):
         return _unreviewed_home_path(raw, roots)
     if _protected(command):
@@ -164,7 +169,7 @@ def _true_floor(event, manifest=None):
                     segment_words = shlex.split(line, posix=True)
                 except ValueError:
                     continue
-                if segment_words and _floor_verb([w.casefold() for w in segment_words]):
+                if segment_words and _floor_verb([w if w == "-C" else w.casefold() for w in segment_words], coordinator):
                     return True
     else:
         for line in command.replace(";", "\n").split("\n"):
@@ -172,14 +177,14 @@ def _true_floor(event, manifest=None):
                 line_words = shlex.split(line, posix=True)
             except ValueError:
                 continue
-            if line_words and _floor_verb([w.casefold() for w in line_words]):
+            if line_words and _floor_verb([w if w == "-C" else w.casefold() for w in line_words], coordinator):
                 return True
     if words is None:
         # Unparseable as one shell command: the line scans above already
         # checked every parseable line; anything left unparsed is floor.
         return True
-    lowered = [word.casefold() for word in words]
-    if any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    lowered = [word if word == "-C" else word.casefold() for word in words]
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         # 2026-10-10 shared-engine carve-out: the ssh_readonly class (p3 port)
         # may allow a parser-PROVEN readonly ssh command to the reviewed host.
         # The proof runs here, inside the floor, so no other REMOTE shape and
@@ -189,10 +194,10 @@ def _true_floor(event, manifest=None):
         return True
     if any(word in SERVICE or word in {"pkill", "killall"} for word in lowered):
         return True
-    return _floor_verb(lowered)
+    return _floor_verb(lowered, coordinator)
 
 
-def _floor_verb(lowered):
+def _floor_verb(lowered, coordinator=None):
     """Absolute floor checks on a command's (or compound segment's) word list.
 
     Shared by the whole-command path and the per-segment scan so a floor verb
@@ -214,7 +219,7 @@ def _floor_verb(lowered):
     ):
         return True
     # Remote and service control also floor per segment ('cd X && ssh y'):
-    if any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         return True
     if any(word in SERVICE or word in {"pkill", "killall"} for word in lowered):
         return True
@@ -222,9 +227,13 @@ def _floor_verb(lowered):
     # history loss, branch deletion and forced updates can never be
     # Decider-eligible. Reads (status, log, diff) stay with the classes above.
     if lowered and lowered[0] == "git":
+        if lowered[1:2] == ["-C"] and len(lowered) >= 4:
+            lowered = ["git", *lowered[3:]]
+        elif len(lowered) > 1 and lowered[1].startswith("-"):
+            return True  # unreviewed global configuration can change every effect
         sub = lowered[1] if len(lowered) > 1 else ""
         rest = lowered[2:]
-        if sub in {"push", "pull", "fetch", "clone", "rebase", "clean", "submodule"}:
+        if sub in {"push", "pull", "fetch", "clone", "rebase", "clean", "submodule"} and not (sub == "push" and coordinator == "coordinator_integrate"):
             return True  # any form, per review
         if sub == "reset" and any(word in {"--hard", "--merge"} or word.startswith("--hard") or word.startswith("--merge") for word in rest):
             return True  # review lists --hard / --merge forms
@@ -241,14 +250,14 @@ def _floor_verb(lowered):
             return True
         if sub == "commit" and "--amend" in rest:
             return True
-        if sub == "worktree" and any(word in {"prune", "remove", "delete"} for word in rest):
+        if sub == "worktree" and coordinator != "coordinator_worktree" and any(word in {"prune", "remove", "delete"} for word in rest):
             return True
         if sub in {"filter-branch", "filter-repo"}:
             return True
         # "the canonical branch name" (review): a git subcommand that NAMES the
         # canonical branch as a word is floor — switching, merging or moving it is
         # the fleet's protected spine. Reads never carry it as a bare word.
-        if sub and any(word in {"master"} for word in lowered[2:]):
+        if sub and coordinator not in {"coordinator_worktree", "coordinator_integrate"} and any(word == "master" for word in lowered[2:]):
             return True
     # Disk and permission tools (2026-10-10 review): irreversible or system-wide.
     disk_verbs = {"dd", "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mkfs.btrfs", "mkfs.xfs", "mkfs.vfat", "mkfs.fat", "mkfs.ntfs", "cryptsetup", "wipefs", "fdisk", "parted", "shred", "truncate", "mount", "umount", "crontab"}
@@ -403,10 +412,14 @@ def _scratch(raw, cwd, roots):
     return resolved if any(_inside(resolved, root) and resolved != root for root in roots) else None
 
 
-def _load_manifest():
+def _manifest_path():
     override = os.environ.get("SO_APPROVAL_KIKIN_MANIFEST")
-    path = Path(override) if override else Path(__file__).resolve().parents[3] / ".config/dotcortex/claude-approval-canary.kikin.v1.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
+    return Path(override) if override else Path(__file__).resolve().parents[3] / ".config/dotcortex/claude-approval-canary.kikin.v1.json"
+
+
+def _load_manifest(data=None):
+    if data is None:
+        data = json.loads(_manifest_path().read_text(encoding="utf-8"))
     # 2026-10-09 decider-in-the-loop: v2 manifests may carry a "decider" section
     # (honey_url/kikin_url/timeout_ms/min_allow_confidence/enabled). v1 manifests
     # load unchanged with the decider path disabled.
@@ -414,7 +427,7 @@ def _load_manifest():
     version = data.get("manifest_version") if isinstance(data, dict) else None
     if version == "claude-approval-canary.kikin.v2":
         allowed_keys = allowed_keys | {"decider"}
-    if not isinstance(data, dict) or set(data) != allowed_keys or data.get("schema") != SCHEMA or version not in (VERSION, "claude-approval-canary.kikin.v2"):
+    if not isinstance(data, dict) or not allowed_keys <= set(data) or (set(data) - allowed_keys - {"unattended", "coordinator_ops"}) or data.get("schema") != SCHEMA or version not in (VERSION, "claude-approval-canary.kikin.v2"):
         raise ValueError("invalid Kikin manifest")
     if not isinstance(data["hard_floor_ids"], list) or not isinstance(data["classes"], list) or not 4 <= len(data["classes"]) <= len(CLASS_NAMES):
         raise ValueError("invalid Kikin manifest classes")
@@ -1283,6 +1296,282 @@ def _outbound_tool_match(event, manifest):
     return False
 
 
+# Coordinator authority is a separate opt-in policy surface. A failed proof is
+# deterministic ASK; the Decider cannot repair a near-match or disabled class.
+COORDINATOR_CLASSES = ('mail_send', 'worktree', 'integrate', 'commit', 'codex_dispatch', 'scratch_scp')
+COORDINATOR_ATOM = re.compile(r'^[A-Za-z0-9_./-]+$')
+COORDINATOR_BRANCH = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+DISPATCH_RE = re.compile(
+    r'^nohup codex exec --model ([A-Za-z0-9_./:-]+) --approve-for-me --skip-git-repo-check '
+    r'"\$\(cat ([A-Za-z0-9_./-]+)\)" < /dev/null > ([A-Za-z0-9_./-]+) 2>&1 &$'
+)
+
+
+def _coordinator_config(manifest):
+    config = manifest.get('coordinator_ops')
+    if not isinstance(config, dict):
+        return None
+    if set(config) != {'classes', 'seat_account', 'repo_roots', 'worktree_roots', 'scratch_roots',
+                       'build_host', 'remote_scratch_roots', 'remote_scratch_prefixes'}:
+        return None
+    flags = config.get('classes')
+    if not isinstance(flags, dict) or set(flags) != set(COORDINATOR_CLASSES) or any(type(v) is not bool for v in flags.values()):
+        return None
+    for key in ('repo_roots', 'worktree_roots', 'scratch_roots', 'remote_scratch_roots'):
+        roots = config.get(key)
+        if not isinstance(roots, list) or not roots or any(
+            not isinstance(root, str) or not root.startswith('/') or root == '/'
+            or not COORDINATOR_ATOM.fullmatch(root) or '..' in Path(root).parts or _protected(root)
+            for root in roots
+        ):
+            return None
+    if any(root == '/tmp' or not root.startswith('/tmp/') for root in config['remote_scratch_roots']):
+        return None
+    prefixes = config.get('remote_scratch_prefixes')
+    if not isinstance(prefixes, list) or any(not isinstance(p, str) or not re.fullmatch(r'[A-Za-z0-9_]+-', p) for p in prefixes):
+        return None
+    if not isinstance(config.get('seat_account'), str) or not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', config['seat_account']):
+        return None
+    if not isinstance(config.get('build_host'), str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', config['build_host']):
+        return None
+    return config
+
+
+def _coordinator_path(raw, roots, *, regular=False, exists=True):
+    if not isinstance(raw, str) or not raw.startswith('/') or not COORDINATOR_ATOM.fullmatch(raw):
+        return None
+    if '..' in Path(raw).parts or _protected(raw) or _unreviewed_home_path(raw, roots) or '.git' in Path(raw).parts:
+        return None
+    path = os.path.realpath(raw)
+    if _protected(path) or _unreviewed_home_path(path, roots) or not any(_inside(path, os.path.realpath(root)) for root in roots):
+        return None
+    if exists and not os.path.exists(path):
+        return None
+    if regular:
+        try:
+            info = os.lstat(raw)
+        except OSError:
+            return None
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return None
+    return path
+
+
+def _coordinator_git(repo, *args):
+    """Read-only bounded probes; no shell, hooks, prompts, or optional locks."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    env.update(GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/bin/false', SSH_ASKPASS='/bin/false',
+               GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=1', LC_ALL='C')
+    try:
+        p = subprocess.run(['git', '--no-optional-locks', '-c', 'core.fsmonitor=false',
+                            '-C', repo, *args], stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, env=env, timeout=0.7, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return p.stdout.strip() if p.returncode == 0 else None
+
+
+def _coordinator_repo(raw, cwd, config):
+    if not isinstance(raw, str):
+        return None
+    if not raw.startswith('/'):
+        raw = posixpath.join(cwd, raw)
+    roots = config['repo_roots'] + config['worktree_roots']
+    path = _coordinator_path(raw, roots)
+    if path is None or not os.path.isdir(path):
+        return None
+    top = _coordinator_git(path, 'rev-parse', '--show-toplevel')
+    if top is None or os.path.realpath(top) != path:
+        return None  # no ancestor discovery across unrelated or mounted trees
+    canonical = [os.path.realpath(root) for root in config['repo_roots']]
+    if path in canonical:
+        return path
+    common = _coordinator_git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    return path if common is not None and any(os.path.realpath(common) == root + '/.git' for root in canonical) else None
+
+
+def _coordinator_worktree_path(raw, config, repo, *, adding=False):
+    path = _coordinator_path(raw, config['worktree_roots'], exists=False)
+    if path is None:
+        return None
+    # Exactly one named child of an explicit root. Only new additions need
+    # <repo>-wt-* naming; removal/prune may cover explicitly listed legacy roots.
+    for root in config['worktree_roots']:
+        if ((not adding or Path(root).name.startswith(Path(repo).name + '-wt-'))
+                and Path(raw).parent == Path(root)
+                and Path(path).parent == Path(os.path.realpath(root))
+                and COORDINATOR_BRANCH.fullmatch(Path(raw).name)):
+            return path
+    return None
+
+
+def _coordinator_remote_path(raw, config):
+    if (not isinstance(raw, str) or not raw.startswith('/tmp/') or not COORDINATOR_ATOM.fullmatch(raw)
+            or '..' in Path(raw).parts or _protected(raw)):
+        return False
+    path = posixpath.normpath(raw)
+    return any(path == root or path.startswith(root.rstrip('/') + '/') for root in config['remote_scratch_roots']) or any(
+        Path(path).parts[2].startswith(prefix) and len(Path(path).parts[2]) > len(prefix)
+        for prefix in config['remote_scratch_prefixes']
+    )
+
+
+def _coordinator_remote_proof(config, paths, regular_input=None):
+    """Resolve remote destinations too: lexical /tmp paths may be symlinks.
+
+    The generated proof contains only fixed operators and shell-quoted paths;
+    it never runs the requested dispatch or copy. A timeout produces ASK.
+    """
+    if not paths or not all(_coordinator_remote_path(p, config) for p in paths):
+        return False
+    proof = 'realpath -m -- ' + ' '.join(shlex.quote(p) for p in paths)
+    if regular_input is not None:
+        proof = 'test -f ' + shlex.quote(regular_input) + ' && test ! -L ' + shlex.quote(regular_input) + ' && ' + proof
+    try:
+        p = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=1', config['build_host'], proof],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=0.7, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    resolved = p.stdout.splitlines()
+    return p.returncode == 0 and p.stdout.endswith('\n') and len(resolved) == len(paths) and all(
+        _coordinator_remote_path(path, config) for path in resolved
+    )
+
+
+def _coordinator_push(repo):
+    if _coordinator_git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD') != 'master':
+        return False
+    # These config options change the exact command's effects or destination.
+    for key in ('remote.origin.mirror', 'push.followTags', 'remote.origin.receivepack', 'push.pushOption'):
+        if _coordinator_git(repo, 'config', '--get-all', key) not in (None, '', 'false'):
+            return False
+    urls = _coordinator_git(repo, 'remote', 'get-url', '--push', '--all', 'origin')
+    if urls is None or len(urls.splitlines()) != 1 or urls.startswith('-') or '::' in urls:
+        return False
+    # Query the push destination, not origin/master: that cached ref may be stale.
+    remote = _coordinator_git(repo, 'ls-remote', '--refs', urls, 'refs/heads/master')
+    if remote is None or not re.fullmatch(r'[0-9a-f]{40,64}\s+refs/heads/master', remote):
+        return False
+    tip = remote.split()[0]
+    return _coordinator_git(repo, 'merge-base', '--is-ancestor', tip, 'refs/heads/master') == ''
+
+
+def _coordinator_candidate(command):
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not words:
+        return False
+    if words[0] == 'git':
+        args = words[1:]
+        if args[:1] == ['-C']:
+            args = args[2:]
+        return bool(args and args[0] in {'commit', 'worktree', 'merge', 'push'})
+    return words[0] in {'codex', 'nohup', 'scp'} or words[:2] == ['mailcortex', 'send']
+
+
+def _coordinator_match(event, manifest):
+    config = _coordinator_config(manifest)
+    tool_input, cwd = event.get('tool_input'), event.get('cwd')
+    if (config is None or event.get('tool_name') != 'Bash' or not isinstance(tool_input, dict)
+            or not set(tool_input) <= TOOL_INPUT_KEYS or not isinstance(cwd, str) or not cwd.startswith('/')):
+        return None
+    command = tool_input.get('command')
+    if not isinstance(command, str) or not command.isascii() or any(ord(c) < 32 or ord(c) == 127 for c in command):
+        return None
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not words or not any(_inside(os.path.realpath(cwd), os.path.realpath(root)) for root in config['repo_roots'] + config['worktree_roots'] + config['scratch_roots']):
+        return None
+    flags = config['classes']
+    if words[:2] == ['mailcortex', 'send'] and flags['mail_send'] and not SHELL_META.search(command):
+        if (len(words) == 10 and words[2::2] == ['--from', '--to', '--subject', '--body-file']
+                and words[3] == config['seat_account'] and re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', words[5])
+                and words[7] and _coordinator_path(words[9], config['scratch_roots'], regular=True)):
+            return 'coordinator_mail_send'
+        return None
+    dispatch = DISPATCH_RE.fullmatch(command)
+    if dispatch and flags['codex_dispatch']:
+        _model, prompt, log = dispatch.groups()
+        if (_coordinator_path(prompt, config['scratch_roots'], regular=True)
+                and _coordinator_path(log, config['scratch_roots'], exists=False)):
+            return 'coordinator_codex_dispatch'
+        return None
+    remote = re.fullmatch(r"ssh -o BatchMode=yes -o ConnectTimeout=3 ([A-Za-z0-9_.-]+) '([^'\n]+)'", command)
+    if remote and flags['codex_dispatch'] and remote.group(1) == config['build_host']:
+        dispatch = DISPATCH_RE.fullmatch(remote.group(2))
+        if dispatch:
+            _model, prompt, log = dispatch.groups()
+            if all(_coordinator_remote_path(path, config) for path in (prompt, log)) and _coordinator_remote_proof(config, [prompt, log], regular_input=prompt):
+                return 'coordinator_codex_dispatch'
+        return None
+    if words[:1] == ['scp'] and flags['scratch_scp'] and len(words) == 3 and not SHELL_META.search(command):
+        dest = words[2].split(':', 1)
+        if (len(dest) == 2 and dest[0] == config['build_host']
+                and _coordinator_path(words[1], config['scratch_roots'], regular=True)
+                and _coordinator_remote_path(dest[1], config)
+                and _coordinator_remote_proof(config, [dest[1]])):
+            return 'coordinator_scratch_scp'
+        return None
+    if words[0] != 'git' or SHELL_META.search(command):
+        return None
+    routing = {'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+               'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_CONFIG', 'GIT_CONFIG_COUNT',
+               'GIT_CONFIG_PARAMETERS', 'GIT_SSH', 'GIT_SSH_COMMAND'}
+    if routing.intersection(os.environ):
+        return None  # the probe and the eventual command must refer to the same Git context
+    args = words[1:]
+    repo_raw = cwd
+    explicit_c = args[:1] == ['-C']
+    if explicit_c:
+        if len(args) < 3:
+            return None
+        repo_raw, args = args[1], args[2:]
+    repo = _coordinator_repo(repo_raw, cwd, config)
+    if repo is None:
+        return None
+    canonical = [os.path.realpath(root) for root in config['repo_roots']]
+    owner = repo if repo in canonical else next((root for root in canonical if _coordinator_git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir') == root + '/.git'), None)
+    if owner is None:
+        return None
+    if args[:2] == ['worktree', 'add'] and flags['worktree']:
+        if (len(args) == 6 and args[3] == '-b' and args[5] == 'master'
+                and COORDINATOR_BRANCH.fullmatch(args[4]) and args[4] != 'master'
+                and Path(args[2]).name == args[4] and _coordinator_worktree_path(args[2], config, owner, adding=True)):
+            return 'coordinator_worktree'
+    if args[:2] == ['worktree', 'remove'] and flags['worktree']:
+        if len(args) == 3 and _coordinator_worktree_path(args[2], config, owner) and _coordinator_repo(args[2], cwd, config):
+            return 'coordinator_worktree'
+    if args == ['worktree', 'prune'] and flags['worktree']:
+        listing = _coordinator_git(repo, 'worktree', 'list', '--porcelain')
+        paths = [line[9:] for line in (listing or '').splitlines() if line.startswith('worktree ')]
+        if paths and all(path == owner or _coordinator_worktree_path(path, config, owner) for path in paths):
+            return 'coordinator_worktree'
+    if args[:2] == ['merge', '--ff-only'] and flags['integrate']:
+        if (explicit_c and repo in canonical and len(args) == 3 and COORDINATOR_BRANCH.fullmatch(args[2])
+                and args[2] != 'master' and _coordinator_git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD') == 'master'
+                and _coordinator_git(repo, 'merge-base', '--is-ancestor', 'HEAD', 'refs/heads/' + args[2]) == ''):
+            return 'coordinator_integrate'
+    if args == ['push', 'origin', 'master'] and flags['integrate'] and repo in canonical and _coordinator_push(repo):
+        return 'coordinator_integrate'
+    if args[:1] == ['commit'] and flags['commit']:
+        if len(args) < 5 or args[1] not in {'-m', '-F'} or not args[2] or args[3] != '--':
+            return None
+        if args[1] == '-F' and not _coordinator_path(args[2], config['scratch_roots'], regular=True):
+            return None
+        for raw in args[4:]:
+            if (not raw or raw.startswith(('/', '~', ':', '-')) or raw in {'.', '..'}
+                    or not COORDINATOR_ATOM.fullmatch(raw) or '..' in Path(raw).parts
+                    or not _coordinator_path(posixpath.join(repo, raw), [repo], exists=False)
+                    or os.path.isdir(posixpath.join(repo, raw))):
+                return None
+        return 'coordinator_commit'
+    return None
+
+
 def classify(event, manifest):
     """Return (allow, reason). The reason names the class that matched, or why none did.
 
@@ -1292,8 +1581,15 @@ def classify(event, manifest):
     Decider for those."""
     if not isinstance(event, dict) or event.get("hook_event_name") != "PermissionRequest":
         return False, "not_permission_request"
-    if _true_floor(event, manifest):
+    floor = _true_floor(event, manifest)
+    coordinator = _coordinator_match(event, manifest)
+    # Only the proven exact command can narrow the overlapping remote/git
+    # floor clauses. All protected paths, services, packages and writers are
+    # scanned again on the FULL original request and still win.
+    if floor and (coordinator is None or _true_floor(event, manifest, coordinator)):
         return False, "true_floor"
+    if coordinator is not None:
+        return True, coordinator
     tool_input = event.get("tool_input")
     if event.get("tool_name") == "Bash" and isinstance(tool_input, dict) and set(tool_input) <= TOOL_INPUT_KEYS and isinstance(tool_input.get("command"), str) and _routes_compound(tool_input["command"]):
         allow, reason = _compound(event, manifest)
@@ -1301,6 +1597,8 @@ def classify(event, manifest):
             return True, reason
         if reason.endswith("_disabled"):
             return False, reason
+        if any(_coordinator_candidate(text) for _separator, text in (_split_compound(tool_input["command"]) or [])):
+            return False, "coordinator_refused"
         return False, "no_match_decider" if reason == "no_match" else reason
     for matcher in (_local_match, _git_match, _centre_match, _safe_commit,
                     _ssh_readonly_match, _local_test_match, _outbound_tool_match):
@@ -1312,6 +1610,8 @@ def classify(event, manifest):
             if manifest["entries"][name]["enabled"] is True:
                 return True, name
             return False, f"{name}_disabled"
+    if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str) and _coordinator_candidate(tool_input["command"]):
+        return False, "coordinator_refused"
     if _syntax_refusal(event):
         return False, "syntax"
     return False, "no_match_decider"
@@ -1761,45 +2061,164 @@ def _log_decision(event, allow, reason):
         pass
 
 
+DEFERRED_MESSAGE = "deferred: queued for the Admiral's morning review; continue with other work, do not retry or rephrase this command"
+
+
+def _away_status(manifest, now=None):
+    """Flag OR Melbourne quiet hours. Old manifests retain interactive behavior.
+
+    Published templates are disabled until each seat reviews its private copy.
+    With unattended.enabled true, the default window is 23:00 through 08:00.
+    Invalid enabled configuration conservatively defers rather than hanging.
+    """
+    import datetime
+    from zoneinfo import ZoneInfo
+    section = manifest.get('unattended', {}) if isinstance(manifest, dict) else {}
+    if not isinstance(section, dict):
+        return True, 'invalid_unattended'
+    if section.get('enabled') is False:
+        return False, 'disabled'
+    try:
+        flag = section.get('away_flag', '~/.config/dotcortex/approval-away')
+        if not isinstance(flag, str) or not flag:
+            raise ValueError('away flag')
+        if Path(flag).expanduser().exists():
+            return True, 'away_flag'
+        quiet = section.get('quiet_hours', {})
+        if not isinstance(quiet, dict):
+            raise ValueError('quiet hours')
+        if quiet.get('enabled', bool(section)) is False:
+            return False, 'present'
+        zone = ZoneInfo(quiet.get('timezone', 'Australia/Melbourne'))
+        current = (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(zone)
+        def minutes(raw):
+            if not isinstance(raw, str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', raw):
+                raise ValueError('quiet time')
+            hour, minute = map(int, raw.split(':'))
+            return hour * 60 + minute
+        start, end = minutes(quiet.get('start', '23:00')), minutes(quiet.get('end', '08:00'))
+        if start == end:
+            raise ValueError('empty quiet window')
+        clock = current.hour * 60 + current.minute
+        away = start <= clock < end if start < end else clock >= start or clock < end
+        return away, 'quiet_hours' if away else 'present'
+    except (ValueError, TypeError, OSError, KeyError):
+        return True, 'invalid_unattended'
+
+
+def _morning_queue_path():
+    return Path(os.environ.get('SO_APPROVAL_MORNING_QUEUE') or Path.home() / '.local/state/dotcortex/approval-morning-queue.jsonl')
+
+
+@__import__('contextlib').contextmanager
+def _morning_queue_file():
+    """Private regular file, no symlink/hardlink, bounded interprocess locking.
+
+    Clear truncates the same inode under this lock; it never unlinks a queue
+    that an appender may already have opened. Content stays outside the ledger.
+    """
+    import fcntl
+    import time
+    path = _morning_queue_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise OSError('queue is not a private regular file')
+        os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + 0.25
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('queue lock deadline')
+                time.sleep(0.005)
+        with os.fdopen(fd, 'a+', encoding='utf-8') as file:
+            fd = None
+            yield file
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _queue_morning(event, reason, away_reason):
+    import datetime
+    payload = event if isinstance(event, dict) else {}
+    tool_input = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
+    record = {
+        'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
+        'tool': payload.get('tool_name'), 'command': tool_input.get('command'),
+        'cwd': payload.get('cwd'), 'session': payload.get('session_id'),
+        'reason': reason, 'away_reason': away_reason, 'request': event,
+    }
+    try:
+        with _morning_queue_file() as file:
+            file.write(json.dumps(record, ensure_ascii=True, separators=(',', ':')) + '\n')
+            file.flush()
+        return True
+    except (OSError, ValueError, TypeError, TimeoutError):
+        return False
+
+
+def _deny_output(message):
+    return {'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
+            'decision': {'behavior': 'deny', 'message': message, 'interrupt': False}}}
+
+
 def _deadline(_signal, _frame):
     raise TimeoutError("approval deadline")
 
 
 def main():
+    event, manifest, allow, reason = None, {}, False, 'error:initialization'
+    away, away_reason = _away_status(manifest)
+    _log_decision.extras = {}
+    previous = None
     try:
         previous = signal.signal(signal.SIGALRM, _deadline)
         signal.setitimer(signal.ITIMER_REAL, 3.0)
-    except Exception:
-        return 0
-    try:
+        # Capture the request even if the manifest fails. Determine away
+        # before policy validation/classification so deadlines still defer.
         raw = sys.stdin.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
-            raise ValueError("input too large")
-        event = json.loads(raw)
-        manifest = _load_manifest()
+        event = {'raw_input': raw}
+        parsed = True
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            parsed = False
+        manifest = json.loads(_manifest_path().read_text(encoding='utf-8'))
+        away, away_reason = _away_status(manifest)
+        if len(raw) > 1024 * 1024 or not parsed:
+            raise ValueError('invalid or oversized input')
+        manifest = _load_manifest(manifest)
         allow, reason = classify(event, manifest)
-        # Decider-in-the-loop: grey-zone reasons only. The true floor and every
-        # deterministic class are decided above and are never revisited.
-        if not allow and reason in ("no_match_decider", "syntax"):
+        if not allow and reason in ('no_match_decider', 'syntax'):
             config = _decider_config(manifest)
             if config is not None:
-                # Reversible writer prompts that survive the true floor are
-                # judged with the destructive question too (dual); opaque
-                # interpreter bodies have already been floored above.
-                if config["mode"] == "single" and _write_capable(event):
-                    config = {**config, "mode": "dual"}
+                if config['mode'] == 'single' and _write_capable(event):
+                    config = {**config, 'mode': 'dual'}
                 decider_allow, status, latency_ms, verdict = _decider_decide(event, config)
-                _log_decision.extras = {"decider_status": status, "verdict": verdict, "latency_ms": latency_ms}
+                _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
                 if decider_allow:
-                    allow, reason = True, "decider_allow"
-        if allow:
-            sys.stdout.write(json.dumps(ALLOW_OUTPUT, separators=(",", ":")) + "\n")
-        _log_decision(event, allow, reason)
+                    allow, reason = True, 'decider_allow'
     except Exception as exc:
-        _log_decision(None, False, f"error:{type(exc).__name__}")
+        allow, reason = False, f'error:{type(exc).__name__}'
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        if previous is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+    if allow:
+        sys.stdout.write(json.dumps(ALLOW_OUTPUT, separators=(',', ':')) + '\n')
+    elif away:
+        queued = _queue_morning(event, reason, away_reason)
+        message = DEFERRED_MESSAGE if queued else (
+            "deferred: morning queue unavailable; continue with other work, do not retry or rephrase this command")
+        sys.stdout.write(json.dumps(_deny_output(message), separators=(',', ':')) + '\n')
+        _log_decision.extras.update(decision='deny', away_reason=away_reason, morning_queued=queued)
+    _log_decision(event, allow, reason)
     return 0
 
 

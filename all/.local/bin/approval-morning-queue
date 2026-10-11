@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Print the private morning queue by session; --clear consumes it under lock."""
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--clear', action='store_true', help='print and clear the queue atomically')
+    args = parser.parse_args()
+    override = os.environ.get('DOTCORTEX_APPROVAL_ENGINE')
+    here = Path(__file__).resolve()
+    candidates = [Path(override)] if override else [
+        here.parent / 'claude_approval_kikin.py',
+        here.parents[1] / 'lib/dotcortex/claude_approval_kikin.py',
+        Path.home() / '.local/lib/dotcortex/claude_approval_kikin.py',
+    ]
+    engine = next((path for path in candidates if path.is_file()), None)
+    if engine is None:
+        parser.error('shared approval engine not found')
+    spec = importlib.util.spec_from_file_location('morning_queue_engine', engine)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        with module._morning_queue_file() as file:
+            file.seek(0)
+            records = [json.loads(line) for line in file if line.strip()]
+            sessions = {}
+            for record in records:
+                if not isinstance(record, dict):
+                    raise ValueError('invalid queue record')
+                sessions.setdefault(record.get('session') or '(unknown session)', []).append(record)
+            if not records:
+                print('No queued requests.')
+            for session, entries in sessions.items():
+                print('Session ' + json.dumps(session, ensure_ascii=True) + f' ({len(entries)} requests)')
+                for record in entries:
+                    # JSON escaping also prevents control sequences from reaching the terminal.
+                    print(json.dumps(record, ensure_ascii=True, sort_keys=True))
+            sys.stdout.flush()
+            if args.clear:
+                file.seek(0)
+                file.truncate(0)
+    except (OSError, ValueError, TypeError, TimeoutError) as exc:
+        print('Morning queue unavailable: ' + type(exc).__name__, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
