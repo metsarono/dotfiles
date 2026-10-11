@@ -49,7 +49,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.git('commit', '-m', 'test: fixture', '--', 'README.org')
         self.git('branch', 'topic')
         self.manifest = json.loads((REPO / 'all/.config/dotcortex/claude-approval-canary.kikin.v1.json').read_text())
-        self.manifest['gate_inversion'] = {'enabled': False}
+        self.manifest['gate_inversion'] = {'enabled': False, 'present_refusal': 'deny'}
         self.manifest['roots'] = [str(self.repo), str(self.wt)]
         self.manifest['scratch_roots'] = [str(self.scratch)]
         self.manifest['decider']['enabled'] = False

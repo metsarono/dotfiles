@@ -9,10 +9,11 @@
 This module owns the pure-Python Claude =PermissionRequest= shared engine.
 The Admiral's 2026-10-11 inversion ruling below is the current contract:
 ordinary local work within configured roots defaults to ALLOW after the absolute
-floor, and only a confident Decider danger verdict vetoes. Every final refusal
-emits DENY with =interrupt: false=, queues the request and attempts the seat's
-Telegram notification; it never leaves a terminal-only prompt. The legacy p3
-engine and dated deployment sections remain historical regression references.
+floor, and only a confident Decider danger verdict vetoes. While present,
+=gate_inversion.present_refusal= selects native approval (=ask=, the default)
+or DENY/queue/notify (=deny=). This includes true-floor refusals. Away and quiet
+hours always emit DENY with =interrupt: false=, queue and attempt Telegram.
+The legacy p3 engine and dated deployment sections remain historical regression references.
 
 The executable hook remains in =agents-hooks.org=.  Changing the reviewed class
 flags and wiring the hook into a live =~/.claude/settings.json= are separate,
@@ -183,7 +184,8 @@ authorize local Kikin reads or writes.
     ]
   },
   "gate_inversion": {
-    "enabled": true
+    "enabled": true,
+    "present_refusal": "ask"
   },
   "notifications": {
     "argv": [
@@ -246,6 +248,15 @@ fixtures or private installations. The ordinary ledger never acquires full
 commands. =approval-morning-queue= prints complete requests grouped by session;
 =--clear= prints then truncates the same inode under the lock. It never
 executes or replays queued requests.
+
+While present, =gate_inversion.present_refusal= accepts =ask= or =deny= and
+defaults to =ask= (also for missing or invalid values). ASK emits no decision
+and preserves Claude Code's native prompt, relayed to Telegram with Allow
+buttons. It does not queue or send a second notification. True-floor refusals
+also follow this switch: they never become automatic allows. Keep =ask= until
+the separately built Desk consumer can honour an approval once and wake the
+seat; then explicitly opt into =deny=. Away/quiet hours always deny, queue and
+notify regardless of this switch.
 
 ** Coordinator class boundary
 
@@ -405,7 +416,7 @@ class GateInversionTests(unittest.TestCase):
         self.manifest['coordinator_ops']['repo_roots'] = [str(self.root)]
         self.manifest['coordinator_ops']['worktree_roots'] = [str(self.worktree)]
         self.manifest['coordinator_ops']['scratch_roots'] = [str(self.root)]
-        self.manifest['gate_inversion'] = {'enabled': True}
+        self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
         self.manifest['notifications'] = {'argv': ['YOUR_SEAT_TELEGRAM_NOTIFIER']}
         self.manifest['decider'].update(enabled=False)
         self.manifest['unattended'] = {'enabled': True, 'away_flag': str(self.flag), 'quiet_hours': {'enabled': False}}
@@ -424,7 +435,8 @@ class GateInversionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(event))), \
                 contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_post', return_value=(answers, status), side_effect=side_effect):
             self.assertEqual(e.main(), 0)
-        self.assertTrue(out.getvalue().strip(), 'terminal-only fallback')
+        if not out.getvalue().strip():
+            return {'behavior': 'ask'}
         decision = json.loads(out.getvalue())['hookSpecificOutput']['decision']
         self.assertIn(decision['behavior'], ('allow', 'deny'))
         if decision['behavior'] == 'deny':
@@ -667,6 +679,168 @@ class GateInversionTests(unittest.TestCase):
         self.assertEqual(len(records), 4)
         self.assertTrue(all(record['request'] == self.event() for record in records))
 
+    def test_present_refusal_switch_for_floor_veto_outside_and_coordinator(self):
+        self.enable_decider()
+        outside = self.base / 'outside'
+        outside.mkdir()
+        cases = [(self.event('rm README.org'), 'true_floor'),
+                 (self.event('make test'), 'decider_risky'),
+                 (self.event('make test', cwd=str(outside)), 'no_match_decider'),
+                 (self.event('git commit -m x -- README.org'), 'coordinator_refused')]
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            for away in (False, True):
+                if away:
+                    self.flag.touch()
+                for event, reason in cases:
+                    with self.subTest(mode=mode, away=away, reason=reason), \
+                            mock.patch.object(e, '_notify_admiral', return_value='sent') as notify:
+                        before = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
+                        expected = 'deny' if away or mode == 'deny' else 'ask'
+                        result = self.run_hook(event, answers={'approval.risky.v2': {'noul': 0.99}})
+                        self.assertEqual(result['behavior'], expected)
+                        ledger = json.loads(self.log.read_text().splitlines()[-1])
+                        self.assertEqual(ledger['decision'], expected)
+                        self.assertEqual(ledger['reason'], reason)
+                        after = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
+                        self.assertEqual(after - before, int(expected == 'deny'))
+                        if expected == 'deny':
+                            notify.assert_called_once()
+                            self.assertEqual(notify.call_args.args[2], away)
+                            self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['request'], event)
+                        else:
+                            notify.assert_not_called()
+                if away:
+                    self.flag.unlink()
+
+    def test_present_refusal_defaults_to_ask_without_bypassing_floor(self):
+        for section in (None, {'enabled': True}, {'enabled': True, 'present_refusal': 'invalid'}):
+            with self.subTest(section=section), mock.patch.object(e, '_decider_decide') as decider:
+                if section is None:
+                    self.manifest.pop('gate_inversion', None)
+                else:
+                    self.manifest['gate_inversion'] = section
+                self.assertEqual(self.run_hook(self.event('rm README.org'))['behavior'], 'ask')
+                self.assertEqual(json.loads(self.log.read_text().splitlines()[-1])['reason'], 'true_floor')
+                decider.assert_not_called()
+                self.assertEqual(self.run_hook(self.event('make test'))['behavior'], 'allow')
+        self.assertFalse(self.queue.exists())
+
+    def test_present_refusal_errors_and_deadlines_follow_switch(self):
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            for away in (False, True):
+                if away:
+                    self.flag.touch()
+                for error in (TimeoutError('fixture'), ValueError('fixture')):
+                    with self.subTest(mode=mode, away=away, error=type(error).__name__), \
+                            mock.patch.object(e, 'classify', side_effect=error):
+                        self.assertEqual(self.run_hook(self.event())['behavior'], 'deny' if away else mode)
+                if away:
+                    self.flag.unlink()
+
+    def test_quiet_hours_override_both_present_refusal_values(self):
+        import datetime as dt
+        self.manifest['unattended']['quiet_hours'] = {
+            'enabled': True, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'}
+        status = e._away_status
+        instant = dt.datetime(2026, 1, 2, 14, tzinfo=dt.timezone.utc)
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            with mock.patch.object(e, '_away_status', side_effect=lambda m: status(m, now=instant)), \
+                    mock.patch.object(e, '_notify_admiral', return_value='sent') as notify:
+                self.assertEqual(self.run_hook(self.event('rm README.org'))['behavior'], 'deny')
+                self.assertTrue(notify.call_args.args[2])
+                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'quiet_hours')
+
+    def wrapper_module(self):
+        from importlib.machinery import SourceFileLoader
+        spec = importlib.util.spec_from_loader('fix1_wrapper', SourceFileLoader(
+            'fix1_wrapper', str(REPO / 'all/.local/bin/claude-hook-approval-inverted')))
+        wrapper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper)
+        return wrapper
+
+    def test_wrapper_refusal_switch_missing_broken_silent_invalid_and_timeout(self):
+        wrapper = self.wrapper_module()
+        sink = self.base / 'fallback-notification.json'
+        helper = self.base / 'fallback-notifier'
+        helper.write_text('#!/usr/bin/python3\nimport pathlib,sys\npathlib.Path(sys.argv[1]).write_text(sys.stdin.read())\n')
+        helper.chmod(0o700)
+        self.manifest['notifications'] = {'argv': [str(helper), str(sink)]}
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            for away in (False, True):
+                if away:
+                    self.flag.touch()
+                for body in (None, 'this is not valid Python!', 'pass', 'print("{}")', 'timeout'):
+                    with self.subTest(mode=mode, away=away, body=body):
+                        candidate = self.base / ('missing.py' if body is None else 'engine.py')
+                        if body is not None:
+                            candidate.write_text('pass' if body == 'timeout' else body)
+                        self.path.write_text(json.dumps(self.manifest))
+                        env = {'DOTCORTEX_KIKIN_APPROVAL_ENGINE': str(candidate),
+                               'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+                        before = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
+                        out = io.StringIO()
+                        original_run = wrapper.subprocess.run
+                        def run(argv, **kwargs):
+                            if body == 'timeout' and argv[0] == '/usr/bin/python3':
+                                raise subprocess.TimeoutExpired(argv, 4.5)
+                            return original_run(argv, **kwargs)
+                        if sink.exists():
+                            sink.unlink()
+                        with mock.patch.dict(os.environ, env), mock.patch.object(wrapper.sys, 'stdin', io.StringIO(json.dumps(self.event()))), \
+                                mock.patch.object(wrapper.subprocess, 'run', side_effect=run), contextlib.redirect_stdout(out):
+                            self.assertEqual(wrapper.main(), 0)
+                        expected = 'deny' if away or mode == 'deny' else 'ask'
+                        result = json.loads(out.getvalue())['hookSpecificOutput']['decision'] if out.getvalue().strip() else {'behavior': 'ask'}
+                        self.assertEqual(result['behavior'], expected)
+                        after = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
+                        self.assertEqual(after - before, int(expected == 'deny'))
+                        self.assertEqual(sink.exists(), expected == 'deny')
+                        if expected == 'deny':
+                            self.assertIs(result['interrupt'], False)
+                            self.assertEqual(json.loads(sink.read_text())['away'], away)
+                            record = json.loads(self.queue.read_text().splitlines()[-1])
+                            self.assertEqual(record['request'], self.event())
+                            self.assertEqual(record['away_reason'], 'away_flag' if away else 'present')
+                if away:
+                    self.flag.unlink()
+
+    def test_wrapper_default_ask_and_quiet_hours_fallback(self):
+        import datetime as dt
+        wrapper = self.wrapper_module()
+        self.manifest['gate_inversion'].pop('present_refusal')
+        self.path.write_text(json.dumps(self.manifest))
+        env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        with mock.patch.dict(os.environ, env):
+            self.assertIsNone(wrapper.defer(json.dumps(self.event())))
+        self.assertFalse(self.queue.exists())
+        self.manifest['unattended']['quiet_hours'] = {
+            'enabled': True, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'}
+        status = wrapper._away_status
+        instant = dt.datetime(2026, 1, 2, 14, tzinfo=dt.timezone.utc)
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            self.path.write_text(json.dumps(self.manifest))
+            with mock.patch.dict(os.environ, env), mock.patch.object(wrapper, '_away_status', side_effect=lambda m: status(m, now=instant)):
+                decision = wrapper.defer(json.dumps(self.event()))['hookSpecificOutput']['decision']
+                self.assertEqual(decision['behavior'], 'deny')
+                self.assertIn('morning review', decision['message'])
+                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'quiet_hours')
+
+    def test_wrapper_preserves_native_ask_from_candidate_engine(self):
+        self.manifest['gate_inversion']['present_refusal'] = 'ask'
+        self.path.write_text(json.dumps(self.manifest))
+        env = {**os.environ, 'DOTCORTEX_KIKIN_APPROVAL_ENGINE': str(REPO / 'all/.local/lib/dotcortex/claude_approval_kikin.py'),
+               'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.log),
+               'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        result = subprocess.run(['/usr/bin/python3', str(REPO / 'all/.local/bin/claude-hook-approval-inverted')],
+            input=json.dumps(self.event('rm README.org')), env=env, capture_output=True, text=True, timeout=6, check=True)
+        self.assertEqual(result.stdout, '')
+        self.assertFalse(self.queue.exists())
+
     def test_wrapper_forwards_valid_candidate_decision(self):
         self.path.write_text(json.dumps(self.manifest))
         env = {**os.environ, 'DOTCORTEX_KIKIN_APPROVAL_ENGINE': str(REPO / 'all/.local/lib/dotcortex/claude_approval_kikin.py'),
@@ -683,8 +857,9 @@ if __name__ == '__main__':
 
 * Gate inversion — Admiral ruling, 2026-10-11
 
-This section supersedes the historical positive-safety and daytime ASK contracts
-above. The shared engine defaults to ALLOW for ordinary local requests scoped
+This section supersedes the historical positive-safety contract above; the
+2026-10-11 fix-round-1 presentation switch preserves native daytime approval.
+The shared engine defaults to ALLOW for ordinary local requests scoped
 to configured roots, scratch and worktree roots after the absolute floor. Class
 flags retain deterministic fast paths; a disabled observational class no longer
 blocks that local default. The Decider receives =approval.risky.v2=: concrete
@@ -702,13 +877,17 @@ Existing conservative refusals for opaque interpreter bodies, unresolved shell
 expansions and in-place transforms remain. Exact coordinator grants retain their proof requirements;
 an unproven coordinator candidate cannot use inversion to widen authority.
 
-The hook always emits ALLOW or DENY, including invalid input, manifest failure
-and deterministic timeout. DENY has =interrupt: false=, appends the complete
-private request to the morning queue at all hours, and attempts Telegram via a
-fixed private =notifications.argv= bridge. Daytime notes say =awaiting the
-Admiral's approval on the Desk/Telegram=; away notes retain morning review.
-Neither a queue nor notification failure creates a terminal-only prompt.
-Failure is explicit in the note and hashed ledger. The bridge receives only
+ALLOW is unchanged. Every final refusal, including invalid input, manifest
+failure, deterministic timeout and true floor, follows =present_refusal= while
+present. Default =ask= returns no decision so the native Telegram Allow buttons
+remain usable. Explicit =deny= has =interrupt: false=, appends the complete
+private request to the queue and attempts Telegram via a fixed private
+=notifications.argv= bridge. Away/quiet hours always use DENY/queue/notify.
+Daytime deny notes say =awaiting the Admiral's approval on the Desk/Telegram=;
+away notes retain morning review. Queue or notification failure still denies
+in deny mode; failure is explicit in the note and hashed ledger. ASK records an
+=ask= ledger decision without queuing or issuing a duplicate notification.
+The bridge receives only
 request/input hashes, refusal reason and queue/away status; it must never
 execute a queued operation, and a notification is not an approval grant.
 
@@ -736,10 +915,14 @@ send-message API. The public manifest deliberately has no usable credentials
 or real identities. Missing routing is reported as =unconfigured= and needs
 deployment completion; branch tests do not establish live Telegram delivery.
 
-Strict-parse private manifest/settings, run all six suites with candidate-engine
-overrides and test one daytime and one away floor denial. Each must continue
-Claude, preserve the complete queue record, reach the Admiral's Desk/Telegram,
-and record =notification_status: sent=. Test a harmless local unmatched build
+Keep =gate_inversion.present_refusal: ask= until the Desk approval consumer is
+installed and verified. Strict-parse private manifest/settings and run all six
+suites with candidate-engine overrides. Test a daytime floor refusal with =ask=:
+no decision, native Telegram Allow buttons, no duplicate queue/alert. With
+=deny=, test daytime and away floor refusals: each must continue Claude,
+preserve the complete queue record, reach Desk/Telegram and record
+=notification_status: sent=. Away with =ask= must also deny/queue/notify.
+Test a harmless local unmatched build
 and a deliberately unavailable Decider; both must allow. Test the existing
 outside-root policy. Start a fresh session through the existing seat owner.
 No worker integration, push, remote pull, live settings mutation, installation
@@ -814,10 +997,10 @@ path if the bot has no equivalent bridge. It performs a bounded HTTPS send and
 returns success only on Telegram's explicit =ok: true=. It emits neither token
 URLs nor exception text. The deployment smoke test must establish actual delivery.
 
-* Always-decision installation wrapper
+* Manifest-aware installation wrapper
 
 #+BEGIN_SRC python :tangle all/.local/bin/claude-hook-approval-inverted :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
-"""Always return a permission decision, including missing or broken engine installs."""
+"""Preserve native present approval or defer, even with unavailable engines."""
 import fcntl
 import hashlib
 import json
@@ -827,9 +1010,72 @@ import stat
 import subprocess
 import sys
 import time
+import re
+
+
+def _away_status(manifest, now=None):
+    """Flag OR Melbourne quiet hours. Old manifests retain interactive behavior.
+
+    Published templates are disabled until each seat reviews its private copy.
+    With unattended.enabled true, the default window is 23:00 through 08:00.
+    Invalid enabled configuration conservatively defers rather than hanging.
+    """
+    import datetime
+    from zoneinfo import ZoneInfo
+    section = manifest.get('unattended', {}) if isinstance(manifest, dict) else {}
+    if not isinstance(section, dict):
+        return True, 'invalid_unattended'
+    if section.get('enabled') is False:
+        return False, 'disabled'
+    try:
+        flag = section.get('away_flag', '~/.config/dotcortex/approval-away')
+        if not isinstance(flag, str) or not flag:
+            raise ValueError('away flag')
+        if Path(flag).expanduser().exists():
+            return True, 'away_flag'
+        quiet = section.get('quiet_hours', {})
+        if not isinstance(quiet, dict):
+            raise ValueError('quiet hours')
+        if quiet.get('enabled', bool(section)) is False:
+            return False, 'present'
+        zone = ZoneInfo(quiet.get('timezone', 'Australia/Melbourne'))
+        current = (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(zone)
+        def minutes(raw):
+            if not isinstance(raw, str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', raw):
+                raise ValueError('quiet time')
+            hour, minute = map(int, raw.split(':'))
+            return hour * 60 + minute
+        start, end = minutes(quiet.get('start', '23:00')), minutes(quiet.get('end', '08:00'))
+        if start == end:
+            raise ValueError('empty quiet window')
+        clock = current.hour * 60 + current.minute
+        away = start <= clock < end if start < end else clock >= start or clock < end
+        return away, 'quiet_hours' if away else 'present'
+    except (ValueError, TypeError, OSError, KeyError):
+        return True, 'invalid_unattended'
+
+
+def _present_refusal(manifest):
+    """Native approval remains available until the Desk consumer is deployed.
+
+    Only an explicit deny opts into queued daytime refusals. Missing or invalid
+    configuration retains ask; this never grants a refused operation.
+    """
+    section = manifest.get('gate_inversion', {}) if isinstance(manifest, dict) else {}
+    return 'deny' if isinstance(section, dict) and section.get('present_refusal') == 'deny' else 'ask'
 
 
 def defer(raw):
+    # Read policy before queue mutation; this private manifest has no credentials.
+    try:
+        manifest_path = os.environ.get('SO_APPROVAL_KIKIN_MANIFEST')
+        path = Path(manifest_path) if manifest_path else Path(__file__).resolve().parents[2] / '.config/dotcortex/claude-approval-canary.kikin.v1.json'
+        manifest = json.loads(path.read_text())
+    except (OSError, ValueError, TypeError):
+        manifest = {}
+    away, away_reason = _away_status(manifest)
+    if not away and _present_refusal(manifest) == 'ask':
+        return None
     try:
         event = json.loads(raw)
     except ValueError:
@@ -859,7 +1105,7 @@ def defer(raw):
         record = {'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
                   'tool': payload.get('tool_name'), 'command': tool_input.get('command'),
                   'cwd': payload.get('cwd'), 'session': payload.get('session_id'),
-                  'reason': 'engine_unavailable', 'away_reason': 'unknown', 'request': event}
+                  'reason': 'engine_unavailable', 'away_reason': away_reason, 'request': event}
         with os.fdopen(fd, 'a', encoding='utf-8') as file:
             fd = None
             file.write(json.dumps(record, ensure_ascii=True) + '\n')
@@ -871,22 +1117,19 @@ def defer(raw):
             os.close(fd)
     notification = False
     try:
-        # The private policy file contains routing, never a token. Invalid
-        # routing does not alter the refusal or create a terminal-only prompt.
-        manifest_path = os.environ.get('SO_APPROVAL_KIKIN_MANIFEST')
-        manifest = json.loads(Path(manifest_path).read_text()) if manifest_path else {}
+        # Routing failure does not alter a queued refusal.
         argv = manifest.get('notifications', {}).get('argv')
         if (isinstance(argv, list) and argv and argv[0].startswith('/')
                 and all(isinstance(arg, str) and arg and 'YOUR_' not in arg for arg in argv)):
             message = {'schema': 'dotcortex.approval.notification.v1',
                 'request_sha': hashlib.sha256(json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()[:16],
-                'reason': 'engine_unavailable', 'away': False, 'queued': queued}
+                'reason': 'engine_unavailable', 'away': away, 'queued': queued}
             result = subprocess.run(argv, input=json.dumps(message), text=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.75, check=False)
             notification = result.returncode == 0
     except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
         pass
-    note = "deferred: engine unavailable; awaiting the Admiral's approval on the Desk/Telegram"
+    note = "deferred: engine unavailable; " + ("queued for the Admiral's morning review" if away else "awaiting the Admiral's approval on the Desk/Telegram")
     if not queued:
         note += '; morning queue unavailable'
     if not notification:
@@ -918,7 +1161,8 @@ def main():
         pass
     if output is None:
         output = defer(raw)
-    sys.stdout.write(json.dumps(output, ensure_ascii=True, separators=(',', ':')) + '\n')
+    if output is not None:
+        sys.stdout.write(json.dumps(output, ensure_ascii=True, separators=(',', ':')) + '\n')
     return 0
 
 
@@ -932,8 +1176,11 @@ replacing the historical wrapper in the private PermissionRequest command. Keep
 at the reviewed private manifest and versioned shared engine. Set the hook's
 outer timeout to seven seconds. This wrapper bounds the engine at 4.5 seconds
 and validates its decision JSON. Missing, broken, timed-out or old silent engines
-receive a private queued DENY with =interrupt: false= and the same bounded
-Telegram notification attempt. The historical wrappers/p3 reference remain
+follow the same switch: no decision while present with default =ask=;
+private queued DENY with =interrupt: false= and bounded Telegram notification
+while present with =deny= or always while away/quiet. Queue records and
+notification payloads carry the observed away status and reason.
+The historical wrappers/p3 reference remain
 untouched; installing only the new engine behind an old wrapper does not provide
 this missing-engine guarantee. A framework that does not fire PermissionRequest
 is outside this hook's control; verify the target session's sandbox/auto-mode
@@ -1091,7 +1338,8 @@ integration at deployment.
     ]
   },
   "gate_inversion": {
-    "enabled": true
+    "enabled": true,
+    "present_refusal": "ask"
   },
   "notifications": {
     "argv": [

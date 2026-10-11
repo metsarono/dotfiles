@@ -1377,6 +1377,16 @@ def _away_status(manifest, now=None):
         return True, 'invalid_unattended'
 
 
+def _present_refusal(manifest):
+    """Native approval remains available until the Desk consumer is deployed.
+
+    Only an explicit deny opts into queued daytime refusals. Missing or invalid
+    configuration retains ask; this never grants a refused operation.
+    """
+    section = manifest.get('gate_inversion', {}) if isinstance(manifest, dict) else {}
+    return 'deny' if isinstance(section, dict) and section.get('present_refusal') == 'deny' else 'ask'
+
+
 def _morning_queue_path():
     return Path(os.environ.get('SO_APPROVAL_MORNING_QUEUE') or Path.home() / '.local/state/dotcortex/approval-morning-queue.jsonl')
 
@@ -1523,6 +1533,10 @@ def main():
             signal.signal(signal.SIGALRM, previous)
     if allow:
         sys.stdout.write(json.dumps(ALLOW_OUTPUT, separators=(',', ':')) + '\n')
+    elif not away and _present_refusal(manifest) == 'ask':
+        # No hook decision: Claude Code retains its native Telegram Allow flow.
+        # The floor/proof still refused; only the human may approve this request.
+        _log_decision.extras.update(decision='ask', away_reason=away_reason, morning_queued=False, notification_status='not_requested')
     else:
         queued = _queue_morning(event, reason, away_reason)
         notification = _notify_admiral(event, reason, away, queued, manifest)

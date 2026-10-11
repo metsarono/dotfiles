@@ -71,7 +71,7 @@ class HoneyReadsTests(unittest.TestCase):
 
     def manifest(self, *, decider=False):
         data = json.loads(MANIFEST_SRC.read_text(encoding="utf-8"))
-        data["gate_inversion"] = {"enabled": False}
+        data["gate_inversion"] = {"enabled": False, "present_refusal": "deny"}
         data["roots"] = [str(self.root)]
         data["scratch_roots"] = [str(self.root)]
         data["classes"] = [item for item in data["classes"]]

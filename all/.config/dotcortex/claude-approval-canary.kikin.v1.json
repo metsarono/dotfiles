@@ -153,7 +153,8 @@
     ]
   },
   "gate_inversion": {
-    "enabled": true
+    "enabled": true,
+    "present_refusal": "ask"
   },
   "notifications": {
     "argv": [

@@ -62,7 +62,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def manifest(self, *enabled):
         data = json.loads(json.dumps(self.base))
-        data["gate_inversion"] = {"enabled": False}
+        data["gate_inversion"] = {"enabled": False, "present_refusal": "deny"}
         data["roots"] = [str(self.root)]
         data["scratch_roots"] = [str(self.scratch)]
         for item in data["classes"]:
@@ -683,7 +683,7 @@ class HoneyReadsTests(unittest.TestCase):
 
     def manifest(self, *, decider=False):
         data = json.loads(MANIFEST_SRC.read_text(encoding="utf-8"))
-        data["gate_inversion"] = {"enabled": False}
+        data["gate_inversion"] = {"enabled": False, "present_refusal": "deny"}
         data["roots"] = [str(self.root)]
         data["scratch_roots"] = [str(self.root)]
         data["classes"] = [item for item in data["classes"]]
@@ -937,7 +937,7 @@ def load_engine():
 
 def bunta_manifest(engine, root):
     data = json.loads(MANIFEST_SRC.read_text())
-    data["gate_inversion"] = {"enabled": False}
+    data["gate_inversion"] = {"enabled": False, "present_refusal": "deny"}
     data["roots"] = [str(root), "/var/tmp"]
     data["scratch_roots"] = ["/var/tmp"]
     data["classes"] = [item for item in data["classes"]]
@@ -1257,7 +1257,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.git('commit', '-m', 'test: fixture', '--', 'README.org')
         self.git('branch', 'topic')
         self.manifest = json.loads((REPO / 'all/.config/dotcortex/claude-approval-canary.kikin.v1.json').read_text())
-        self.manifest['gate_inversion'] = {'enabled': False}
+        self.manifest['gate_inversion'] = {'enabled': False, 'present_refusal': 'deny'}
         self.manifest['roots'] = [str(self.repo), str(self.wt)]
         self.manifest['scratch_roots'] = [str(self.scratch)]
         self.manifest['decider']['enabled'] = False

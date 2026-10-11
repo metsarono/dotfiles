@@ -56,7 +56,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def manifest(self, *enabled):
         data = json.loads(json.dumps(self.base))
-        data["gate_inversion"] = {"enabled": False}
+        data["gate_inversion"] = {"enabled": False, "present_refusal": "deny"}
         data["roots"] = [str(self.root)]
         data["scratch_roots"] = [str(self.scratch)]
         for item in data["classes"]:

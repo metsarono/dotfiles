@@ -37,7 +37,7 @@ class GateInversionTests(unittest.TestCase):
         self.manifest['coordinator_ops']['repo_roots'] = [str(self.root)]
         self.manifest['coordinator_ops']['worktree_roots'] = [str(self.worktree)]
         self.manifest['coordinator_ops']['scratch_roots'] = [str(self.root)]
-        self.manifest['gate_inversion'] = {'enabled': True}
+        self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
         self.manifest['notifications'] = {'argv': ['YOUR_SEAT_TELEGRAM_NOTIFIER']}
         self.manifest['decider'].update(enabled=False)
         self.manifest['unattended'] = {'enabled': True, 'away_flag': str(self.flag), 'quiet_hours': {'enabled': False}}
@@ -56,7 +56,8 @@ class GateInversionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(event))), \
                 contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_post', return_value=(answers, status), side_effect=side_effect):
             self.assertEqual(e.main(), 0)
-        self.assertTrue(out.getvalue().strip(), 'terminal-only fallback')
+        if not out.getvalue().strip():
+            return {'behavior': 'ask'}
         decision = json.loads(out.getvalue())['hookSpecificOutput']['decision']
         self.assertIn(decision['behavior'], ('allow', 'deny'))
         if decision['behavior'] == 'deny':
@@ -298,6 +299,168 @@ class GateInversionTests(unittest.TestCase):
         records = [json.loads(line) for line in self.queue.read_text().splitlines()]
         self.assertEqual(len(records), 4)
         self.assertTrue(all(record['request'] == self.event() for record in records))
+
+    def test_present_refusal_switch_for_floor_veto_outside_and_coordinator(self):
+        self.enable_decider()
+        outside = self.base / 'outside'
+        outside.mkdir()
+        cases = [(self.event('rm README.org'), 'true_floor'),
+                 (self.event('make test'), 'decider_risky'),
+                 (self.event('make test', cwd=str(outside)), 'no_match_decider'),
+                 (self.event('git commit -m x -- README.org'), 'coordinator_refused')]
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            for away in (False, True):
+                if away:
+                    self.flag.touch()
+                for event, reason in cases:
+                    with self.subTest(mode=mode, away=away, reason=reason), \
+                            mock.patch.object(e, '_notify_admiral', return_value='sent') as notify:
+                        before = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
+                        expected = 'deny' if away or mode == 'deny' else 'ask'
+                        result = self.run_hook(event, answers={'approval.risky.v2': {'noul': 0.99}})
+                        self.assertEqual(result['behavior'], expected)
+                        ledger = json.loads(self.log.read_text().splitlines()[-1])
+                        self.assertEqual(ledger['decision'], expected)
+                        self.assertEqual(ledger['reason'], reason)
+                        after = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
+                        self.assertEqual(after - before, int(expected == 'deny'))
+                        if expected == 'deny':
+                            notify.assert_called_once()
+                            self.assertEqual(notify.call_args.args[2], away)
+                            self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['request'], event)
+                        else:
+                            notify.assert_not_called()
+                if away:
+                    self.flag.unlink()
+
+    def test_present_refusal_defaults_to_ask_without_bypassing_floor(self):
+        for section in (None, {'enabled': True}, {'enabled': True, 'present_refusal': 'invalid'}):
+            with self.subTest(section=section), mock.patch.object(e, '_decider_decide') as decider:
+                if section is None:
+                    self.manifest.pop('gate_inversion', None)
+                else:
+                    self.manifest['gate_inversion'] = section
+                self.assertEqual(self.run_hook(self.event('rm README.org'))['behavior'], 'ask')
+                self.assertEqual(json.loads(self.log.read_text().splitlines()[-1])['reason'], 'true_floor')
+                decider.assert_not_called()
+                self.assertEqual(self.run_hook(self.event('make test'))['behavior'], 'allow')
+        self.assertFalse(self.queue.exists())
+
+    def test_present_refusal_errors_and_deadlines_follow_switch(self):
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            for away in (False, True):
+                if away:
+                    self.flag.touch()
+                for error in (TimeoutError('fixture'), ValueError('fixture')):
+                    with self.subTest(mode=mode, away=away, error=type(error).__name__), \
+                            mock.patch.object(e, 'classify', side_effect=error):
+                        self.assertEqual(self.run_hook(self.event())['behavior'], 'deny' if away else mode)
+                if away:
+                    self.flag.unlink()
+
+    def test_quiet_hours_override_both_present_refusal_values(self):
+        import datetime as dt
+        self.manifest['unattended']['quiet_hours'] = {
+            'enabled': True, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'}
+        status = e._away_status
+        instant = dt.datetime(2026, 1, 2, 14, tzinfo=dt.timezone.utc)
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            with mock.patch.object(e, '_away_status', side_effect=lambda m: status(m, now=instant)), \
+                    mock.patch.object(e, '_notify_admiral', return_value='sent') as notify:
+                self.assertEqual(self.run_hook(self.event('rm README.org'))['behavior'], 'deny')
+                self.assertTrue(notify.call_args.args[2])
+                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'quiet_hours')
+
+    def wrapper_module(self):
+        from importlib.machinery import SourceFileLoader
+        spec = importlib.util.spec_from_loader('fix1_wrapper', SourceFileLoader(
+            'fix1_wrapper', str(REPO / 'all/.local/bin/claude-hook-approval-inverted')))
+        wrapper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper)
+        return wrapper
+
+    def test_wrapper_refusal_switch_missing_broken_silent_invalid_and_timeout(self):
+        wrapper = self.wrapper_module()
+        sink = self.base / 'fallback-notification.json'
+        helper = self.base / 'fallback-notifier'
+        helper.write_text('#!/usr/bin/python3\nimport pathlib,sys\npathlib.Path(sys.argv[1]).write_text(sys.stdin.read())\n')
+        helper.chmod(0o700)
+        self.manifest['notifications'] = {'argv': [str(helper), str(sink)]}
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            for away in (False, True):
+                if away:
+                    self.flag.touch()
+                for body in (None, 'this is not valid Python!', 'pass', 'print("{}")', 'timeout'):
+                    with self.subTest(mode=mode, away=away, body=body):
+                        candidate = self.base / ('missing.py' if body is None else 'engine.py')
+                        if body is not None:
+                            candidate.write_text('pass' if body == 'timeout' else body)
+                        self.path.write_text(json.dumps(self.manifest))
+                        env = {'DOTCORTEX_KIKIN_APPROVAL_ENGINE': str(candidate),
+                               'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+                        before = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
+                        out = io.StringIO()
+                        original_run = wrapper.subprocess.run
+                        def run(argv, **kwargs):
+                            if body == 'timeout' and argv[0] == '/usr/bin/python3':
+                                raise subprocess.TimeoutExpired(argv, 4.5)
+                            return original_run(argv, **kwargs)
+                        if sink.exists():
+                            sink.unlink()
+                        with mock.patch.dict(os.environ, env), mock.patch.object(wrapper.sys, 'stdin', io.StringIO(json.dumps(self.event()))), \
+                                mock.patch.object(wrapper.subprocess, 'run', side_effect=run), contextlib.redirect_stdout(out):
+                            self.assertEqual(wrapper.main(), 0)
+                        expected = 'deny' if away or mode == 'deny' else 'ask'
+                        result = json.loads(out.getvalue())['hookSpecificOutput']['decision'] if out.getvalue().strip() else {'behavior': 'ask'}
+                        self.assertEqual(result['behavior'], expected)
+                        after = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
+                        self.assertEqual(after - before, int(expected == 'deny'))
+                        self.assertEqual(sink.exists(), expected == 'deny')
+                        if expected == 'deny':
+                            self.assertIs(result['interrupt'], False)
+                            self.assertEqual(json.loads(sink.read_text())['away'], away)
+                            record = json.loads(self.queue.read_text().splitlines()[-1])
+                            self.assertEqual(record['request'], self.event())
+                            self.assertEqual(record['away_reason'], 'away_flag' if away else 'present')
+                if away:
+                    self.flag.unlink()
+
+    def test_wrapper_default_ask_and_quiet_hours_fallback(self):
+        import datetime as dt
+        wrapper = self.wrapper_module()
+        self.manifest['gate_inversion'].pop('present_refusal')
+        self.path.write_text(json.dumps(self.manifest))
+        env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        with mock.patch.dict(os.environ, env):
+            self.assertIsNone(wrapper.defer(json.dumps(self.event())))
+        self.assertFalse(self.queue.exists())
+        self.manifest['unattended']['quiet_hours'] = {
+            'enabled': True, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'}
+        status = wrapper._away_status
+        instant = dt.datetime(2026, 1, 2, 14, tzinfo=dt.timezone.utc)
+        for mode in ('ask', 'deny'):
+            self.manifest['gate_inversion']['present_refusal'] = mode
+            self.path.write_text(json.dumps(self.manifest))
+            with mock.patch.dict(os.environ, env), mock.patch.object(wrapper, '_away_status', side_effect=lambda m: status(m, now=instant)):
+                decision = wrapper.defer(json.dumps(self.event()))['hookSpecificOutput']['decision']
+                self.assertEqual(decision['behavior'], 'deny')
+                self.assertIn('morning review', decision['message'])
+                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'quiet_hours')
+
+    def test_wrapper_preserves_native_ask_from_candidate_engine(self):
+        self.manifest['gate_inversion']['present_refusal'] = 'ask'
+        self.path.write_text(json.dumps(self.manifest))
+        env = {**os.environ, 'DOTCORTEX_KIKIN_APPROVAL_ENGINE': str(REPO / 'all/.local/lib/dotcortex/claude_approval_kikin.py'),
+               'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.log),
+               'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        result = subprocess.run(['/usr/bin/python3', str(REPO / 'all/.local/bin/claude-hook-approval-inverted')],
+            input=json.dumps(self.event('rm README.org')), env=env, capture_output=True, text=True, timeout=6, check=True)
+        self.assertEqual(result.stdout, '')
+        self.assertFalse(self.queue.exists())
 
     def test_wrapper_forwards_valid_candidate_decision(self):
         self.path.write_text(json.dumps(self.manifest))

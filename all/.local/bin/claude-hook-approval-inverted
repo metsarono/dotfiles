@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Always return a permission decision, including missing or broken engine installs."""
+"""Preserve native present approval or defer, even with unavailable engines."""
 import fcntl
 import hashlib
 import json
@@ -9,9 +9,72 @@ import stat
 import subprocess
 import sys
 import time
+import re
+
+
+def _away_status(manifest, now=None):
+    """Flag OR Melbourne quiet hours. Old manifests retain interactive behavior.
+
+    Published templates are disabled until each seat reviews its private copy.
+    With unattended.enabled true, the default window is 23:00 through 08:00.
+    Invalid enabled configuration conservatively defers rather than hanging.
+    """
+    import datetime
+    from zoneinfo import ZoneInfo
+    section = manifest.get('unattended', {}) if isinstance(manifest, dict) else {}
+    if not isinstance(section, dict):
+        return True, 'invalid_unattended'
+    if section.get('enabled') is False:
+        return False, 'disabled'
+    try:
+        flag = section.get('away_flag', '~/.config/dotcortex/approval-away')
+        if not isinstance(flag, str) or not flag:
+            raise ValueError('away flag')
+        if Path(flag).expanduser().exists():
+            return True, 'away_flag'
+        quiet = section.get('quiet_hours', {})
+        if not isinstance(quiet, dict):
+            raise ValueError('quiet hours')
+        if quiet.get('enabled', bool(section)) is False:
+            return False, 'present'
+        zone = ZoneInfo(quiet.get('timezone', 'Australia/Melbourne'))
+        current = (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(zone)
+        def minutes(raw):
+            if not isinstance(raw, str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', raw):
+                raise ValueError('quiet time')
+            hour, minute = map(int, raw.split(':'))
+            return hour * 60 + minute
+        start, end = minutes(quiet.get('start', '23:00')), minutes(quiet.get('end', '08:00'))
+        if start == end:
+            raise ValueError('empty quiet window')
+        clock = current.hour * 60 + current.minute
+        away = start <= clock < end if start < end else clock >= start or clock < end
+        return away, 'quiet_hours' if away else 'present'
+    except (ValueError, TypeError, OSError, KeyError):
+        return True, 'invalid_unattended'
+
+
+def _present_refusal(manifest):
+    """Native approval remains available until the Desk consumer is deployed.
+
+    Only an explicit deny opts into queued daytime refusals. Missing or invalid
+    configuration retains ask; this never grants a refused operation.
+    """
+    section = manifest.get('gate_inversion', {}) if isinstance(manifest, dict) else {}
+    return 'deny' if isinstance(section, dict) and section.get('present_refusal') == 'deny' else 'ask'
 
 
 def defer(raw):
+    # Read policy before queue mutation; this private manifest has no credentials.
+    try:
+        manifest_path = os.environ.get('SO_APPROVAL_KIKIN_MANIFEST')
+        path = Path(manifest_path) if manifest_path else Path(__file__).resolve().parents[2] / '.config/dotcortex/claude-approval-canary.kikin.v1.json'
+        manifest = json.loads(path.read_text())
+    except (OSError, ValueError, TypeError):
+        manifest = {}
+    away, away_reason = _away_status(manifest)
+    if not away and _present_refusal(manifest) == 'ask':
+        return None
     try:
         event = json.loads(raw)
     except ValueError:
@@ -41,7 +104,7 @@ def defer(raw):
         record = {'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
                   'tool': payload.get('tool_name'), 'command': tool_input.get('command'),
                   'cwd': payload.get('cwd'), 'session': payload.get('session_id'),
-                  'reason': 'engine_unavailable', 'away_reason': 'unknown', 'request': event}
+                  'reason': 'engine_unavailable', 'away_reason': away_reason, 'request': event}
         with os.fdopen(fd, 'a', encoding='utf-8') as file:
             fd = None
             file.write(json.dumps(record, ensure_ascii=True) + '\n')
@@ -53,22 +116,19 @@ def defer(raw):
             os.close(fd)
     notification = False
     try:
-        # The private policy file contains routing, never a token. Invalid
-        # routing does not alter the refusal or create a terminal-only prompt.
-        manifest_path = os.environ.get('SO_APPROVAL_KIKIN_MANIFEST')
-        manifest = json.loads(Path(manifest_path).read_text()) if manifest_path else {}
+        # Routing failure does not alter a queued refusal.
         argv = manifest.get('notifications', {}).get('argv')
         if (isinstance(argv, list) and argv and argv[0].startswith('/')
                 and all(isinstance(arg, str) and arg and 'YOUR_' not in arg for arg in argv)):
             message = {'schema': 'dotcortex.approval.notification.v1',
                 'request_sha': hashlib.sha256(json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()[:16],
-                'reason': 'engine_unavailable', 'away': False, 'queued': queued}
+                'reason': 'engine_unavailable', 'away': away, 'queued': queued}
             result = subprocess.run(argv, input=json.dumps(message), text=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.75, check=False)
             notification = result.returncode == 0
     except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
         pass
-    note = "deferred: engine unavailable; awaiting the Admiral's approval on the Desk/Telegram"
+    note = "deferred: engine unavailable; " + ("queued for the Admiral's morning review" if away else "awaiting the Admiral's approval on the Desk/Telegram")
     if not queued:
         note += '; morning queue unavailable'
     if not notification:
@@ -100,7 +160,8 @@ def main():
         pass
     if output is None:
         output = defer(raw)
-    sys.stdout.write(json.dumps(output, ensure_ascii=True, separators=(',', ':')) + '\n')
+    if output is not None:
+        sys.stdout.write(json.dumps(output, ensure_ascii=True, separators=(',', ':')) + '\n')
     return 0
 
 

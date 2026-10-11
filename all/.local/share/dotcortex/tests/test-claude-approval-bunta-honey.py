@@ -31,7 +31,7 @@ def load_engine():
 
 def bunta_manifest(engine, root):
     data = json.loads(MANIFEST_SRC.read_text())
-    data["gate_inversion"] = {"enabled": False}
+    data["gate_inversion"] = {"enabled": False, "present_refusal": "deny"}
     data["roots"] = [str(root), "/var/tmp"]
     data["scratch_roots"] = ["/var/tmp"]
     data["classes"] = [item for item in data["classes"]]
