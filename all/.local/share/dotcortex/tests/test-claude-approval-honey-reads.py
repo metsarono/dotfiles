@@ -58,10 +58,10 @@ class HoneyReadsTests(unittest.TestCase):
             def log_message(self, *_args):
                 pass
 
-        cls.decider = http.server.HTTPServer(("127.0.0.1", 0), AlwaysAllow)
+        cls.decider = http.server.HTTPServer(("localhost", 0), AlwaysAllow)
         cls.decider_thread = threading.Thread(target=cls.decider.serve_forever, daemon=True)
         cls.decider_thread.start()
-        cls.decider_url = f"http://127.0.0.1:{cls.decider.server_address[1]}/decide"
+        cls.decider_url = f"http://localhost:{cls.decider.server_address[1]}/decide"
 
     @classmethod
     def tearDownClass(cls):
@@ -77,17 +77,17 @@ class HoneyReadsTests(unittest.TestCase):
         ssh = next(item for item in data["classes"] if item["name"] == "ssh_readonly")
         ssh["enabled"] = True
         ssh["readonly_hosts"] = [{
-            "host": "honey",
-            "remote_home": "/home/gille",
+            "host": "YOUR_HONEY_HOST",
+            "remote_home": "/home/YOUR_HONEY_USER",
             "remote_path_roots": [
-                "/home/gille/DotCortex",
-                "/home/gille/HelmCortex",
-                "/home/agent-claude",
+                "/home/YOUR_HONEY_USER/DotCortex",
+                "/home/YOUR_HONEY_USER/HelmCortex",
+                "/home/YOUR_AGENT_CLAUDE",
                 "/var/tmp",
                 "/etc/init.d",
                 "/var/log",
             ],
-            "allowed_sudo_targets": ["agent-claude"],
+            "allowed_sudo_targets": ["YOUR_AGENT_CLAUDE"],
         }]
         if decider:
             data["manifest_version"] = "claude-approval-canary.kikin.v2"
@@ -117,13 +117,13 @@ class HoneyReadsTests(unittest.TestCase):
 
     def test_every_real_honey_read_shape_allows(self):
         commands = [
-            "ssh honey 'ls -ld /home/gille/DotCortex'",
-            "ssh honey 'git -C /home/gille/DotCortex status --short'",
-            "ssh honey 'ps -eo pid,lstart,user,args | grep -i opus'",
-            "ssh honey 'sudo -n -u agent-claude tmux -S /tmp/tmux-2002/default capture-pane -p -t honey-opus:0 | tail -20'",
-            "ssh honey 'sudo -n -u agent-claude tmux -S /tmp/tmux-2002/default list-windows -t honey-opus'",
-            "ssh honey 'sudo -n -u agent-claude cat /home/agent-claude/.local/state/dotcortex/claude-approval-kikin.jsonl | tail -5'",
-            "ssh honey 'sudo -n -u agent-claude ls -l /home/agent-claude/.config/dotcortex/'",
+            "ssh YOUR_HONEY_HOST 'ls -ld /home/YOUR_HONEY_USER/DotCortex'",
+            "ssh YOUR_HONEY_HOST 'git -C /home/YOUR_HONEY_USER/DotCortex status --short'",
+            "ssh YOUR_HONEY_HOST 'ps -eo pid,lstart,user,args | grep -i opus'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE tmux -S /tmp/tmux-2002/default capture-pane -p -t honey-opus:0 | tail -20'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE tmux -S /tmp/tmux-2002/default list-windows -t honey-opus'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE cat /home/YOUR_AGENT_CLAUDE/.local/state/dotcortex/claude-approval-kikin.jsonl | tail -5'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE ls -l /home/YOUR_AGENT_CLAUDE/.config/dotcortex/'",
         ]
         for command in commands:
             with self.subTest(command=command):
@@ -131,25 +131,25 @@ class HoneyReadsTests(unittest.TestCase):
 
     def test_sudo_and_secret_floor_corpus_asks_even_with_always_allow_decider(self):
         commands = [
-            "ssh honey 'cat /home/gille/Secret Vault/keepass.kdbx'",
-            "ssh honey \"cat '/home/gille/Secret Vault/keepass.kdbx'\"",
-            "ssh honey 'cat /home/gille/DotCortex/../Secret Vault/keepass.kdbx'",
-            "ssh honey 'cat /home/gille/SECRET VAULT/keepass.kdbx'",
-            "ssh honey 'cat /home/gille/Secret\\ Vault/keepass.kdbx'",
-            "ssh honey 'cat /home/agent-claude/.claude/.credentials.json'",
-            "ssh honey 'cat /home/agent-claude/.config/dotcortex/auth.json'",
-            "ssh honey 'cat ~/.ssh/config'",
-            "ssh honey 'cat /home/gille/HelmCortex/NEXUS/keys/private'",
-            "ssh honey 'cat /var/log/approval.token'",
-            "ssh honey 'cat /var/tmp/keepass.kdbx'",
-            "ssh honey 'sudo -n -u root cat /home/gille/DotCortex/README.md'",
-            "ssh honey 'sudo -u agent-claude cat /home/agent-claude/.config/dotcortex/x'",
-            "ssh honey 'sudo -n -u agent-claude bash -c id'",
-            "ssh honey 'sudo -n -u agent-claude sh -c id'",
-            "ssh honey 'sudo -n -u agent-claude python -c id'",
-            "ssh honey 'sudo -n -u agent-claude tmux send-keys -t honey-opus:0 x'",
-            "ssh honey 'cat /home/gille/DotCortex/README.md > /var/tmp/out'",
-            "ssh honey 'rm /var/tmp/out'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST \"cat '/home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx'\"",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/DotCortex/../Secret Vault/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/SECRET VAULT/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/Secret\\ Vault/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_AGENT_CLAUDE/.claude/.credentials.json'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_AGENT_CLAUDE/.config/dotcortex/auth.json'",
+            "ssh YOUR_HONEY_HOST 'cat ~/.ssh/config'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/HelmCortex/NEXUS/keys/private'",
+            "ssh YOUR_HONEY_HOST 'cat /var/log/approval.token'",
+            "ssh YOUR_HONEY_HOST 'cat /var/tmp/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u root cat /home/YOUR_HONEY_USER/DotCortex/README.md'",
+            "ssh YOUR_HONEY_HOST 'sudo -u YOUR_AGENT_CLAUDE cat /home/YOUR_AGENT_CLAUDE/.config/dotcortex/x'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE bash -c id'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE sh -c id'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE python -c id'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE tmux send-keys -t honey-opus:0 x'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/DotCortex/README.md > /var/tmp/out'",
+            "ssh YOUR_HONEY_HOST 'rm /var/tmp/out'",
         ]
         manifest = self.manifest(decider=True)
         manifest_path = Path(self.temp.name) / "honey-reads-manifest.json"
@@ -189,23 +189,85 @@ class HoneyReadsTests(unittest.TestCase):
         ssh = data["entries"]["ssh_readonly"]
         ssh.pop("readonly_hosts")
         ssh.update({
-            "readonly_host": "honey",
-            "remote_home": "/home/gille",
-            "remote_path_roots": ["/home/gille/DotCortex"],
+            "readonly_host": "YOUR_HONEY_HOST",
+            "remote_home": "/home/YOUR_HONEY_USER",
+            "remote_path_roots": ["/home/YOUR_HONEY_USER/DotCortex"],
         })
-        self.assertEqual(self.engine._readonly_host_config(ssh, "honey")["remote_home"], "/home/gille")
+        self.assertEqual(self.engine._readonly_host_config(ssh, "YOUR_HONEY_HOST")["remote_home"], "/home/YOUR_HONEY_USER")
 
     def test_readonly_host_list_selects_each_host(self):
         data = self.manifest()
         ssh = data["entries"]["ssh_readonly"]
         ssh["readonly_hosts"].append({
             "host": "other",
-            "remote_home": "/home/other",
-            "remote_path_roots": ["/home/other/DotCortex"],
+            "remote_home": "/home/YOUR_OTHER_USER",
+            "remote_path_roots": ["/home/YOUR_OTHER_USER/DotCortex"],
             "allowed_sudo_targets": [],
         })
-        command = "ssh other 'ls -ld /home/other/DotCortex'"
+        command = "ssh other 'ls -ld /home/YOUR_OTHER_USER/DotCortex'"
         self.assertEqual(self.engine.classify(event(command, self.root), data), (True, "ssh_readonly"))
+
+    def test_approval_hook_sources_have_only_public_home_placeholders(self):
+        import re
+        sources = [REPO / "agents-approval.org", REPO / "agents-hooks.org"]
+        targets = []
+        for source in sources:
+            raw = source.read_text(encoding="utf-8")
+            targets.extend(REPO / target for target in re.findall(
+                r":tangle (all/[^\s]+)", raw
+            ) if "approval" in target or "claude-hook" in target)
+        # Check canonical prose, fixtures, engines, manifests and wrappers.
+        for path in sources + sorted(set(targets)):
+            with self.subTest(path=path.relative_to(REPO)):
+                raw = path.read_text(encoding="utf-8")
+                self.assertIsNone(re.search(
+                    r"/+home/(?!YOUR_)[A-Za-z0-9_-]+", raw
+                ), str(path.relative_to(REPO)))
+
+    def test_unreviewed_home_is_floor_even_with_always_allow_decider(self):
+        # Build a concrete synthetic username from the public placeholder.
+        home = "/home/" + "YOUR_HONEY_USER".replace("YOUR_", "fixture_").lower()
+        manifest = self.manifest(decider=True)
+        for tool, tool_input in (
+            ("Bash", {"command": f"cat {home}/notes.md"}),
+            ("Bash", {"command": f"ls {home}/notes.md"}),
+            ("Bash", {"command": f"cat /{home}/notes.md"}),
+            ("Read", {"file_path": home + "/notes.md"}),
+        ):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                payload = event("true", self.root)
+                payload.update(tool_name=tool, tool_input=tool_input)
+                self.assertEqual(self.engine.classify(payload, manifest),
+                                 (False, "true_floor"))
+        # Exercise the actual hook, with an ALWAYS-ALLOW Decider configured.
+        serialized = {key: value for key, value in manifest.items() if key != "entries"}
+        path = Path(self.temp.name) / "outside-home-manifest.json"
+        path.write_text(json.dumps(serialized), encoding="utf-8")
+        log = Path(self.temp.name) / "outside-home.jsonl"
+        completed = subprocess.run([str(HOOK)], input=json.dumps(event(f"cat {home}/notes.md", self.root)),
+            text=True, capture_output=True, timeout=5, check=False,
+            env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(path),
+                 "SO_APPROVAL_KIKIN_LOG": str(log), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(completed.stdout.strip())
+        record = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(record["reason"], "true_floor")
+        self.assertNotIn("decider_status", record)
+
+    def test_home_boundary_is_independent_of_username_in_both_engines(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("home_boundary_p3",
+            REPO / "all/.local/lib/dotcortex/claude_approval_p3.py")
+        p3 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(p3)
+        home = "/home/" + "YOUR_USER".replace("YOUR_", "fixture_").lower()
+        root = home + "/DotCortex"
+        for engine in (self.engine, p3):
+            with self.subTest(engine=engine.__name__):
+                self.assertFalse(engine._unreviewed_home_path(root + "/README.org", [root]))
+                for path in (home, "/" + home, root + "-other/README.org",
+                             root + "/../notes.md", home + "/other/README.org"):
+                    self.assertTrue(engine._unreviewed_home_path(path, [root]), path)
 
     def test_manifest_public_placeholders(self):
         raw = MANIFEST_SRC.read_text(encoding="utf-8")
@@ -213,7 +275,6 @@ class HoneyReadsTests(unittest.TestCase):
         self.assertIn("YOUR_HONEY_USER", raw)
         self.assertIn("YOUR_AGENT_CLAUDE", raw)
         self.assertNotIn('"honey"', raw)
-        self.assertNotIn("/home/gille", raw)
 
 
 if __name__ == "__main__":

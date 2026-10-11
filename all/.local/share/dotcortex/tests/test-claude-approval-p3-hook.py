@@ -32,7 +32,7 @@ def event(tool_name, tool_input, cwd=None):
 
 
 def run_hook(payload, manifest=None, cwd=None):
-    env = os.environ.copy()
+    env = {**os.environ, "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)}
     if manifest is not None:
         env["SO_APPROVAL_P3_MANIFEST"] = str(manifest)
     completed = subprocess.run(
@@ -99,15 +99,15 @@ class ApprovalHookHarness(unittest.TestCase):
         data["centre_roots"] = [str(root)]
         data["dotcortex_roots"] = [str(root)]
         data["readonly_host"] = "YOUR_READONLY_HOST"
-        data["remote_home"] = "/home/metsatron"
+        data["remote_home"] = "/home/YOUR_USER"
         data["remote_path_roots"] = [
-            "/home/metsatron/HelmCortex",
-            "/home/metsatron/mnt/x230/HelmCortex",
-            "/home/metsatron/DotCortex",
-            "/home/metsatron/HelmCortex-wt-kikin",
-            "/home/metsatron/DotCortex-wt-kikin",
+            "/home/YOUR_USER/HelmCortex",
+            "/home/YOUR_USER/mnt/x230/HelmCortex",
+            "/home/YOUR_USER/DotCortex",
+            "/home/YOUR_USER/HelmCortex-wt-kikin",
+            "/home/YOUR_USER/DotCortex-wt-kikin",
         ]
-        data["mailcortex_account"] = "bunta@kikin.helm"
+        data["mailcortex_account"] = "YOUR_AGENT@YOUR_READONLY_HOST"
         for item in data["classes"]:
             item["enabled"] = item["name"] in classes
         target = Path(self.tempdir.name) / "manifest.json"
@@ -158,11 +158,11 @@ class ApprovalHookHarness(unittest.TestCase):
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'git -C HelmCortex status --short | head -20'",
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'find HelmCortex/FORGE -maxdepth 2 -type f | grep approval | wc -l'",
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'",
-            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat /home/metsatron/HelmCortex/README.md'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat /home/YOUR_USER/HelmCortex/README.md'",
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat ~/HelmCortex/README.md'",
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat DotCortex/../HelmCortex/README.md'",
-            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat //home/metsatron/HelmCortex/./README.md'",
-            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'mailcortex inbox bunta@kikin.helm'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat //home/YOUR_USER/HelmCortex/./README.md'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'mailcortex inbox YOUR_AGENT@YOUR_READONLY_HOST'",
         ):
             with self.subTest(good=good):
                 self.assertEqual(
@@ -190,25 +190,25 @@ class ApprovalHookHarness(unittest.TestCase):
         for leak, commands in {
             "nanobot_env": (
                 "cat .config/nanobot-telegram/env",
-                "cat /home/metsatron/.config/nanobot-telegram/env",
+                "cat /home/YOUR_USER/.config/nanobot-telegram/env",
                 "cat ~/.config/nanobot-telegram/env",
                 "cat HelmCortex/../.config/nanobot-telegram/env",
             ),
             "mailcortex_private_token": (
                 "cat .config/mailcortex/private/x.token",
-                "cat /home/metsatron/.config/mailcortex/private/x.token",
+                "cat /home/YOUR_USER/.config/mailcortex/private/x.token",
                 "cat ~/.config/mailcortex/private/x.token",
                 "cat DotCortex/../.config/mailcortex/private/x.token",
             ),
             "nexus_secret_cookie": (
                 "cat NEXUS/.secrets/mistral_cookies.jar",
-                "cat /home/metsatron/HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
+                "cat /home/YOUR_USER/HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
                 "cat ~/HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
                 "cat HelmCortex/./NEXUS/.secrets/mistral_cookies.jar",
                 "cat HelmCortex/../HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
             ),
-            "foreign_mail_inbox": ("mailcortex inbox fable@kikin.helm",),
-            "foreign_mail_read": ("mailcortex read fable@kikin.helm 1",),
+            "foreign_mail_inbox": ("mailcortex inbox YOUR_OTHER_AGENT@YOUR_READONLY_HOST",),
+            "foreign_mail_read": ("mailcortex read YOUR_OTHER_AGENT@YOUR_READONLY_HOST 1",),
             "path_boundary": (
                 "git show HEAD:NEXUS/.secrets/x",
                 "git -C HelmCortex show HEAD:NEXUS/.secrets/x",
@@ -257,13 +257,13 @@ class ApprovalHookHarness(unittest.TestCase):
             "personal": {
                 "paths": (
                     "HelmCortex/LOGS/Telegram/Personal/chat.md",
-                    "/home/metsatron/HelmCortex/LOGS/Telegram/Personal/chat.md",
+                    "/home/YOUR_USER/HelmCortex/LOGS/Telegram/Personal/chat.md",
                     "~/HelmCortex/LOGS/Telegram/Personal/chat.md",
                     "HelmCortex/FORGE/../../HelmCortex/LOGS/Telegram/Personal/chat.md",
                 ),
                 "repos": (
                     "HelmCortex",
-                    "/home/metsatron/HelmCortex",
+                    "/home/YOUR_USER/HelmCortex",
                     "~/HelmCortex",
                     "HelmCortex/FORGE/..",
                 ),
@@ -272,13 +272,13 @@ class ApprovalHookHarness(unittest.TestCase):
             "palmcortex": {
                 "paths": (
                     "HelmCortex/CORTEX/PalmCortex/Diary.md",
-                    "/home/metsatron/HelmCortex/CORTEX/PalmCortex/Diary.md",
+                    "/home/YOUR_USER/HelmCortex/CORTEX/PalmCortex/Diary.md",
                     "~/HelmCortex/CORTEX/PalmCortex/Diary.md",
                     "HelmCortex/FORGE/../../HelmCortex/CORTEX/PalmCortex/Diary.md",
                 ),
                 "repos": (
                     "HelmCortex",
-                    "/home/metsatron/HelmCortex",
+                    "/home/YOUR_USER/HelmCortex",
                     "~/HelmCortex",
                     "HelmCortex/FORGE/..",
                 ),
@@ -313,7 +313,7 @@ class ApprovalHookHarness(unittest.TestCase):
         manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
         command = "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'"
         payload = event("Bash", {"command": command}, root)
-        allowed = "/home/metsatron/HelmCortex/README.md"
+        allowed = "/home/YOUR_USER/HelmCortex/README.md"
         runner = FakeRemotePathRunner(stdout=allowed + "\n")
         self.assertEqual(engine_decision(payload, manifest, runner), "allow")
         self.assertEqual(
@@ -337,9 +337,9 @@ class ApprovalHookHarness(unittest.TestCase):
             ],
         )
         failures = (
-            FakeRemotePathRunner(stdout="/home/metsatron/HelmCortex/NEXUS/.secrets/x\n"),
+            FakeRemotePathRunner(stdout="/home/YOUR_USER/HelmCortex/NEXUS/.secrets/x\n"),
             FakeRemotePathRunner(stdout="/etc/passwd\n"),
-            FakeRemotePathRunner(stdout="/home/metsatron/HelmCortex/LOGS/Telegram/Personal/chat.md\n"),
+            FakeRemotePathRunner(stdout="/home/YOUR_USER/HelmCortex/LOGS/Telegram/Personal/chat.md\n"),
             FakeRemotePathRunner(returncode=1),
             FakeRemotePathRunner(stdout=allowed + "\n" + allowed + "\n"),
             FakeRemotePathRunner(stdout="not-an-absolute-path\n"),
@@ -367,7 +367,7 @@ class ApprovalHookHarness(unittest.TestCase):
     def test_git_show_object_path_stays_lexical_only(self):
         root = self.make_tree()
         manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
-        repo = "/home/metsatron/HelmCortex"
+        repo = "/home/YOUR_USER/HelmCortex"
         runner = FakeRemotePathRunner(stdout=repo + "\n")
         payload = event(
             "Bash",
@@ -385,12 +385,12 @@ class ApprovalHookHarness(unittest.TestCase):
             {"command": "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'"},
             root,
         )
-        mounted_readme = "/home/metsatron/mnt/x230/HelmCortex/README.md"
+        mounted_readme = "/home/YOUR_USER/mnt/x230/HelmCortex/README.md"
         allowed_runner = FakeRemotePathRunner(stdout=mounted_readme + "\n")
         self.assertEqual(engine_decision(payload, manifest, allowed_runner), "allow")
 
         mounted_personal = (
-            "/home/metsatron/mnt/x230/HelmCortex/"
+            "/home/YOUR_USER/mnt/x230/HelmCortex/"
             "LOGS/Telegram/Personal/x"
         )
         private_runner = FakeRemotePathRunner(stdout=mounted_personal + "\n")
@@ -446,7 +446,7 @@ class ApprovalHookHarness(unittest.TestCase):
             f"git commit -F {message} tests/test_gate.py",
             f"git commit -F {message} -- .git/config",
             f"git commit -F {message} -- NEXUS/keys/token",
-            f"git commit -F {message} -- /home/gille/file",
+            f"git commit -F {message} -- /home/YOUR_HONEY_USER/file",
             f"git commit -F {message} -- tests/missing.py",
             f"git commit -F {message} -- tests",
             f"git commit -F {message} -- tests/test_gate.py && git push",
@@ -486,7 +486,7 @@ class ApprovalHookHarness(unittest.TestCase):
             "tailscale status",
             "python3 -m pip install x",
             "crontab -l",
-            "cat /home/gille/file",
+            "cat /home/YOUR_HONEY_USER/file",
             "cat 'Secret Vault/file'",
             "cat .env",
             "cat ~/.ssh/config",
@@ -504,7 +504,7 @@ class ApprovalHookHarness(unittest.TestCase):
             input="{not-json",
             text=True,
             capture_output=True,
-            env={**os.environ, "SO_APPROVAL_P3_MANIFEST": str(manifest)},
+            env={**os.environ, "SO_APPROVAL_P3_MANIFEST": str(manifest), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)},
             timeout=2,
             check=False,
         )

@@ -13,7 +13,7 @@
   "decider": {
     "enabled": false,
     "honey_url": null,
-    "kikin_url": "http://127.0.0.1:8098/v1/systemone",
+    "kikin_url": "http://YOUR_DECIDER_HOST/v1/systemone",
     "timeout_ms": 2200,
     "min_allow_confidence": 0.95,
     "questions": "single"

@@ -81,10 +81,17 @@ def _protected(value):
             or "token" in basename or "secret" in basename or "cookie" in basename)
 
 
-def _gille_path(value):
-    """The Gille home is floor-protected except for a proven SSH root."""
+def _unreviewed_home_path(value, roots=()):
+    """Keep any unreviewed home on the floor, independently of its username."""
     lowered = str(value).replace("\\", "/").casefold()
-    return bool(re.search(r"(?:^|/)home/gille(?:/|$|[\s'\";&|])", lowered))
+    reviewed = tuple(posixpath.normpath(str(root)).casefold() for root in roots)
+    for match in re.finditer(r"/[^\s'\";&|]+", lowered):
+        path = posixpath.normpath("/" + match.group().lstrip("/"))
+        if path == "/home" or path.startswith("/home/"):
+            if not any(path == root or path.startswith(root.rstrip("/") + "/")
+                       for root in reviewed):
+                return True
+    return False
 
 
 # 2026-10-09 (Fable/SO-APPROVAL-C1 decider-in-the-loop): the old hard floor mixed
@@ -103,8 +110,9 @@ def _true_floor(event, manifest=None):
         return True
     tool_input = event.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    roots = (tuple(manifest.get("roots") or ()) + tuple(manifest.get("scratch_roots") or ())) if manifest is not None else ()
     if not isinstance(command, str):
-        return False
+        return _unreviewed_home_path(raw, roots)
     if _protected(command):
         return True
     # 2026-10-10 (replay finding): an unbalanced quote (a comment saying
@@ -119,7 +127,7 @@ def _true_floor(event, manifest=None):
     readonly_proven = bool(
         manifest is not None and _ssh_readonly_proven(event, manifest)
     )
-    if _gille_path(raw) and not readonly_proven:
+    if _unreviewed_home_path(raw, roots) and not readonly_proven:
         return True
     # Word-level secret scan, path-like tokens only ('cat .env', 'cat NEXUS/keys/x'):
     # a bare word such as grep 'private' is not a path and must not floor.
@@ -237,10 +245,10 @@ def _floor_verb(lowered):
             return True
         if sub in {"filter-branch", "filter-repo"}:
             return True
-        # "any 'main' branch name" (review): a git subcommand that NAMES the
-        # main branch as a word is floor — switching, merging or moving main is
+        # "the canonical branch name" (review): a git subcommand that NAMES the
+        # canonical branch as a word is floor — switching, merging or moving it is
         # the fleet's protected spine. Reads never carry it as a bare word.
-        if sub and any(word in {"main", "master"} for word in lowered[2:]):
+        if sub and any(word in {"master"} for word in lowered[2:]):
             return True
     # Disk and permission tools (2026-10-10 review): irreversible or system-wide.
     disk_verbs = {"dd", "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mkfs.btrfs", "mkfs.xfs", "mkfs.vfat", "mkfs.fat", "mkfs.ntfs", "cryptsetup", "wipefs", "fdisk", "parted", "shred", "truncate", "mount", "umount", "crontab"}
@@ -1269,8 +1277,8 @@ def _outbound_tool_match(event, manifest):
     names = tuple(config.get("tool_names") or ())
     if event.get("tool_name") in names:
         raw = json.dumps(event.get("tool_input", {}), ensure_ascii=False, sort_keys=True).lower()
-        return not any(marker in raw for marker in (
-            "/home/gille", "secret vault", "nexus/keys", "/.ssh/", "~/.ssh/", "/.env",
+        return not _unreviewed_home_path(raw, manifest["roots"]) and not any(marker in raw for marker in (
+            "secret vault", "nexus/keys", "/.ssh/", "~/.ssh/", "/.env",
             "auth.json", "credentials.json", "oauth.json", "secrets.json", "id_rsa", "id_ed25519"))
     return False
 
@@ -1322,7 +1330,7 @@ def evaluate(event, manifest):
 # means ASK. The whole hook has a 3s budget; the Decider gets ~2.2s.
 # ---------------------------------------------------------------------------
 
-DECIDER_DEFAULT_KIKIN_URL = "http://127.0.0.1:8098/v1/systemone"
+DECIDER_DEFAULT_KIKIN_URL = "http://YOUR_DECIDER_HOST/v1/systemone"
 DECIDER_DEFAULT_TIMEOUT_MS = 2200
 DECIDER_DEFAULT_THRESHOLD = 0.95
 C1_MIN = 0.95

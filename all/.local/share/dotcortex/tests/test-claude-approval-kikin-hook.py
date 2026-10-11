@@ -19,7 +19,7 @@ def event(tool_name, tool_input, cwd):
 
 def run_hook(payload, manifest, log=os.devnull):
     # Never let a test write the real decision ledger; os.devnull unless a test reads it.
-    env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": str(log)}
+    env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": str(log), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}
     return subprocess.run([str(HOOK)], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=2, check=False)
 
 
@@ -27,6 +27,14 @@ def decision(completed):
     if not completed.stdout.strip():
         return "ask"
     return json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"]
+
+
+def unavailable_decider_url():
+    import socket
+    with socket.socket() as listener:
+        listener.bind(("localhost", 0))
+        port = listener.getsockname()[1]
+    return f"http://localhost:{port}/v1/systemone"
 
 
 class KikinApprovalHookTests(unittest.TestCase):
@@ -221,12 +229,12 @@ class KikinApprovalHookTests(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        server = http.server.HTTPServer(("localhost", 0), Handler)
         server.threshold = 0.95
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.shutdown)
-        return f"http://127.0.0.1:{server.server_address[1]}/v1/systemone"
+        return f"http://localhost:{server.server_address[1]}/v1/systemone"
 
     def test_decider_allow_enables_grey_zone(self):
         # 2026-10-10: a plain grey read (no write, no interpreter body) stays
@@ -253,7 +261,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         self.assertEqual(records[-1]["decider_status"], "threshold_failed")
 
     def test_decider_down_asks(self):
-        manifest = self._decider_manifest(kikin="http://127.0.0.1:1/v1/systemone")
+        manifest = self._decider_manifest(kikin=unavailable_decider_url())
         log = self.scratch / "decider.jsonl"
         run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
@@ -342,13 +350,13 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_true_floor_destructive_git(self):
         commands = [
-            "git push", "git push origin main", "git push --force origin x",
-            "git reset --hard HEAD~1", "git reset --merge", "git rebase main",
+            "git push", "git push origin master", "git push --force origin x",
+            "git reset --hard HEAD~1", "git reset --merge", "git rebase master",
             "git clean -fd", "git checkout -- file.py", "git restore file.py",
             "git branch -D topic", "git stash drop", "git stash clear",
             "git commit --amend -m x", "git worktree prune", "git worktree remove ../x",
             "git filter-branch --tree-filter x", "git filter-repo --x",
-            "git checkout main", "git merge main",
+            "git checkout master", "git merge master",
         ]
         for command in commands:
             with self.subTest(command=command):
@@ -401,9 +409,9 @@ class KikinApprovalHookTests(unittest.TestCase):
             "cd /repo && kill -TERM 30130",
             "cd /repo && rm -rf build && make",
             "cd /repo && git commit --amend --no-edit",
-            "cd /repo && ssh honey date",
+            "cd /repo && ssh YOUR_HONEY_HOST date",
             "cd /repo && pkill -f worker",
-            "cd /repo && git push origin main",
+            "cd /repo && git push origin master",
             "cd /repo && crontab -r",
             "cd /repo && chmod -R 777 dir",
         ]
@@ -493,7 +501,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_decider_config_honey_api_validation(self):
         self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())  # load engine
-        base = {"enabled": True, "honey_url": "http://honey.tailnet:8097/decide", "kikin_url": "http://127.0.0.1:8098/v1/systemone", "timeout_ms": 2200, "min_allow_confidence": 0.95, "questions": "single"}
+        base = {"enabled": True, "honey_url": "http://YOUR_HONEY_HOST/decide", "kikin_url": "http://YOUR_DECIDER_HOST/v1/systemone", "timeout_ms": 2200, "min_allow_confidence": 0.95, "questions": "single"}
         cfg = self._engine._decider_config({"decider": base})
         self.assertEqual(cfg["honey_api"], "kikin")
         cfg2 = self._engine._decider_config({"decider": {**base, "honey_api": "r2d2d"}})
@@ -527,11 +535,11 @@ class KikinApprovalHookTests(unittest.TestCase):
             def log_message(self, *a):
                 pass
 
-        server = http.server.HTTPServer(("127.0.0.1", 0), FakeR2D2D)
+        server = http.server.HTTPServer(("localhost", 0), FakeR2D2D)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         port = server.server_address[1]
-        manifest = self._decider_manifest(honey=f"http://127.0.0.1:{port}/decide", honey_api="r2d2d", kikin="http://127.0.0.1:1/v1/systemone")
+        manifest = self._decider_manifest(honey=f"http://localhost:{port}/decide", honey_api="r2d2d", kikin=unavailable_decider_url())
         try:
             log = self.scratch / "r2d2d.jsonl"
             run_hook(event("Bash", {"command": "true"}, self.root), manifest, log)
@@ -576,7 +584,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_malformed_input_asks(self):
         manifest = self.manifest("local_read")
-        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull}, timeout=2, check=False)
+        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull, "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}, timeout=2, check=False)
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(decision(completed), "ask")
 

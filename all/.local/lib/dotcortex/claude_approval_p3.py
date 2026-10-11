@@ -170,10 +170,23 @@ def _load_manifest():
     return data
 
 
-def _protected_token(token):
+def _unreviewed_home_path(value, roots=()):
+    """Keep any unreviewed home on the floor, independently of its username."""
+    lowered = str(value).replace("\\", "/").casefold()
+    reviewed = tuple(posixpath.normpath(str(root)).casefold() for root in roots)
+    for match in re.finditer(r"/[^\s'\";&|]+", lowered):
+        path = posixpath.normpath("/" + match.group().lstrip("/"))
+        if path == "/home" or path.startswith("/home/"):
+            if not any(path == root or path.startswith(root.rstrip("/") + "/")
+                       for root in reviewed):
+                return True
+    return False
+
+
+def _protected_token(token, reviewed_roots=()):
     lowered = token.lower().replace("\\", "/")
     components = [part for part in lowered.split("/") if part]
-    if "/home/gille" in lowered or "secret vault" in lowered:
+    if _unreviewed_home_path(token, reviewed_roots) or "secret vault" in lowered:
         return True
     if ".git" in components or ".ssh" in components or ".env" in components:
         return True
@@ -194,7 +207,7 @@ def _protected_token(token):
     return any(part in names for part in components)
 
 
-def _hard_never(command):
+def _hard_never(command, reviewed_roots=()):
     if not isinstance(command, str) or not command or "\x00" in command:
         return True
     try:
@@ -203,7 +216,7 @@ def _hard_never(command):
         return True
     lowered = [word.lower() for word in words]
     joined = " ".join(lowered)
-    if any(_protected_token(word) for word in words):
+    if any(_protected_token(word, reviewed_roots) for word in words):
         return True
     if re.search(r"(?:^|[;&|]\s*)git\s+(?:push|reset|revert)(?:\s|$)", joined):
         return True
@@ -549,7 +562,7 @@ def _ssh_readonly(command, manifest):
         return False
     if "||" in remote or remote.startswith("|") or remote.endswith("|"):
         return False
-    if _hard_never(remote):
+    if _hard_never(remote, manifest["remote_path_roots"]):
         return False
     parts = [part.strip() for part in remote.split("|")]
     analyses = [_reader_segment(part, manifest) if part else None for part in parts]
@@ -647,7 +660,7 @@ def _centre(command, event, manifest):
 
 def _safe_commit(command, event, manifest):
     cwd, root = _cwd_and_root(event, manifest["dotcortex_roots"], exact=True)
-    if cwd != root or SHELL_META_RE.search(command) or _hard_never(command):
+    if cwd != root or SHELL_META_RE.search(command) or _hard_never(command, manifest["dotcortex_roots"] + manifest["tmp_roots"]):
         return False
     try:
         words = shlex.split(command, posix=True)
@@ -692,15 +705,14 @@ def _safe_commit(command, event, manifest):
     return True
 
 
-def _protected_tool_input(tool_input):
+def _protected_tool_input(tool_input, reviewed_roots=()):
     try:
         raw = json.dumps(tool_input, ensure_ascii=False, sort_keys=True).lower().replace("\\\\", "/")
     except (TypeError, ValueError):
         return True
-    return any(
+    return _unreviewed_home_path(raw, reviewed_roots) or any(
         marker in raw
         for marker in (
-            "/home/gille",
             "secret vault",
             "nexus/keys",
             "/.ssh/",
@@ -719,13 +731,14 @@ def _candidate(event, manifest):
     if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
         raise Rejected("tool event")
     if tool_name != "Bash":
-        if tool_name in manifest["outbound_tools"] and not _protected_tool_input(tool_input):
+        if tool_name in manifest["outbound_tools"] and not _protected_tool_input(tool_input, manifest["local_test_roots"]):
             return "outbound-tool-call", True
         raise Rejected("unknown tool")
     if set(tool_input) != {"command"} or not isinstance(tool_input.get("command"), str):
         raise Rejected("bash input")
     command = tool_input["command"]
-    if _hard_never(command):
+    reviewed_roots = manifest["local_test_roots"] + manifest["centre_roots"] + manifest["dotcortex_roots"] + manifest["tmp_roots"] + manifest["remote_path_roots"]
+    if _hard_never(command, reviewed_roots):
         raise Rejected("hard never")
     parsers = (
         ("ssh-kikin-readonly", lambda: _ssh_readonly(command, manifest)),

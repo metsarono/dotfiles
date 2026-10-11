@@ -12,16 +12,16 @@
   ],
   "decider": {
     "enabled": true,
-    "honey_url": "http://127.0.0.1:8097/decide",
+    "honey_url": "http://YOUR_HONEY_HOST/decide",
     "honey_api": "r2d2d",
-    "kikin_url": "http://127.0.0.1:8098/v1/systemone",
+    "kikin_url": "http://YOUR_DECIDER_HOST/v1/systemone",
     "timeout_ms": 2200,
     "min_allow_confidence": 0.95,
     "questions": "single"
   },
   "roots": [
-    "/home/YOUR_HONEY_USER/DotCortex",
-    "/home/YOUR_HONEY_USER/honey-work",
+    "/home/YOUR_AGENT_CLAUDE/DotCortex",
+    "/home/YOUR_AGENT_CLAUDE/honey-work",
     "/var/tmp"
   ],
   "scratch_roots": [
@@ -60,7 +60,7 @@
     {
       "name": "local_test_run",
       "enabled": false,
-      "local_test_roots": ["/home/YOUR_HONEY_USER/DotCortex", "/home/YOUR_HONEY_USER/honey-work"]
+      "local_test_roots": ["/home/YOUR_AGENT_CLAUDE/DotCortex", "/home/YOUR_AGENT_CLAUDE/honey-work"]
     },
     {
       "name": "outbound_tool",

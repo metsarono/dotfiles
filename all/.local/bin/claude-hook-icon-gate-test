@@ -4,8 +4,9 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
-H = "/home/metsatron/.local/bin/claude-hook-pre-tool-use-bash"
+H = str(Path(__file__).resolve().with_name("claude-hook-pre-tool-use-bash"))
 I = "~/DotCortex/linux/.local/share/icons"
 L = "~/.local/share/icons"
 
@@ -21,7 +22,7 @@ ALLOW = [
     ("git commit",                 f'git -C {I}/Chicago95 commit -m "feat(places): x"'),
     ("icon-theme-inject",          'icon-theme-inject x --repo-root ~/DotCortex --themes Win31 '
                                    '--category apps --from-theme-icon progm001 --names gnome-applications'),
-    ("icons-home-sync",            'icons-home-sync --repo-root /home/metsatron/DotCortex'),
+    ("icons-home-sync",            'icons-home-sync --repo-root /home/YOUR_USER/DotCortex'),
     ("gtk-update-icon-cache",      f'gtk-update-icon-cache {L}/Win31'),
     ("ls -l on icon file",         f'ls -l {I}/Chicago95/places/22/folder-documents.png'),
     ("readlink",                   f'readlink {I}/Chicago95/places/22/folder-documents.png'),

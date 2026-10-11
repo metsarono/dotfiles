@@ -255,10 +255,23 @@ def _load_manifest():
     return data
 
 
-def _protected_token(token):
+def _unreviewed_home_path(value, roots=()):
+    """Keep any unreviewed home on the floor, independently of its username."""
+    lowered = str(value).replace("\\", "/").casefold()
+    reviewed = tuple(posixpath.normpath(str(root)).casefold() for root in roots)
+    for match in re.finditer(r"/[^\s'\";&|]+", lowered):
+        path = posixpath.normpath("/" + match.group().lstrip("/"))
+        if path == "/home" or path.startswith("/home/"):
+            if not any(path == root or path.startswith(root.rstrip("/") + "/")
+                       for root in reviewed):
+                return True
+    return False
+
+
+def _protected_token(token, reviewed_roots=()):
     lowered = token.lower().replace("\\", "/")
     components = [part for part in lowered.split("/") if part]
-    if "/home/gille" in lowered or "secret vault" in lowered:
+    if _unreviewed_home_path(token, reviewed_roots) or "secret vault" in lowered:
         return True
     if ".git" in components or ".ssh" in components or ".env" in components:
         return True
@@ -279,7 +292,7 @@ def _protected_token(token):
     return any(part in names for part in components)
 
 
-def _hard_never(command):
+def _hard_never(command, reviewed_roots=()):
     if not isinstance(command, str) or not command or "\x00" in command:
         return True
     try:
@@ -288,7 +301,7 @@ def _hard_never(command):
         return True
     lowered = [word.lower() for word in words]
     joined = " ".join(lowered)
-    if any(_protected_token(word) for word in words):
+    if any(_protected_token(word, reviewed_roots) for word in words):
         return True
     if re.search(r"(?:^|[;&|]\s*)git\s+(?:push|reset|revert)(?:\s|$)", joined):
         return True
@@ -634,7 +647,7 @@ def _ssh_readonly(command, manifest):
         return False
     if "||" in remote or remote.startswith("|") or remote.endswith("|"):
         return False
-    if _hard_never(remote):
+    if _hard_never(remote, manifest["remote_path_roots"]):
         return False
     parts = [part.strip() for part in remote.split("|")]
     analyses = [_reader_segment(part, manifest) if part else None for part in parts]
@@ -732,7 +745,7 @@ def _centre(command, event, manifest):
 
 def _safe_commit(command, event, manifest):
     cwd, root = _cwd_and_root(event, manifest["dotcortex_roots"], exact=True)
-    if cwd != root or SHELL_META_RE.search(command) or _hard_never(command):
+    if cwd != root or SHELL_META_RE.search(command) or _hard_never(command, manifest["dotcortex_roots"] + manifest["tmp_roots"]):
         return False
     try:
         words = shlex.split(command, posix=True)
@@ -777,15 +790,14 @@ def _safe_commit(command, event, manifest):
     return True
 
 
-def _protected_tool_input(tool_input):
+def _protected_tool_input(tool_input, reviewed_roots=()):
     try:
         raw = json.dumps(tool_input, ensure_ascii=False, sort_keys=True).lower().replace("\\\\", "/")
     except (TypeError, ValueError):
         return True
-    return any(
+    return _unreviewed_home_path(raw, reviewed_roots) or any(
         marker in raw
         for marker in (
-            "/home/gille",
             "secret vault",
             "nexus/keys",
             "/.ssh/",
@@ -804,13 +816,14 @@ def _candidate(event, manifest):
     if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
         raise Rejected("tool event")
     if tool_name != "Bash":
-        if tool_name in manifest["outbound_tools"] and not _protected_tool_input(tool_input):
+        if tool_name in manifest["outbound_tools"] and not _protected_tool_input(tool_input, manifest["local_test_roots"]):
             return "outbound-tool-call", True
         raise Rejected("unknown tool")
     if set(tool_input) != {"command"} or not isinstance(tool_input.get("command"), str):
         raise Rejected("bash input")
     command = tool_input["command"]
-    if _hard_never(command):
+    reviewed_roots = manifest["local_test_roots"] + manifest["centre_roots"] + manifest["dotcortex_roots"] + manifest["tmp_roots"] + manifest["remote_path_roots"]
+    if _hard_never(command, reviewed_roots):
         raise Rejected("hard never")
     parsers = (
         ("ssh-kikin-readonly", lambda: _ssh_readonly(command, manifest)),
@@ -1028,16 +1041,16 @@ then classes, then grey zone.
   ],
   "decider": {
     "enabled": true,
-    "honey_url": "http://127.0.0.1:8097/decide",
+    "honey_url": "http://YOUR_HONEY_HOST/decide",
     "honey_api": "r2d2d",
-    "kikin_url": "http://127.0.0.1:8098/v1/systemone",
+    "kikin_url": "http://YOUR_DECIDER_HOST/v1/systemone",
     "timeout_ms": 2200,
     "min_allow_confidence": 0.95,
     "questions": "single"
   },
   "roots": [
-    "/home/YOUR_HONEY_USER/DotCortex",
-    "/home/YOUR_HONEY_USER/honey-work",
+    "/home/YOUR_AGENT_CLAUDE/DotCortex",
+    "/home/YOUR_AGENT_CLAUDE/honey-work",
     "/var/tmp"
   ],
   "scratch_roots": [
@@ -1076,7 +1089,7 @@ then classes, then grey zone.
     {
       "name": "local_test_run",
       "enabled": false,
-      "local_test_roots": ["/home/YOUR_HONEY_USER/DotCortex", "/home/YOUR_HONEY_USER/honey-work"]
+      "local_test_roots": ["/home/YOUR_AGENT_CLAUDE/DotCortex", "/home/YOUR_AGENT_CLAUDE/honey-work"]
     },
     {
       "name": "outbound_tool",
@@ -1095,28 +1108,25 @@ candidate, and the committed manifest keeps it false for the Admiral's
 word.  =outbound_tool= and =ssh_readonly= stay false — outbound tool calls
 stay off per the handoff; the ssh class is off until Honey's readonly host
 ruling exists.  From Honey the =kikin_url= fallback is NOT reachable today
-(Kikin's 8098 is loopback-only); a configured-but-unreachable fallback is
+(Kikin's endpoint is loopback-only); a configured-but-unreachable fallback is
 a timeout, which is ASK — fail-closed, and a future ornith relay can fill
 the placeholder.
 
-ROOTS PROVENANCE (2026-10-10 fix round, Fable's live facts + session
-history): Bunta's seat runs as =agent-claude= — NOT gille.  His real
-roots are =/home/agent-claude/DotCortex=, =/home/agent-claude/honey-work=
-(the tmux honey-opus session cwd), and =/var/tmp= scratch.  The earlier
-draft's gille roots were wrong: =/home/agent-claude/HelmCortex= does not
-exist, and Bunta's own session history (gille-side projects corpus,
-harvested read-only) never touches =/home/gille/DotCortex= or
-=/home/gille/HelmCortex= — his gille-side work lives in
-=.ductor/workspace=, =metsatron-peer=, =src/= and =/tmp/dc-honey=.  The
-manifest carries =YOUR_HONEY_USER= placeholders; the machine-local copy
-substitutes =agent-claude=.
+ROOTS PROVENANCE (2026-10-10 reviewed seat correction): the dedicated
+Claude seat uses =YOUR_AGENT_CLAUDE=, separately from the Honey login user
+=YOUR_HONEY_USER=. Its reviewed work roots are
+=/home/YOUR_AGENT_CLAUDE/DotCortex=, =/home/YOUR_AGENT_CLAUDE/honey-work=
+and =/var/tmp= scratch. Fill every =YOUR_*= value only in a reviewed private
+copy. Personal homes outside reviewed roots remain on the absolute floor;
+only the deterministic SSH reader may cross its reviewed remote boundary.
+Decider addresses also belong in the machine-local manifest.
 
 ** Honey installation — updated for the shared engine
 
 The Admiral's GO (2026-10-10 23:12, via Fable) authorises deploy after
 review; the fix round (23:24) corrected the target: Bunta's seat runs as
-=agent-claude=, so NOTHING goes into =/home/gille/.claude/settings.json=
-(that is Gillean's own Claude and must not change).  The exact deploy,
+=YOUR_AGENT_CLAUDE=, so NOTHING goes into =/home/YOUR_HONEY_USER/.claude/settings.json=
+(that is the Honey login user's own Claude and must not change).  The exact deploy,
 run through Bunta's seat:
 
 1. Install the engine as a VERSIONED copy (p3 convention — the engine is
@@ -1124,24 +1134,22 @@ run through Bunta's seat:
 
    #+BEGIN_SRC sh
    SHA=$(git rev-parse --short=9 HEAD)
-   install -d -m 700 /home/agent-claude/.local/share/so-approval-engine/$SHA
+   install -d -m 700 /home/YOUR_AGENT_CLAUDE/.local/share/so-approval-engine/$SHA
    install -m 755 all/.local/lib/dotcortex/claude_approval_kikin.py \
-     /home/agent-claude/.local/share/so-approval-engine/$SHA/claude_approval_kikin.py
+     /home/YOUR_AGENT_CLAUDE/.local/share/so-approval-engine/$SHA/claude_approval_kikin.py
    install -m 755 all/.local/bin/claude-hook-permission-request \
-     /home/agent-claude/.local/share/so-approval-engine/$SHA/claude-hook-permission-request
+     /home/YOUR_AGENT_CLAUDE/.local/share/so-approval-engine/$SHA/claude-hook-permission-request
    install -m 755 all/.local/share/dotcortex/tests/test-claude-approval-bunta-honey.py \
-     /home/agent-claude/.local/share/so-approval-engine/$SHA/test-claude-approval-bunta-honey.py
+     /home/YOUR_AGENT_CLAUDE/.local/share/so-approval-engine/$SHA/test-claude-approval-bunta-honey.py
    #+END_SRC
 
-2. Machine-local manifest (the committed roots are agent-claude's real
-   ones already; only the placeholder becomes =agent-claude=):
+2. Create a private manifest, then replace its account, host and endpoint
+   placeholders with the reviewed machine-local values in a private editor:
 
    #+BEGIN_SRC sh
-   install -d -m 700 /home/agent-claude/.config/dotcortex
-   sed 's/YOUR_HONEY_USER/agent-claude/g' \
-     all/.config/dotcortex/claude-approval-bunta.honey.v2.json \
-     > /home/agent-claude/.config/dotcortex/claude-approval-bunta.honey.local.json
-   chmod 600 /home/agent-claude/.config/dotcortex/claude-approval-bunta.honey.local.json
+   install -d -m 700 /home/YOUR_AGENT_CLAUDE/.config/dotcortex
+   install -m 600 all/.config/dotcortex/claude-approval-bunta.honey.v2.json \
+     /home/YOUR_AGENT_CLAUDE/.config/dotcortex/claude-approval-bunta.honey.local.json
    #+END_SRC
 
    =ssh_readonly= stays =enabled: false= (no Honey readonly-host ruling
@@ -1157,7 +1165,7 @@ run through Bunta's seat:
    #+END_SRC
 
 4. Replace the p3 entry in the PROJECT settings —
-   =/home/agent-claude/honey-work/opus/.claude/settings.json= (backup
+   =/home/YOUR_AGENT_CLAUDE/honey-work/opus/.claude/settings.json= (backup
    first; =~/.claude/settings.json= has no hooks and stays untouched;
    never inject into a live session — Bunta's tmux honey-opus socket is
    =/tmp/tmux-2002/default=):
@@ -1168,7 +1176,7 @@ run through Bunta's seat:
        "hooks": [
          {
            "type": "command",
-           "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/agent-claude/.config/dotcortex/claude-approval-bunta.honey.local.json DOTCORTEX_APPROVAL_ENGINE=/home/agent-claude/.local/share/so-approval-engine/INSERT_SHA/claude_approval_kikin.py /home/agent-claude/.local/share/so-approval-engine/INSERT_SHA/claude-hook-permission-request",
+           "command": "SO_APPROVAL_KIKIN_MANIFEST=/home/YOUR_AGENT_CLAUDE/.config/dotcortex/claude-approval-bunta.honey.local.json DOTCORTEX_APPROVAL_ENGINE=/home/YOUR_AGENT_CLAUDE/.local/share/so-approval-engine/INSERT_SHA/claude_approval_kikin.py /home/YOUR_AGENT_CLAUDE/.local/share/so-approval-engine/INSERT_SHA/claude-hook-permission-request",
            "timeout": 5
          }
        ]
@@ -1178,9 +1186,9 @@ run through Bunta's seat:
 
    Then validate with =/usr/bin/python3 -m json.tool= and start a fresh
    session for Bunta.  The decision ledger lands in
-   =/home/agent-claude/.local/state/dotcortex/claude-approval-kikin.jsonl=
+   =/home/YOUR_AGENT_CLAUDE/.local/state/dotcortex/claude-approval-kikin.jsonl=
    (overridable via =SO_APPROVAL_KIKIN_LOG=).  The superseded p3 copy
-   under =/home/agent-claude/.local/share/so-approval-p3/6860888c9/= can
+   under =/home/YOUR_AGENT_CLAUDE/.local/share/so-approval-p3/6860888c9/= can
    be retired once the new gate proves itself in the ledger.
 
 Same Admiral-gated shape as the p3 install above, with the shared engine:
@@ -1230,7 +1238,7 @@ def event(tool_name, tool_input, cwd=None):
 
 
 def run_hook(payload, manifest=None, cwd=None):
-    env = os.environ.copy()
+    env = {**os.environ, "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)}
     if manifest is not None:
         env["SO_APPROVAL_P3_MANIFEST"] = str(manifest)
     completed = subprocess.run(
@@ -1297,15 +1305,15 @@ class ApprovalHookHarness(unittest.TestCase):
         data["centre_roots"] = [str(root)]
         data["dotcortex_roots"] = [str(root)]
         data["readonly_host"] = "YOUR_READONLY_HOST"
-        data["remote_home"] = "/home/metsatron"
+        data["remote_home"] = "/home/YOUR_USER"
         data["remote_path_roots"] = [
-            "/home/metsatron/HelmCortex",
-            "/home/metsatron/mnt/x230/HelmCortex",
-            "/home/metsatron/DotCortex",
-            "/home/metsatron/HelmCortex-wt-kikin",
-            "/home/metsatron/DotCortex-wt-kikin",
+            "/home/YOUR_USER/HelmCortex",
+            "/home/YOUR_USER/mnt/x230/HelmCortex",
+            "/home/YOUR_USER/DotCortex",
+            "/home/YOUR_USER/HelmCortex-wt-kikin",
+            "/home/YOUR_USER/DotCortex-wt-kikin",
         ]
-        data["mailcortex_account"] = "bunta@kikin.helm"
+        data["mailcortex_account"] = "YOUR_AGENT@YOUR_READONLY_HOST"
         for item in data["classes"]:
             item["enabled"] = item["name"] in classes
         target = Path(self.tempdir.name) / "manifest.json"
@@ -1356,11 +1364,11 @@ class ApprovalHookHarness(unittest.TestCase):
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'git -C HelmCortex status --short | head -20'",
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'find HelmCortex/FORGE -maxdepth 2 -type f | grep approval | wc -l'",
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'",
-            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat /home/metsatron/HelmCortex/README.md'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat /home/YOUR_USER/HelmCortex/README.md'",
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat ~/HelmCortex/README.md'",
             "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat DotCortex/../HelmCortex/README.md'",
-            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat //home/metsatron/HelmCortex/./README.md'",
-            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'mailcortex inbox bunta@kikin.helm'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat //home/YOUR_USER/HelmCortex/./README.md'",
+            "ssh -o BatchMode=yes YOUR_READONLY_HOST 'mailcortex inbox YOUR_AGENT@YOUR_READONLY_HOST'",
         ):
             with self.subTest(good=good):
                 self.assertEqual(
@@ -1388,25 +1396,25 @@ class ApprovalHookHarness(unittest.TestCase):
         for leak, commands in {
             "nanobot_env": (
                 "cat .config/nanobot-telegram/env",
-                "cat /home/metsatron/.config/nanobot-telegram/env",
+                "cat /home/YOUR_USER/.config/nanobot-telegram/env",
                 "cat ~/.config/nanobot-telegram/env",
                 "cat HelmCortex/../.config/nanobot-telegram/env",
             ),
             "mailcortex_private_token": (
                 "cat .config/mailcortex/private/x.token",
-                "cat /home/metsatron/.config/mailcortex/private/x.token",
+                "cat /home/YOUR_USER/.config/mailcortex/private/x.token",
                 "cat ~/.config/mailcortex/private/x.token",
                 "cat DotCortex/../.config/mailcortex/private/x.token",
             ),
             "nexus_secret_cookie": (
                 "cat NEXUS/.secrets/mistral_cookies.jar",
-                "cat /home/metsatron/HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
+                "cat /home/YOUR_USER/HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
                 "cat ~/HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
                 "cat HelmCortex/./NEXUS/.secrets/mistral_cookies.jar",
                 "cat HelmCortex/../HelmCortex/NEXUS/.secrets/mistral_cookies.jar",
             ),
-            "foreign_mail_inbox": ("mailcortex inbox fable@kikin.helm",),
-            "foreign_mail_read": ("mailcortex read fable@kikin.helm 1",),
+            "foreign_mail_inbox": ("mailcortex inbox YOUR_OTHER_AGENT@YOUR_READONLY_HOST",),
+            "foreign_mail_read": ("mailcortex read YOUR_OTHER_AGENT@YOUR_READONLY_HOST 1",),
             "path_boundary": (
                 "git show HEAD:NEXUS/.secrets/x",
                 "git -C HelmCortex show HEAD:NEXUS/.secrets/x",
@@ -1455,13 +1463,13 @@ class ApprovalHookHarness(unittest.TestCase):
             "personal": {
                 "paths": (
                     "HelmCortex/LOGS/Telegram/Personal/chat.md",
-                    "/home/metsatron/HelmCortex/LOGS/Telegram/Personal/chat.md",
+                    "/home/YOUR_USER/HelmCortex/LOGS/Telegram/Personal/chat.md",
                     "~/HelmCortex/LOGS/Telegram/Personal/chat.md",
                     "HelmCortex/FORGE/../../HelmCortex/LOGS/Telegram/Personal/chat.md",
                 ),
                 "repos": (
                     "HelmCortex",
-                    "/home/metsatron/HelmCortex",
+                    "/home/YOUR_USER/HelmCortex",
                     "~/HelmCortex",
                     "HelmCortex/FORGE/..",
                 ),
@@ -1470,13 +1478,13 @@ class ApprovalHookHarness(unittest.TestCase):
             "palmcortex": {
                 "paths": (
                     "HelmCortex/CORTEX/PalmCortex/Diary.md",
-                    "/home/metsatron/HelmCortex/CORTEX/PalmCortex/Diary.md",
+                    "/home/YOUR_USER/HelmCortex/CORTEX/PalmCortex/Diary.md",
                     "~/HelmCortex/CORTEX/PalmCortex/Diary.md",
                     "HelmCortex/FORGE/../../HelmCortex/CORTEX/PalmCortex/Diary.md",
                 ),
                 "repos": (
                     "HelmCortex",
-                    "/home/metsatron/HelmCortex",
+                    "/home/YOUR_USER/HelmCortex",
                     "~/HelmCortex",
                     "HelmCortex/FORGE/..",
                 ),
@@ -1511,7 +1519,7 @@ class ApprovalHookHarness(unittest.TestCase):
         manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
         command = "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'"
         payload = event("Bash", {"command": command}, root)
-        allowed = "/home/metsatron/HelmCortex/README.md"
+        allowed = "/home/YOUR_USER/HelmCortex/README.md"
         runner = FakeRemotePathRunner(stdout=allowed + "\n")
         self.assertEqual(engine_decision(payload, manifest, runner), "allow")
         self.assertEqual(
@@ -1535,9 +1543,9 @@ class ApprovalHookHarness(unittest.TestCase):
             ],
         )
         failures = (
-            FakeRemotePathRunner(stdout="/home/metsatron/HelmCortex/NEXUS/.secrets/x\n"),
+            FakeRemotePathRunner(stdout="/home/YOUR_USER/HelmCortex/NEXUS/.secrets/x\n"),
             FakeRemotePathRunner(stdout="/etc/passwd\n"),
-            FakeRemotePathRunner(stdout="/home/metsatron/HelmCortex/LOGS/Telegram/Personal/chat.md\n"),
+            FakeRemotePathRunner(stdout="/home/YOUR_USER/HelmCortex/LOGS/Telegram/Personal/chat.md\n"),
             FakeRemotePathRunner(returncode=1),
             FakeRemotePathRunner(stdout=allowed + "\n" + allowed + "\n"),
             FakeRemotePathRunner(stdout="not-an-absolute-path\n"),
@@ -1565,7 +1573,7 @@ class ApprovalHookHarness(unittest.TestCase):
     def test_git_show_object_path_stays_lexical_only(self):
         root = self.make_tree()
         manifest = self.enabled_manifest(root, "ssh-kikin-readonly")
-        repo = "/home/metsatron/HelmCortex"
+        repo = "/home/YOUR_USER/HelmCortex"
         runner = FakeRemotePathRunner(stdout=repo + "\n")
         payload = event(
             "Bash",
@@ -1583,12 +1591,12 @@ class ApprovalHookHarness(unittest.TestCase):
             {"command": "ssh -o BatchMode=yes YOUR_READONLY_HOST 'cat HelmCortex/README.md'"},
             root,
         )
-        mounted_readme = "/home/metsatron/mnt/x230/HelmCortex/README.md"
+        mounted_readme = "/home/YOUR_USER/mnt/x230/HelmCortex/README.md"
         allowed_runner = FakeRemotePathRunner(stdout=mounted_readme + "\n")
         self.assertEqual(engine_decision(payload, manifest, allowed_runner), "allow")
 
         mounted_personal = (
-            "/home/metsatron/mnt/x230/HelmCortex/"
+            "/home/YOUR_USER/mnt/x230/HelmCortex/"
             "LOGS/Telegram/Personal/x"
         )
         private_runner = FakeRemotePathRunner(stdout=mounted_personal + "\n")
@@ -1644,7 +1652,7 @@ class ApprovalHookHarness(unittest.TestCase):
             f"git commit -F {message} tests/test_gate.py",
             f"git commit -F {message} -- .git/config",
             f"git commit -F {message} -- NEXUS/keys/token",
-            f"git commit -F {message} -- /home/gille/file",
+            f"git commit -F {message} -- /home/YOUR_HONEY_USER/file",
             f"git commit -F {message} -- tests/missing.py",
             f"git commit -F {message} -- tests",
             f"git commit -F {message} -- tests/test_gate.py && git push",
@@ -1684,7 +1692,7 @@ class ApprovalHookHarness(unittest.TestCase):
             "tailscale status",
             "python3 -m pip install x",
             "crontab -l",
-            "cat /home/gille/file",
+            "cat /home/YOUR_HONEY_USER/file",
             "cat 'Secret Vault/file'",
             "cat .env",
             "cat ~/.ssh/config",
@@ -1702,7 +1710,7 @@ class ApprovalHookHarness(unittest.TestCase):
             input="{not-json",
             text=True,
             capture_output=True,
-            env={**os.environ, "SO_APPROVAL_P3_MANIFEST": str(manifest)},
+            env={**os.environ, "SO_APPROVAL_P3_MANIFEST": str(manifest), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)},
             timeout=2,
             check=False,
         )
@@ -1719,7 +1727,7 @@ This harness keeps Fable's Honey seat-specific read shapes executable without
 putting Honey's real host, users, or paths in the public manifest.  The fake
 Decider always says ALLOW; every dangerous shape must still remain on the
 absolute floor.  The SSH class proves ordinary login-user paths with remote
-=realpath=.  A =sudo -n -u agent-claude= reader is lexically checked against
+=realpath=.  A =sudo -n -u YOUR_AGENT_CLAUDE= reader is lexically checked against
 that host's roots because the login user cannot necessarily realpath the seat's
 private files; no remote command is executed by the harness.
 
@@ -1783,10 +1791,10 @@ class HoneyReadsTests(unittest.TestCase):
             def log_message(self, *_args):
                 pass
 
-        cls.decider = http.server.HTTPServer(("127.0.0.1", 0), AlwaysAllow)
+        cls.decider = http.server.HTTPServer(("localhost", 0), AlwaysAllow)
         cls.decider_thread = threading.Thread(target=cls.decider.serve_forever, daemon=True)
         cls.decider_thread.start()
-        cls.decider_url = f"http://127.0.0.1:{cls.decider.server_address[1]}/decide"
+        cls.decider_url = f"http://localhost:{cls.decider.server_address[1]}/decide"
 
     @classmethod
     def tearDownClass(cls):
@@ -1802,17 +1810,17 @@ class HoneyReadsTests(unittest.TestCase):
         ssh = next(item for item in data["classes"] if item["name"] == "ssh_readonly")
         ssh["enabled"] = True
         ssh["readonly_hosts"] = [{
-            "host": "honey",
-            "remote_home": "/home/gille",
+            "host": "YOUR_HONEY_HOST",
+            "remote_home": "/home/YOUR_HONEY_USER",
             "remote_path_roots": [
-                "/home/gille/DotCortex",
-                "/home/gille/HelmCortex",
-                "/home/agent-claude",
+                "/home/YOUR_HONEY_USER/DotCortex",
+                "/home/YOUR_HONEY_USER/HelmCortex",
+                "/home/YOUR_AGENT_CLAUDE",
                 "/var/tmp",
                 "/etc/init.d",
                 "/var/log",
             ],
-            "allowed_sudo_targets": ["agent-claude"],
+            "allowed_sudo_targets": ["YOUR_AGENT_CLAUDE"],
         }]
         if decider:
             data["manifest_version"] = "claude-approval-canary.kikin.v2"
@@ -1842,13 +1850,13 @@ class HoneyReadsTests(unittest.TestCase):
 
     def test_every_real_honey_read_shape_allows(self):
         commands = [
-            "ssh honey 'ls -ld /home/gille/DotCortex'",
-            "ssh honey 'git -C /home/gille/DotCortex status --short'",
-            "ssh honey 'ps -eo pid,lstart,user,args | grep -i opus'",
-            "ssh honey 'sudo -n -u agent-claude tmux -S /tmp/tmux-2002/default capture-pane -p -t honey-opus:0 | tail -20'",
-            "ssh honey 'sudo -n -u agent-claude tmux -S /tmp/tmux-2002/default list-windows -t honey-opus'",
-            "ssh honey 'sudo -n -u agent-claude cat /home/agent-claude/.local/state/dotcortex/claude-approval-kikin.jsonl | tail -5'",
-            "ssh honey 'sudo -n -u agent-claude ls -l /home/agent-claude/.config/dotcortex/'",
+            "ssh YOUR_HONEY_HOST 'ls -ld /home/YOUR_HONEY_USER/DotCortex'",
+            "ssh YOUR_HONEY_HOST 'git -C /home/YOUR_HONEY_USER/DotCortex status --short'",
+            "ssh YOUR_HONEY_HOST 'ps -eo pid,lstart,user,args | grep -i opus'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE tmux -S /tmp/tmux-2002/default capture-pane -p -t honey-opus:0 | tail -20'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE tmux -S /tmp/tmux-2002/default list-windows -t honey-opus'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE cat /home/YOUR_AGENT_CLAUDE/.local/state/dotcortex/claude-approval-kikin.jsonl | tail -5'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE ls -l /home/YOUR_AGENT_CLAUDE/.config/dotcortex/'",
         ]
         for command in commands:
             with self.subTest(command=command):
@@ -1856,25 +1864,25 @@ class HoneyReadsTests(unittest.TestCase):
 
     def test_sudo_and_secret_floor_corpus_asks_even_with_always_allow_decider(self):
         commands = [
-            "ssh honey 'cat /home/gille/Secret Vault/keepass.kdbx'",
-            "ssh honey \"cat '/home/gille/Secret Vault/keepass.kdbx'\"",
-            "ssh honey 'cat /home/gille/DotCortex/../Secret Vault/keepass.kdbx'",
-            "ssh honey 'cat /home/gille/SECRET VAULT/keepass.kdbx'",
-            "ssh honey 'cat /home/gille/Secret\\ Vault/keepass.kdbx'",
-            "ssh honey 'cat /home/agent-claude/.claude/.credentials.json'",
-            "ssh honey 'cat /home/agent-claude/.config/dotcortex/auth.json'",
-            "ssh honey 'cat ~/.ssh/config'",
-            "ssh honey 'cat /home/gille/HelmCortex/NEXUS/keys/private'",
-            "ssh honey 'cat /var/log/approval.token'",
-            "ssh honey 'cat /var/tmp/keepass.kdbx'",
-            "ssh honey 'sudo -n -u root cat /home/gille/DotCortex/README.md'",
-            "ssh honey 'sudo -u agent-claude cat /home/agent-claude/.config/dotcortex/x'",
-            "ssh honey 'sudo -n -u agent-claude bash -c id'",
-            "ssh honey 'sudo -n -u agent-claude sh -c id'",
-            "ssh honey 'sudo -n -u agent-claude python -c id'",
-            "ssh honey 'sudo -n -u agent-claude tmux send-keys -t honey-opus:0 x'",
-            "ssh honey 'cat /home/gille/DotCortex/README.md > /var/tmp/out'",
-            "ssh honey 'rm /var/tmp/out'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST \"cat '/home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx'\"",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/DotCortex/../Secret Vault/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/SECRET VAULT/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/Secret\\ Vault/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_AGENT_CLAUDE/.claude/.credentials.json'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_AGENT_CLAUDE/.config/dotcortex/auth.json'",
+            "ssh YOUR_HONEY_HOST 'cat ~/.ssh/config'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/HelmCortex/NEXUS/keys/private'",
+            "ssh YOUR_HONEY_HOST 'cat /var/log/approval.token'",
+            "ssh YOUR_HONEY_HOST 'cat /var/tmp/keepass.kdbx'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u root cat /home/YOUR_HONEY_USER/DotCortex/README.md'",
+            "ssh YOUR_HONEY_HOST 'sudo -u YOUR_AGENT_CLAUDE cat /home/YOUR_AGENT_CLAUDE/.config/dotcortex/x'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE bash -c id'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE sh -c id'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE python -c id'",
+            "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE tmux send-keys -t honey-opus:0 x'",
+            "ssh YOUR_HONEY_HOST 'cat /home/YOUR_HONEY_USER/DotCortex/README.md > /var/tmp/out'",
+            "ssh YOUR_HONEY_HOST 'rm /var/tmp/out'",
         ]
         manifest = self.manifest(decider=True)
         manifest_path = Path(self.temp.name) / "honey-reads-manifest.json"
@@ -1914,23 +1922,85 @@ class HoneyReadsTests(unittest.TestCase):
         ssh = data["entries"]["ssh_readonly"]
         ssh.pop("readonly_hosts")
         ssh.update({
-            "readonly_host": "honey",
-            "remote_home": "/home/gille",
-            "remote_path_roots": ["/home/gille/DotCortex"],
+            "readonly_host": "YOUR_HONEY_HOST",
+            "remote_home": "/home/YOUR_HONEY_USER",
+            "remote_path_roots": ["/home/YOUR_HONEY_USER/DotCortex"],
         })
-        self.assertEqual(self.engine._readonly_host_config(ssh, "honey")["remote_home"], "/home/gille")
+        self.assertEqual(self.engine._readonly_host_config(ssh, "YOUR_HONEY_HOST")["remote_home"], "/home/YOUR_HONEY_USER")
 
     def test_readonly_host_list_selects_each_host(self):
         data = self.manifest()
         ssh = data["entries"]["ssh_readonly"]
         ssh["readonly_hosts"].append({
             "host": "other",
-            "remote_home": "/home/other",
-            "remote_path_roots": ["/home/other/DotCortex"],
+            "remote_home": "/home/YOUR_OTHER_USER",
+            "remote_path_roots": ["/home/YOUR_OTHER_USER/DotCortex"],
             "allowed_sudo_targets": [],
         })
-        command = "ssh other 'ls -ld /home/other/DotCortex'"
+        command = "ssh other 'ls -ld /home/YOUR_OTHER_USER/DotCortex'"
         self.assertEqual(self.engine.classify(event(command, self.root), data), (True, "ssh_readonly"))
+
+    def test_approval_hook_sources_have_only_public_home_placeholders(self):
+        import re
+        sources = [REPO / "agents-approval.org", REPO / "agents-hooks.org"]
+        targets = []
+        for source in sources:
+            raw = source.read_text(encoding="utf-8")
+            targets.extend(REPO / target for target in re.findall(
+                r":tangle (all/[^\s]+)", raw
+            ) if "approval" in target or "claude-hook" in target)
+        # Check canonical prose, fixtures, engines, manifests and wrappers.
+        for path in sources + sorted(set(targets)):
+            with self.subTest(path=path.relative_to(REPO)):
+                raw = path.read_text(encoding="utf-8")
+                self.assertIsNone(re.search(
+                    r"/+home/(?!YOUR_)[A-Za-z0-9_-]+", raw
+                ), str(path.relative_to(REPO)))
+
+    def test_unreviewed_home_is_floor_even_with_always_allow_decider(self):
+        # Build a concrete synthetic username from the public placeholder.
+        home = "/home/" + "YOUR_HONEY_USER".replace("YOUR_", "fixture_").lower()
+        manifest = self.manifest(decider=True)
+        for tool, tool_input in (
+            ("Bash", {"command": f"cat {home}/notes.md"}),
+            ("Bash", {"command": f"ls {home}/notes.md"}),
+            ("Bash", {"command": f"cat /{home}/notes.md"}),
+            ("Read", {"file_path": home + "/notes.md"}),
+        ):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                payload = event("true", self.root)
+                payload.update(tool_name=tool, tool_input=tool_input)
+                self.assertEqual(self.engine.classify(payload, manifest),
+                                 (False, "true_floor"))
+        # Exercise the actual hook, with an ALWAYS-ALLOW Decider configured.
+        serialized = {key: value for key, value in manifest.items() if key != "entries"}
+        path = Path(self.temp.name) / "outside-home-manifest.json"
+        path.write_text(json.dumps(serialized), encoding="utf-8")
+        log = Path(self.temp.name) / "outside-home.jsonl"
+        completed = subprocess.run([str(HOOK)], input=json.dumps(event(f"cat {home}/notes.md", self.root)),
+            text=True, capture_output=True, timeout=5, check=False,
+            env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(path),
+                 "SO_APPROVAL_KIKIN_LOG": str(log), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(completed.stdout.strip())
+        record = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(record["reason"], "true_floor")
+        self.assertNotIn("decider_status", record)
+
+    def test_home_boundary_is_independent_of_username_in_both_engines(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("home_boundary_p3",
+            REPO / "all/.local/lib/dotcortex/claude_approval_p3.py")
+        p3 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(p3)
+        home = "/home/" + "YOUR_USER".replace("YOUR_", "fixture_").lower()
+        root = home + "/DotCortex"
+        for engine in (self.engine, p3):
+            with self.subTest(engine=engine.__name__):
+                self.assertFalse(engine._unreviewed_home_path(root + "/README.org", [root]))
+                for path in (home, "/" + home, root + "-other/README.org",
+                             root + "/../notes.md", home + "/other/README.org"):
+                    self.assertTrue(engine._unreviewed_home_path(path, [root]), path)
 
     def test_manifest_public_placeholders(self):
         raw = MANIFEST_SRC.read_text(encoding="utf-8")
@@ -1938,7 +2008,6 @@ class HoneyReadsTests(unittest.TestCase):
         self.assertIn("YOUR_HONEY_USER", raw)
         self.assertIn("YOUR_AGENT_CLAUDE", raw)
         self.assertNotIn('"honey"', raw)
-        self.assertNotIn("/home/gille", raw)
 
 
 if __name__ == "__main__":
@@ -1970,7 +2039,7 @@ authorize local Kikin reads or writes.
   "decider": {
     "enabled": false,
     "honey_url": null,
-    "kikin_url": "http://127.0.0.1:8098/v1/systemone",
+    "kikin_url": "http://YOUR_DECIDER_HOST/v1/systemone",
     "timeout_ms": 2200,
     "min_allow_confidence": 0.95,
     "questions": "single"
@@ -2123,10 +2192,17 @@ def _protected(value):
             or "token" in basename or "secret" in basename or "cookie" in basename)
 
 
-def _gille_path(value):
-    """The Gille home is floor-protected except for a proven SSH root."""
+def _unreviewed_home_path(value, roots=()):
+    """Keep any unreviewed home on the floor, independently of its username."""
     lowered = str(value).replace("\\", "/").casefold()
-    return bool(re.search(r"(?:^|/)home/gille(?:/|$|[\s'\";&|])", lowered))
+    reviewed = tuple(posixpath.normpath(str(root)).casefold() for root in roots)
+    for match in re.finditer(r"/[^\s'\";&|]+", lowered):
+        path = posixpath.normpath("/" + match.group().lstrip("/"))
+        if path == "/home" or path.startswith("/home/"):
+            if not any(path == root or path.startswith(root.rstrip("/") + "/")
+                       for root in reviewed):
+                return True
+    return False
 
 
 # 2026-10-09 (Fable/SO-APPROVAL-C1 decider-in-the-loop): the old hard floor mixed
@@ -2145,8 +2221,9 @@ def _true_floor(event, manifest=None):
         return True
     tool_input = event.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    roots = (tuple(manifest.get("roots") or ()) + tuple(manifest.get("scratch_roots") or ())) if manifest is not None else ()
     if not isinstance(command, str):
-        return False
+        return _unreviewed_home_path(raw, roots)
     if _protected(command):
         return True
     # 2026-10-10 (replay finding): an unbalanced quote (a comment saying
@@ -2161,7 +2238,7 @@ def _true_floor(event, manifest=None):
     readonly_proven = bool(
         manifest is not None and _ssh_readonly_proven(event, manifest)
     )
-    if _gille_path(raw) and not readonly_proven:
+    if _unreviewed_home_path(raw, roots) and not readonly_proven:
         return True
     # Word-level secret scan, path-like tokens only ('cat .env', 'cat NEXUS/keys/x'):
     # a bare word such as grep 'private' is not a path and must not floor.
@@ -2279,10 +2356,10 @@ def _floor_verb(lowered):
             return True
         if sub in {"filter-branch", "filter-repo"}:
             return True
-        # "any 'main' branch name" (review): a git subcommand that NAMES the
-        # main branch as a word is floor — switching, merging or moving main is
+        # "the canonical branch name" (review): a git subcommand that NAMES the
+        # canonical branch as a word is floor — switching, merging or moving it is
         # the fleet's protected spine. Reads never carry it as a bare word.
-        if sub and any(word in {"main", "master"} for word in lowered[2:]):
+        if sub and any(word in {"master"} for word in lowered[2:]):
             return True
     # Disk and permission tools (2026-10-10 review): irreversible or system-wide.
     disk_verbs = {"dd", "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mkfs.btrfs", "mkfs.xfs", "mkfs.vfat", "mkfs.fat", "mkfs.ntfs", "cryptsetup", "wipefs", "fdisk", "parted", "shred", "truncate", "mount", "umount", "crontab"}
@@ -3311,8 +3388,8 @@ def _outbound_tool_match(event, manifest):
     names = tuple(config.get("tool_names") or ())
     if event.get("tool_name") in names:
         raw = json.dumps(event.get("tool_input", {}), ensure_ascii=False, sort_keys=True).lower()
-        return not any(marker in raw for marker in (
-            "/home/gille", "secret vault", "nexus/keys", "/.ssh/", "~/.ssh/", "/.env",
+        return not _unreviewed_home_path(raw, manifest["roots"]) and not any(marker in raw for marker in (
+            "secret vault", "nexus/keys", "/.ssh/", "~/.ssh/", "/.env",
             "auth.json", "credentials.json", "oauth.json", "secrets.json", "id_rsa", "id_ed25519"))
     return False
 
@@ -3364,7 +3441,7 @@ def evaluate(event, manifest):
 # means ASK. The whole hook has a 3s budget; the Decider gets ~2.2s.
 # ---------------------------------------------------------------------------
 
-DECIDER_DEFAULT_KIKIN_URL = "http://127.0.0.1:8098/v1/systemone"
+DECIDER_DEFAULT_KIKIN_URL = "http://YOUR_DECIDER_HOST/v1/systemone"
 DECIDER_DEFAULT_TIMEOUT_MS = 2200
 DECIDER_DEFAULT_THRESHOLD = 0.95
 C1_MIN = 0.95
@@ -3862,7 +3939,7 @@ def event(tool_name, tool_input, cwd):
 
 def run_hook(payload, manifest, log=os.devnull):
     # Never let a test write the real decision ledger; os.devnull unless a test reads it.
-    env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": str(log)}
+    env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": str(log), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}
     return subprocess.run([str(HOOK)], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=2, check=False)
 
 
@@ -3870,6 +3947,14 @@ def decision(completed):
     if not completed.stdout.strip():
         return "ask"
     return json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"]
+
+
+def unavailable_decider_url():
+    import socket
+    with socket.socket() as listener:
+        listener.bind(("localhost", 0))
+        port = listener.getsockname()[1]
+    return f"http://localhost:{port}/v1/systemone"
 
 
 class KikinApprovalHookTests(unittest.TestCase):
@@ -4064,12 +4149,12 @@ class KikinApprovalHookTests(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        server = http.server.HTTPServer(("localhost", 0), Handler)
         server.threshold = 0.95
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.shutdown)
-        return f"http://127.0.0.1:{server.server_address[1]}/v1/systemone"
+        return f"http://localhost:{server.server_address[1]}/v1/systemone"
 
     def test_decider_allow_enables_grey_zone(self):
         # 2026-10-10: a plain grey read (no write, no interpreter body) stays
@@ -4096,7 +4181,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         self.assertEqual(records[-1]["decider_status"], "threshold_failed")
 
     def test_decider_down_asks(self):
-        manifest = self._decider_manifest(kikin="http://127.0.0.1:1/v1/systemone")
+        manifest = self._decider_manifest(kikin=unavailable_decider_url())
         log = self.scratch / "decider.jsonl"
         run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
@@ -4185,13 +4270,13 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_true_floor_destructive_git(self):
         commands = [
-            "git push", "git push origin main", "git push --force origin x",
-            "git reset --hard HEAD~1", "git reset --merge", "git rebase main",
+            "git push", "git push origin master", "git push --force origin x",
+            "git reset --hard HEAD~1", "git reset --merge", "git rebase master",
             "git clean -fd", "git checkout -- file.py", "git restore file.py",
             "git branch -D topic", "git stash drop", "git stash clear",
             "git commit --amend -m x", "git worktree prune", "git worktree remove ../x",
             "git filter-branch --tree-filter x", "git filter-repo --x",
-            "git checkout main", "git merge main",
+            "git checkout master", "git merge master",
         ]
         for command in commands:
             with self.subTest(command=command):
@@ -4244,9 +4329,9 @@ class KikinApprovalHookTests(unittest.TestCase):
             "cd /repo && kill -TERM 30130",
             "cd /repo && rm -rf build && make",
             "cd /repo && git commit --amend --no-edit",
-            "cd /repo && ssh honey date",
+            "cd /repo && ssh YOUR_HONEY_HOST date",
             "cd /repo && pkill -f worker",
-            "cd /repo && git push origin main",
+            "cd /repo && git push origin master",
             "cd /repo && crontab -r",
             "cd /repo && chmod -R 777 dir",
         ]
@@ -4336,7 +4421,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_decider_config_honey_api_validation(self):
         self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())  # load engine
-        base = {"enabled": True, "honey_url": "http://honey.tailnet:8097/decide", "kikin_url": "http://127.0.0.1:8098/v1/systemone", "timeout_ms": 2200, "min_allow_confidence": 0.95, "questions": "single"}
+        base = {"enabled": True, "honey_url": "http://YOUR_HONEY_HOST/decide", "kikin_url": "http://YOUR_DECIDER_HOST/v1/systemone", "timeout_ms": 2200, "min_allow_confidence": 0.95, "questions": "single"}
         cfg = self._engine._decider_config({"decider": base})
         self.assertEqual(cfg["honey_api"], "kikin")
         cfg2 = self._engine._decider_config({"decider": {**base, "honey_api": "r2d2d"}})
@@ -4370,11 +4455,11 @@ class KikinApprovalHookTests(unittest.TestCase):
             def log_message(self, *a):
                 pass
 
-        server = http.server.HTTPServer(("127.0.0.1", 0), FakeR2D2D)
+        server = http.server.HTTPServer(("localhost", 0), FakeR2D2D)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         port = server.server_address[1]
-        manifest = self._decider_manifest(honey=f"http://127.0.0.1:{port}/decide", honey_api="r2d2d", kikin="http://127.0.0.1:1/v1/systemone")
+        manifest = self._decider_manifest(honey=f"http://localhost:{port}/decide", honey_api="r2d2d", kikin=unavailable_decider_url())
         try:
             log = self.scratch / "r2d2d.jsonl"
             run_hook(event("Bash", {"command": "true"}, self.root), manifest, log)
@@ -4419,7 +4504,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_malformed_input_asks(self):
         manifest = self.manifest("local_read")
-        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull}, timeout=2, check=False)
+        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull, "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}, timeout=2, check=False)
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(decision(completed), "ask")
 
@@ -4487,27 +4572,33 @@ class BuntaReplayTests(unittest.TestCase):
         cls.scratch = TMP / "scratch"
         cls.scratch.mkdir()
         cls.manifest = bunta_manifest(cls.engine, cls.root)
-        # r2d2d decider endpoint: fake ALWAYS-ALLOW (separate module file,
-        # written to TMP at runtime; no inline -c quoting hazards).
-        server_src = TMP / "fake_decider.py"
-        server_src.write_text(
-            "import http.server, json\n"
-            "class H(http.server.BaseHTTPRequestHandler):\n"
-            "    def do_POST(self):\n"
-            "        n = int(self.headers.get('content-length', 0)); self.rfile.read(n)\n"
-            "        body = json.dumps({'answers': [{'choice': 'no', 'confidence': 0.99, 'p_yes': 0.01}], 'ms': 5}).encode()\n"
-            "        self.send_response(200); self.send_header('content-length', str(len(body))); self.end_headers(); self.wfile.write(body)\n"
-            "    def log_message(self, *a): pass\n"
-            "http.server.HTTPServer(('127.0.0.1', 18097), H).serve_forever()\n")
-        cls.fake_decider = subprocess.Popen([sys.executable, str(server_src)],
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        import time
-        time.sleep(0.4)
+        # Fake ALWAYS-ALLOW endpoint on an ephemeral local socket.
+        import http.server
+        import threading
+
+        class AlwaysAllow(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("content-length", 0)))
+                body = json.dumps({"answers": [{"choice": "no", "confidence": 0.99,
+                                               "p_yes": 0.01}], "ms": 5}).encode()
+                self.send_response(200)
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        cls.fake_decider = http.server.HTTPServer(("localhost", 0), AlwaysAllow)
+        cls.decider_thread = threading.Thread(target=cls.fake_decider.serve_forever, daemon=True)
+        cls.decider_thread.start()
+        cls.decider_url = f"http://localhost:{cls.fake_decider.server_address[1]}/decide"
 
     @classmethod
     def tearDownClass(cls):
-        cls.fake_decider.terminate()
-        cls.fake_decider.wait(timeout=5)
+        cls.fake_decider.shutdown()
+        cls.fake_decider.server_close()
+        cls.decider_thread.join(timeout=5)
 
     @classmethod
     def _with_entries(cls, manifest):
@@ -4524,7 +4615,7 @@ class BuntaReplayTests(unittest.TestCase):
     def test_hard_denies_with_decider_enabled(self):
         manifest = json.loads(json.dumps(self.manifest))
         manifest["decider"] = {"enabled": True,
-                               "honey_url": "http://127.0.0.1:18097/decide",
+                               "honey_url": self.decider_url,
                                "honey_api": "r2d2d",
                                "kikin_url": None,
                                "timeout_ms": 2000,
@@ -4537,7 +4628,7 @@ class BuntaReplayTests(unittest.TestCase):
             ("git push", "true_floor"),
             ("git reset --hard HEAD~1", "true_floor"),
             ("cat ~/.ssh/id_ed25519", "true_floor"),
-            ("cat /home/gille/.kdbx KeePass", "true_floor"),
+            ("cat /home/YOUR_HONEY_USER/.kdbx KeePass", "true_floor"),
             ("cat .env", "true_floor"),
             ("git worktree prune", "true_floor"),
         ]
@@ -4552,7 +4643,7 @@ class BuntaReplayTests(unittest.TestCase):
         manifest = json.loads(json.dumps(self.manifest))
         manifest["decider"] = {
             "enabled": True,
-            "honey_url": "http://127.0.0.1:18097/decide",
+            "honey_url": self.decider_url,
             "honey_api": "r2d2d",
             "kikin_url": None,
             "timeout_ms": 2000,
@@ -4582,8 +4673,8 @@ class BuntaReplayTests(unittest.TestCase):
             "git clean -fd",
             "git checkout -- README.md",
             "cat ~/.ssh/id_ed25519",
-            "cat /home/agent-claude/.env",
-            "cat /home/gille/Secret Vault/keepass.kdbx",
+            "cat /home/YOUR_AGENT_CLAUDE/.env",
+            "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
             "cat NEXUS/keys/token",
             "curl -X POST https://example.invalid/decide",
         ]
@@ -4613,15 +4704,15 @@ class BuntaReplayTests(unittest.TestCase):
         self.assertTrue(all(record["reason"] == "true_floor" for record in records))
         self.assertTrue(all("decider_status" not in record for record in records))
 
-    # ---- Gillean's home is protected hard (fix round 2026-10-10 item 2) ----
-    # Nothing under /home/gille outside an explicit root, and nothing under
-    # /home/gille/Secret Vault, may EVER be allowed — floor, even with an
-    # always-allow decider. The Bunta manifest carries NO gille root, so no
+    # ---- The Honey login user's home is protected hard (fix round 2026-10-10 item 2) ----
+    # Nothing under /home/YOUR_HONEY_USER outside an explicit root, and nothing under
+    # /home/YOUR_HONEY_USER/Secret Vault, may EVER be allowed — floor, even with an
+    # always-allow decider. The Bunta manifest carries NO YOUR_HONEY_USER root, so no
     # class can reach it and the floor denies all of it.
-    def test_gille_home_never_allowed_even_with_always_allow_decider(self):
+    def test_honey_user_home_never_allowed_even_with_always_allow_decider(self):
         manifest = json.loads(json.dumps(self.manifest))
         manifest["decider"] = {"enabled": True,
-                               "honey_url": "http://127.0.0.1:18097/decide",
+                               "honey_url": self.decider_url,
                                "honey_api": "r2d2d",
                                "kikin_url": None,
                                "timeout_ms": 2000,
@@ -4629,16 +4720,16 @@ class BuntaReplayTests(unittest.TestCase):
                                "questions": "single"}
         manifest = self._with_entries(manifest)
         denied = [
-            "cat /home/gille/notes.md",
-            "cat /home/gille/Secret Vault/keepass.kdbx",
-            "ls /home/gille/Secret Vault/",
-            "sed -n 1,60p /home/gille/.ductor/workspace/state.json",
-            "grep -r x /home/gille/metsatron-peer/",
-            "head -5 /home/gille/.ssh/authorized_keys",
-            "cd /home/gille && cat README",
-            "cat /home/gille/DotCortex/agents-approval.org",
-            "cat /home/gille/HelmCortex/LOGS/TODO",
-            "find /home/gille/Secret Vault -name '*.kdbx'",
+            "cat /home/YOUR_HONEY_USER/notes.md",
+            "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
+            "ls /home/YOUR_HONEY_USER/Secret Vault/",
+            "sed -n 1,60p /home/YOUR_HONEY_USER/.ductor/workspace/state.json",
+            "grep -r x /home/YOUR_HONEY_USER/YOUR_USER-peer/",
+            "head -5 /home/YOUR_HONEY_USER/.ssh/authorized_keys",
+            "cd /home/YOUR_HONEY_USER && cat README",
+            "cat /home/YOUR_HONEY_USER/DotCortex/agents-approval.org",
+            "cat /home/YOUR_HONEY_USER/HelmCortex/LOGS/TODO",
+            "find /home/YOUR_HONEY_USER/Secret Vault -name '*.kdbx'",
         ]
         for command in denied:
             with self.subTest(command=command):
@@ -4688,7 +4779,7 @@ class BuntaReplayTests(unittest.TestCase):
     def test_heredoc_and_dash_c_are_floor_routed(self):
         manifest = json.loads(json.dumps(self.manifest))
         manifest["decider"] = {"enabled": True,
-                               "honey_url": "http://127.0.0.1:18097/decide",
+                               "honey_url": self.decider_url,
                                "honey_api": "r2d2d",
                                "kikin_url": None,
                                "timeout_ms": 2000,

@@ -49,27 +49,33 @@ class BuntaReplayTests(unittest.TestCase):
         cls.scratch = TMP / "scratch"
         cls.scratch.mkdir()
         cls.manifest = bunta_manifest(cls.engine, cls.root)
-        # r2d2d decider endpoint: fake ALWAYS-ALLOW (separate module file,
-        # written to TMP at runtime; no inline -c quoting hazards).
-        server_src = TMP / "fake_decider.py"
-        server_src.write_text(
-            "import http.server, json\n"
-            "class H(http.server.BaseHTTPRequestHandler):\n"
-            "    def do_POST(self):\n"
-            "        n = int(self.headers.get('content-length', 0)); self.rfile.read(n)\n"
-            "        body = json.dumps({'answers': [{'choice': 'no', 'confidence': 0.99, 'p_yes': 0.01}], 'ms': 5}).encode()\n"
-            "        self.send_response(200); self.send_header('content-length', str(len(body))); self.end_headers(); self.wfile.write(body)\n"
-            "    def log_message(self, *a): pass\n"
-            "http.server.HTTPServer(('127.0.0.1', 18097), H).serve_forever()\n")
-        cls.fake_decider = subprocess.Popen([sys.executable, str(server_src)],
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        import time
-        time.sleep(0.4)
+        # Fake ALWAYS-ALLOW endpoint on an ephemeral local socket.
+        import http.server
+        import threading
+
+        class AlwaysAllow(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("content-length", 0)))
+                body = json.dumps({"answers": [{"choice": "no", "confidence": 0.99,
+                                               "p_yes": 0.01}], "ms": 5}).encode()
+                self.send_response(200)
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        cls.fake_decider = http.server.HTTPServer(("localhost", 0), AlwaysAllow)
+        cls.decider_thread = threading.Thread(target=cls.fake_decider.serve_forever, daemon=True)
+        cls.decider_thread.start()
+        cls.decider_url = f"http://localhost:{cls.fake_decider.server_address[1]}/decide"
 
     @classmethod
     def tearDownClass(cls):
-        cls.fake_decider.terminate()
-        cls.fake_decider.wait(timeout=5)
+        cls.fake_decider.shutdown()
+        cls.fake_decider.server_close()
+        cls.decider_thread.join(timeout=5)
 
     @classmethod
     def _with_entries(cls, manifest):
@@ -86,7 +92,7 @@ class BuntaReplayTests(unittest.TestCase):
     def test_hard_denies_with_decider_enabled(self):
         manifest = json.loads(json.dumps(self.manifest))
         manifest["decider"] = {"enabled": True,
-                               "honey_url": "http://127.0.0.1:18097/decide",
+                               "honey_url": self.decider_url,
                                "honey_api": "r2d2d",
                                "kikin_url": None,
                                "timeout_ms": 2000,
@@ -99,7 +105,7 @@ class BuntaReplayTests(unittest.TestCase):
             ("git push", "true_floor"),
             ("git reset --hard HEAD~1", "true_floor"),
             ("cat ~/.ssh/id_ed25519", "true_floor"),
-            ("cat /home/gille/.kdbx KeePass", "true_floor"),
+            ("cat /home/YOUR_HONEY_USER/.kdbx KeePass", "true_floor"),
             ("cat .env", "true_floor"),
             ("git worktree prune", "true_floor"),
         ]
@@ -114,7 +120,7 @@ class BuntaReplayTests(unittest.TestCase):
         manifest = json.loads(json.dumps(self.manifest))
         manifest["decider"] = {
             "enabled": True,
-            "honey_url": "http://127.0.0.1:18097/decide",
+            "honey_url": self.decider_url,
             "honey_api": "r2d2d",
             "kikin_url": None,
             "timeout_ms": 2000,
@@ -144,8 +150,8 @@ class BuntaReplayTests(unittest.TestCase):
             "git clean -fd",
             "git checkout -- README.md",
             "cat ~/.ssh/id_ed25519",
-            "cat /home/agent-claude/.env",
-            "cat /home/gille/Secret Vault/keepass.kdbx",
+            "cat /home/YOUR_AGENT_CLAUDE/.env",
+            "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
             "cat NEXUS/keys/token",
             "curl -X POST https://example.invalid/decide",
         ]
@@ -175,15 +181,15 @@ class BuntaReplayTests(unittest.TestCase):
         self.assertTrue(all(record["reason"] == "true_floor" for record in records))
         self.assertTrue(all("decider_status" not in record for record in records))
 
-    # ---- Gillean's home is protected hard (fix round 2026-10-10 item 2) ----
-    # Nothing under /home/gille outside an explicit root, and nothing under
-    # /home/gille/Secret Vault, may EVER be allowed — floor, even with an
-    # always-allow decider. The Bunta manifest carries NO gille root, so no
+    # ---- The Honey login user's home is protected hard (fix round 2026-10-10 item 2) ----
+    # Nothing under /home/YOUR_HONEY_USER outside an explicit root, and nothing under
+    # /home/YOUR_HONEY_USER/Secret Vault, may EVER be allowed — floor, even with an
+    # always-allow decider. The Bunta manifest carries NO YOUR_HONEY_USER root, so no
     # class can reach it and the floor denies all of it.
-    def test_gille_home_never_allowed_even_with_always_allow_decider(self):
+    def test_honey_user_home_never_allowed_even_with_always_allow_decider(self):
         manifest = json.loads(json.dumps(self.manifest))
         manifest["decider"] = {"enabled": True,
-                               "honey_url": "http://127.0.0.1:18097/decide",
+                               "honey_url": self.decider_url,
                                "honey_api": "r2d2d",
                                "kikin_url": None,
                                "timeout_ms": 2000,
@@ -191,16 +197,16 @@ class BuntaReplayTests(unittest.TestCase):
                                "questions": "single"}
         manifest = self._with_entries(manifest)
         denied = [
-            "cat /home/gille/notes.md",
-            "cat /home/gille/Secret Vault/keepass.kdbx",
-            "ls /home/gille/Secret Vault/",
-            "sed -n 1,60p /home/gille/.ductor/workspace/state.json",
-            "grep -r x /home/gille/metsatron-peer/",
-            "head -5 /home/gille/.ssh/authorized_keys",
-            "cd /home/gille && cat README",
-            "cat /home/gille/DotCortex/agents-approval.org",
-            "cat /home/gille/HelmCortex/LOGS/TODO",
-            "find /home/gille/Secret Vault -name '*.kdbx'",
+            "cat /home/YOUR_HONEY_USER/notes.md",
+            "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
+            "ls /home/YOUR_HONEY_USER/Secret Vault/",
+            "sed -n 1,60p /home/YOUR_HONEY_USER/.ductor/workspace/state.json",
+            "grep -r x /home/YOUR_HONEY_USER/YOUR_USER-peer/",
+            "head -5 /home/YOUR_HONEY_USER/.ssh/authorized_keys",
+            "cd /home/YOUR_HONEY_USER && cat README",
+            "cat /home/YOUR_HONEY_USER/DotCortex/agents-approval.org",
+            "cat /home/YOUR_HONEY_USER/HelmCortex/LOGS/TODO",
+            "find /home/YOUR_HONEY_USER/Secret Vault -name '*.kdbx'",
         ]
         for command in denied:
             with self.subTest(command=command):
@@ -250,7 +256,7 @@ class BuntaReplayTests(unittest.TestCase):
     def test_heredoc_and_dash_c_are_floor_routed(self):
         manifest = json.loads(json.dumps(self.manifest))
         manifest["decider"] = {"enabled": True,
-                               "honey_url": "http://127.0.0.1:18097/decide",
+                               "honey_url": self.decider_url,
                                "honey_api": "r2d2d",
                                "kikin_url": None,
                                "timeout_ms": 2000,
