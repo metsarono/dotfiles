@@ -1,0 +1,290 @@
+#+TITLE: Agent Peer — Repository Allowlist Regression Tests
+#+DESCRIPTION: Isolated multi-repository endpoint and authority tests
+#+PROPERTY: header-args :mkdirp yes :results silent :comments no
+
+* Repository allowlist contract
+
+These tests use temporary primary checkouts, a private temporary registry, and
+store delivery.  They never contact Herdr or a network peer.  Run the tangled
+script with Python alongside =agent-peer selftest= and =agent-peer-lab selftest=.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-agent-peer-multirepo.py :comments no
+"""Exercise endpoint repository selection through the real CLI and receive gate."""
+
+import argparse
+import contextlib
+import copy
+import io
+import json
+import os
+import pathlib
+import runpy
+import shlex
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+
+CLI = pathlib.Path(__file__).resolve().parents[3] / "bin" / "agent-peer"
+PEER = runpy.run_path(str(CLI), run_name="agent_peer_test")
+SENDER = "host-a/claude/coordinator"
+DESTINATION = "host-b/codex/worker"
+
+
+class EndpointRepositories(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="peer-multirepo-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.env = mock.patch.dict(os.environ, {
+            "AGENT_PEER_REGISTRY_FILE": str(self.root / "registry.json"),
+            "AGENT_PEER_STATE_DIR": str(self.root / "state"),
+            "AGENT_PEER_HERDR_BIN": "/bin/false",
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.repos = [self.root / name for name in ("RepoA", "RepoB", "RepoC")]
+        for root in self.repos:
+            subprocess.run(["git", "init", "-q", "-b", "master", str(root)], check=True)
+        self.call("write_registry", self.call("blank_registry", "host-b"))
+
+    def call(self, name, *args, **kwargs):
+        return PEER[name](*args, **kwargs)
+
+    def register(self, roots):
+        argv = [sys.executable, str(CLI), "endpoint-set", DESTINATION,
+                "--herdr-session", "peer-lab", "--herdr-target", "worker",
+                "--delivery", "store", "--accept-from", SENDER]
+        for root in roots:
+            argv.extend(["--repo-root", str(root)])
+        result = subprocess.run(argv, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout)["endpoint"]
+
+    def envelope(self, root, *, write=False, lease=None, push=False):
+        handoff = None
+        if write:
+            handoff = {
+                "schema_version": "1.0", "id": "fixture", "scope": root.name,
+                "working_directory": str(root), "goal": "Verify matched repository",
+                "constraints": {"read_only": False, "allow_git": "commit_via_skill",
+                                "forbidden_paths": ["LOGS/"]},
+                "steps": [], "deliverables": [], "stop_conditions": [],
+            }
+        return self.call("compose_envelope", from_peer=SENDER, to_peer=DESTINATION,
+                         repo=root.name, repo_root=str(root),
+                         checkout_id=f"host-b:{root.name}:task", access="write" if write else "read",
+                         body="Fixture", handoff=handoff, allow_git=write,
+                         allow_push=push, allow_pull=False, lease_id=lease)
+
+    def lease(self, root, scopes=None):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.call("command_lease_acquire", scopes or ["checkout-write"],
+                      f"host-b:{root.name}:task", DESTINATION, 3600)
+        return json.loads(output.getvalue())["lease_id"]
+
+    def receive(self, envelope):
+        return self.call("receive_envelope", envelope)
+
+    def test_single_root_cli_and_delivery_unchanged(self):
+        endpoint = self.register(self.repos[:1])
+        self.assertEqual(endpoint["repo_root"], str(self.repos[0]))
+        self.assertEqual(self.receive(self.envelope(self.repos[0]))["state"], "stored")
+
+    def test_legacy_stored_endpoint_loads_without_migration(self):
+        endpoint = {"provider": "codex", "session_id": "worker",
+                    "herdr_session": "peer-lab", "herdr_target": "worker",
+                    "repo_root": str(self.repos[0]), "accept_from": [SENDER], "delivery": "store"}
+        registry = self.call("read_registry")
+        registry["endpoints"][DESTINATION] = endpoint
+        self.call("write_registry", registry)
+        before = pathlib.Path(os.environ["AGENT_PEER_REGISTRY_FILE"]).read_bytes()
+        envelope = self.envelope(self.repos[0])
+        # Existing records have never declared a repo alias or checkout prefix.
+        envelope["workspace"].update(repo="legacy-alias", checkout_id="legacy-checkout")
+        self.assertEqual(self.receive(envelope)["state"], "stored")
+        self.assertEqual(pathlib.Path(os.environ["AGENT_PEER_REGISTRY_FILE"]).read_bytes(), before)
+
+    def test_multi_root_cli_retains_both_roots(self):
+        endpoint = self.register(self.repos[:2])
+        self.assertEqual(endpoint["repo_roots"], [str(p) for p in self.repos[:2]])
+        self.assertEqual(endpoint["repo_root"], str(self.repos[0]))
+
+    def test_multi_root_accepts_each_declared_repository(self):
+        self.register(self.repos[:2])
+        for root in self.repos[:2]:
+            with self.subTest(repo=root.name):
+                self.assertEqual(self.receive(self.envelope(root))["state"], "stored")
+
+    def test_undeclared_root_error_contains_runnable_preserving_command(self):
+        self.register(self.repos[:2])
+        with self.assertRaises(PEER["PeerError"]) as caught:
+            self.receive(self.envelope(self.repos[2]))
+        detail = str(caught.exception)
+        for root in self.repos:
+            self.assertIn(str(root), detail)
+        command = detail.split("To add this root, run: ", 1)[1]
+        argv = shlex.split(command)
+        self.assertEqual(argv[:3], ["agent-peer", "endpoint-set", DESTINATION])
+        self.assertIn("store", argv)
+        self.assertIn(SENDER, argv)
+        result = subprocess.run([sys.executable, str(CLI), *argv[1:]], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.receive(self.envelope(self.repos[2]))["state"], "stored")
+
+    def test_repo_name_must_match_selected_root(self):
+        self.register(self.repos[:2])
+        envelope = self.envelope(self.repos[1])
+        envelope["workspace"]["repo"] = self.repos[0].name
+        with self.assertRaisesRegex(PEER["PeerError"], "repo.*match"):
+            self.receive(envelope)
+
+    def test_checkout_id_must_match_selected_repo_and_host(self):
+        self.register(self.repos[:2])
+        for checkout_id in ("host-b:RepoA:task", "host-z:RepoB:task", "host-b:RepoB-other"):
+            with self.subTest(checkout_id=checkout_id):
+                envelope = self.envelope(self.repos[1])
+                envelope["workspace"]["checkout_id"] = checkout_id
+                with self.assertRaisesRegex(PEER["PeerError"], "checkout_id"):
+                    self.receive(envelope)
+
+    def test_multi_root_write_lease_bound_to_each_matched_repository(self):
+        self.register(self.repos[:2])
+        for root in self.repos[:2]:
+            with self.subTest(repo=root.name):
+                lease = self.lease(root)
+                self.assertEqual(self.receive(self.envelope(root, write=True, lease=lease))["state"], "stored")
+
+    def test_lease_for_other_declared_repo_cannot_authorize_write(self):
+        self.register(self.repos[:2])
+        lease = self.lease(self.repos[0])
+        with self.assertRaisesRegex(PEER["PeerError"], "no active local checkout-write lease"):
+            self.receive(self.envelope(self.repos[1], write=True, lease=lease))
+
+    def test_upstream_scope_required_on_matched_repository(self):
+        self.register(self.repos[:2])
+        lease = self.lease(self.repos[1])
+        with self.assertRaisesRegex(PEER["PeerError"], "upstream-integration lease"):
+            self.receive(self.envelope(self.repos[1], write=True, lease=lease, push=True))
+
+    def test_combined_lease_authorizes_matched_repository(self):
+        self.register(self.repos[:2])
+        lease = self.lease(self.repos[1], ["checkout-write", "upstream-integration"])
+        self.assertEqual(self.receive(self.envelope(self.repos[1], write=True, lease=lease, push=True))["state"], "stored")
+
+    def test_handoff_must_match_selected_root(self):
+        self.register(self.repos[:2])
+        envelope = self.envelope(self.repos[1], write=True, lease=self.lease(self.repos[1]))
+        envelope["payload"]["task_handoff"]["working_directory"] = str(self.repos[0])
+        with self.assertRaisesRegex(PEER["PeerError"], "working_directory"):
+            self.receive(envelope)
+
+    def test_logs_remains_forbidden(self):
+        self.register(self.repos[:2])
+        envelope = self.envelope(self.repos[1], write=True, lease=self.lease(self.repos[1]))
+        envelope["payload"]["task_handoff"]["constraints"]["forbidden_paths"] = []
+        with self.assertRaisesRegex(PEER["PeerError"], "LOGS/"):
+            self.receive(envelope)
+
+    def test_sender_allowlist_remains_required(self):
+        self.register(self.repos[:2])
+        envelope = self.envelope(self.repos[1])
+        envelope["from"] = self.call("peer_object", "host-a/claude/unlisted")
+        with self.assertRaisesRegex(PEER["PeerError"], "sender is not allowed"):
+            self.receive(envelope)
+
+    def test_single_root_rejects_other_root(self):
+        self.register(self.repos[:1])
+        with self.assertRaisesRegex(PEER["PeerError"], "declared roots"):
+            self.receive(self.envelope(self.repos[1]))
+
+    def test_multi_root_accepts_checkout_id_without_task_suffix(self):
+        self.register(self.repos[:2])
+        envelope = self.envelope(self.repos[0])
+        envelope["workspace"]["checkout_id"] = "host-b:RepoA"
+        self.assertEqual(self.receive(envelope)["state"], "stored")
+
+    def test_multi_root_rejects_empty_task_suffix(self):
+        self.register(self.repos[:2])
+        envelope = self.envelope(self.repos[1])
+        envelope["workspace"]["checkout_id"] = "host-b:RepoB:"
+        with self.assertRaisesRegex(PEER["PeerError"], "checkout_id"):
+            self.receive(envelope)
+
+    def test_other_repo_lease_id_cannot_replace_selected_repo_grant(self):
+        self.register(self.repos[:2])
+        lease_a = self.lease(self.repos[0])
+        self.lease(self.repos[1])
+        with self.assertRaisesRegex(PEER["PeerError"], "lease ID does not match"):
+            self.receive(self.envelope(self.repos[1], write=True, lease=lease_a))
+
+    def test_expired_lease_refused_for_selected_repo(self):
+        self.register(self.repos[:2])
+        lease = self.lease(self.repos[1])
+        database = self.call("load_leases")
+        for value in database["leases"].values():
+            value["expires_at"] = "2000-01-01T00:00:00Z"
+        self.call("atomic_json", self.call("leases_path"), database)
+        with self.assertRaisesRegex(PEER["PeerError"], "no active local checkout-write lease"):
+            self.receive(self.envelope(self.repos[1], write=True, lease=lease))
+
+    def test_remote_mount_gate_uses_selected_root(self):
+        self.register(self.repos[:2])
+        envelope = self.envelope(self.repos[1], write=True, lease=self.lease(self.repos[1]))
+        original_run = PEER["run"]
+        def run(argv, **kwargs):
+            if argv[0] == "findmnt":
+                self.assertEqual(argv[-1], str(self.repos[1]))
+                return subprocess.CompletedProcess(argv, 0,
+                           json.dumps({"filesystems": [{"fstype": "nfs"}]}), "")
+            return original_run(argv, **kwargs)
+        with mock.patch.dict(PEER["git_checkout_gate"].__globals__, {"run": run}):
+            with self.assertRaisesRegex(PEER["PeerError"], "remote-mounted checkout writes are forbidden"):
+                self.receive(envelope)
+
+    def test_malformed_allowlist_never_falls_back_to_scalar(self):
+        self.register(self.repos[:2])
+        for roots in ([], "not-a-list", [None], ["relative"]):
+            with self.subTest(roots=roots):
+                registry = self.call("read_registry")
+                registry["endpoints"][DESTINATION]["repo_roots"] = roots
+                self.call("write_registry", registry)
+                with self.assertRaisesRegex(PEER["PeerError"], "endpoint repository roots"):
+                    self.receive(self.envelope(self.repos[0]))
+
+    def test_duplicate_repo_names_cannot_share_checkout_identity(self):
+        second = self.root / "other" / self.repos[0].name
+        second.mkdir(parents=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(PEER["PeerError"], "distinct repository names"):
+                self.call("command_endpoint_set", DESTINATION, "peer-lab", "worker",
+                          [str(self.repos[0]), str(second)], [SENDER], "store")
+
+    def test_reply_keeps_original_repo_when_destination_declares_it(self):
+        self.register(self.repos[1::-1])
+        registry = self.call("read_registry")
+        endpoint = copy.deepcopy(registry["endpoints"][DESTINATION])
+        endpoint.update(provider="claude", session_id="coordinator")
+        registry["endpoints"][SENDER] = endpoint
+        self.call("write_registry", registry)
+        inbound = self.envelope(self.repos[1])
+        self.call("write_record", "inbox", inbound, "stored")
+        captured = []
+        def send(envelope):
+            captured.append(envelope)
+            return {"state": "stored"}
+        with mock.patch.dict(PEER["command_reply"].__globals__, {"send_envelope": send}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.call("command_reply", argparse.Namespace(message_id=inbound["message_id"],
+                          from_peer=DESTINATION, body="done", body_file=None))
+        self.assertEqual(captured[0]["workspace"]["repo"], inbound["workspace"]["repo"])
+        self.assertEqual(captured[0]["workspace"]["repo_root"], inbound["workspace"]["repo_root"])
+        self.assertEqual(captured[0]["workspace"]["checkout_id"], "host-a:RepoB:task")
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC

@@ -1033,6 +1033,23 @@ an empty structural template; =agent-peer init= creates the real mode-0600 file.
 }
 #+END_SRC
 
+** Endpoint repository declarations
+
+=endpoint-set --repo-root= is repeatable.  Supply the complete desired set on
+an update: the command replaces the declaration and preserves no omitted root.
+The first root remains the legacy =repo_root= and the fallback for replies;
+multiple distinct roots additionally populate =repo_roots=.  Existing scalar
+records and single-root callers retain their historical behavior without a
+registry migration.  Multi-root records require distinct repository directory
+names and match the canonical root, its name as =workspace.repo=, and
+=HOST:REPO= or =HOST:REPO:TASK= as =checkout_id=.
+TaskHandoff, local-checkout, and lease gates run against the selected repository.
+A declaration grants no write or upstream authority by itself.
+
+#+BEGIN_EXAMPLE
+agent-peer endpoint-set HOST/PROVIDER/SESSION --herdr-session SESSION --herdr-target TARGET --delivery store --repo-root /verified/RepoA --repo-root /verified/RepoB --accept-from HOST/PROVIDER/COORDINATOR
+#+END_EXAMPLE
+
 ** Router executable
 
 #+BEGIN_SRC python :tangle all/.local/bin/agent-peer :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755) :comments no
@@ -1052,6 +1069,7 @@ import os
 import pathlib
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1271,7 +1289,7 @@ def command_endpoint_set(
     peer_id: str,
     herdr_session: str,
     herdr_target: str,
-    repo_root: str,
+    repo_root: str | list[str],
     accept_from: list[str],
     delivery: str,
 ) -> int:
@@ -1282,9 +1300,16 @@ def command_endpoint_set(
     validate_component(herdr_session, "herdr_session")
     if not herdr_target or len(herdr_target) > 256:
         raise PeerError("herdr_target must be a non-empty explicit target")
-    root = pathlib.Path(repo_root).expanduser().resolve(strict=True)
-    if not root.is_dir():
-        raise PeerError("repo_root must be an existing directory")
+    requested_roots = [repo_root] if isinstance(repo_root, str) else repo_root
+    if not requested_roots:
+        raise PeerError("at least one --repo-root is required")
+    roots: list[str] = []
+    for requested in requested_roots:
+        root = pathlib.Path(requested).expanduser().resolve(strict=True)
+        if not root.is_dir():
+            raise PeerError("repo_root must be an existing directory")
+        if str(root) not in roots:
+            roots.append(str(root))
     if not accept_from:
         raise PeerError("at least one exact --accept-from peer is required")
     for sender in accept_from:
@@ -1296,10 +1321,15 @@ def command_endpoint_set(
         "session_id": session_id,
         "herdr_session": herdr_session,
         "herdr_target": herdr_target,
-        "repo_root": str(root),
+        "repo_root": roots[0],
         "accept_from": sorted(set(accept_from)),
         "delivery": delivery,
     }
+    # Keep the scalar record and its historical semantics for single-root
+    # callers; multi-root records declare an authoritative ordered allowlist.
+    if len(roots) > 1:
+        endpoint["repo_roots"] = roots
+        endpoint_repo_roots(endpoint)
     endpoints = registry["endpoints"]
     assert isinstance(endpoints, dict)
     if isinstance(endpoints.get(peer_id), dict) and endpoints[peer_id].get("lifecycle"):
@@ -2370,6 +2400,60 @@ def receipt(
     }
 
 
+def endpoint_repo_roots(endpoint: dict[str, object]) -> list[str]:
+    """Read an explicit allowlist or an unchanged legacy scalar record."""
+    roots = endpoint.get("repo_roots") if "repo_roots" in endpoint else [endpoint.get("repo_root")]
+    if (not isinstance(roots, list) or not roots
+            or any(not isinstance(root, str) or not root
+                   or not pathlib.Path(root).is_absolute() for root in roots)):
+        raise PeerError("endpoint repository roots must be a non-empty list of absolute paths")
+    declared = list(dict.fromkeys(roots))
+    if "repo_roots" in endpoint:
+        names = [pathlib.Path(root).resolve().name for root in declared]
+        if len(set(names)) != len(names):
+            raise PeerError("multi-root endpoints require distinct repository names")
+    return declared
+
+
+def endpoint_add_root_command(peer_id: str, endpoint: dict[str, object], root: str) -> str:
+    """Preserve routing and every existing declaration in the suggested command."""
+    argv = ["agent-peer", "endpoint-set", peer_id,
+            "--herdr-session", str(endpoint["herdr_session"]),
+            "--herdr-target", str(endpoint["herdr_target"]),
+            "--delivery", str(endpoint.get("delivery", "pane"))]
+    for declared in dict.fromkeys([*endpoint_repo_roots(endpoint), root]):
+        argv.extend(["--repo-root", declared])
+    for sender in endpoint["accept_from"]:
+        argv.extend(["--accept-from", str(sender)])
+    return shlex.join(argv)
+
+
+def match_endpoint_repo(
+    endpoint: dict[str, object], workspace: dict[str, object], peer_id: str
+) -> pathlib.Path:
+    roots = endpoint_repo_roots(endpoint)
+    message_root = pathlib.Path(str(workspace["repo_root"])).resolve(strict=True)
+    # Resolve declarations independently: a missing unrelated root must not
+    # invalidate a message for a present, declared checkout.
+    matched = next((pathlib.Path(root).resolve() for root in roots
+                    if pathlib.Path(root).resolve() == message_root), None)
+    if matched is None:
+        command = endpoint_add_root_command(peer_id, endpoint, str(message_root))
+        raise PeerError(
+            f"message repository {str(message_root)!r} does not match the endpoint checkout; "
+            f"declared roots: {json.dumps(roots)}. To add this root, run: {command}"
+        )
+    if "repo_roots" in endpoint:
+        repo = matched.name
+        if workspace["repo"] != repo:
+            raise PeerError(f"message repo must match the selected endpoint repository: {repo}")
+        checkout = str(workspace["checkout_id"])
+        prefix = f"{parse_peer_id(peer_id)[0]}:{repo}"
+        if checkout != prefix and not (checkout.startswith(prefix + ":") and checkout[len(prefix) + 1:]):
+            raise PeerError(f"checkout_id must match the selected repository: {prefix}[:task]")
+    return matched
+
+
 def receive_envelope(envelope: object, origin_host: str | None = None) -> dict[str, object]:
     validated = validate_envelope(envelope)
     registry = read_registry()
@@ -2401,10 +2485,7 @@ def receive_envelope(envelope: object, origin_host: str | None = None) -> dict[s
     workspace = validated["workspace"]
     payload = validated["payload"]
     assert isinstance(workspace, dict) and isinstance(payload, dict)
-    endpoint_root = pathlib.Path(str(endpoint["repo_root"])).resolve(strict=True)
-    message_root = pathlib.Path(str(workspace["repo_root"])).resolve(strict=True)
-    if endpoint_root != message_root:
-        raise PeerError("message repository does not match the endpoint checkout")
+    endpoint_root = match_endpoint_repo(endpoint, workspace, str(destination["peer_id"]))
     if payload.get("type") == "task_handoff":
         handoff = validate_task_handoff(payload.get("task_handoff"), str(workspace["access"]))
         authority = validated["authority"]
@@ -2956,12 +3037,25 @@ def command_reply(args: argparse.Namespace) -> int:
     destination_endpoint = (
         endpoints.get(str(original_from["peer_id"])) if isinstance(endpoints, dict) else None
     )
-    if isinstance(destination_endpoint, dict) and destination_endpoint.get("repo_root"):
-        destination_root = str(destination_endpoint["repo_root"])
+    if isinstance(destination_endpoint, dict):
+        roots = endpoint_repo_roots(destination_endpoint)
+        # Reply within the original repository when the coordinator declares
+        # it. Otherwise retain the historical first-root reply fallback.
+        destination_root = next(
+            (root for root in roots if pathlib.Path(root).resolve() == pathlib.Path(reply_repo_root).resolve()),
+            roots[0],
+        )
         if destination_root != reply_repo_root:
             reply_repo_root = destination_root
             reply_repo = pathlib.Path(destination_root).name
             reply_checkout_id = f"{original_from.get('host_id')}:{reply_repo}"
+        if "repo_roots" in destination_endpoint:
+            # Checkout identity belongs to the receiving host even when both
+            # endpoints declare the same repository. Keep the task suffix.
+            original_prefix = f"{original_to.get('host_id')}:{reply_repo}"
+            suffix = (reply_checkout_id[len(original_prefix):]
+                      if reply_checkout_id.startswith(original_prefix + ":") else "")
+            reply_checkout_id = f"{original_from.get('host_id')}:{reply_repo}{suffix}"
     reply_envelope = compose_envelope(
         from_peer=args.from_peer,
         to_peer=str(original_from["peer_id"]),
@@ -4054,7 +4148,8 @@ def build_parser() -> argparse.ArgumentParser:
     endpoint.add_argument("peer_id")
     endpoint.add_argument("--herdr-session", required=True)
     endpoint.add_argument("--herdr-target", required=True)
-    endpoint.add_argument("--repo-root", required=True)
+    endpoint.add_argument("--repo-root", action="append", required=True,
+                          help="declared checkout root; repeat to allow multiple repositories")
     endpoint.add_argument("--accept-from", action="append", default=[])
     endpoint.add_argument("--delivery", choices=tuple(sorted(DELIVERY_MODES)), default="pane")
 
@@ -4235,8 +4330,8 @@ if __name__ == "__main__":
 ** Production gates
 
 1. Every endpoint is exact and local: one structural peer ID, one named Herdr
-   session, one unambiguous Herdr agent/pane, one real checkout root, and an
-   explicit sender allowlist.
+   session, one unambiguous Herdr agent/pane, a declared set of real checkout
+   roots, and an explicit sender allowlist.
 2. The ledger reserves a message ID before submission.  Delivered IDs return the
    original receipt; uncertain or failed IDs are never injected automatically.
 3. Write TaskHandoffs require a live destination-owned =checkout-write= lease.
