@@ -11,6 +11,11 @@ allowed_models = ["zai-glm-5-3"]
 
 [[providers]]
 name = "mistral"
+# vibe-acp rejects a provider without api_base (JSON-RPC -31002,
+# "providers.0.api_base: Field required"), so the full block is spelled out.
+api_base = "https://api.mistral.ai/v1"
+api_key_env_var = "MISTRAL_API_KEY"
+backend = "mistral"
 # api_key_env_var stays MISTRAL_API_KEY (the provider default); the
 # wrapper imports MISTRAL_VIBE_API_KEY from the private env file into that
 # name, so the subscription key rides the default provider cleanly.
