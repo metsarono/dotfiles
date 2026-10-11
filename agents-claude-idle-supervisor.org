@@ -3201,6 +3201,10 @@ class Supervisor:
             return
         self.post_compact_baseline_tokens, self.post_compact_baseline_at = latest
 
+    def _injection_idle_boundary(self, purpose: str) -> float | None:
+        """Supply the lifecycle boundary; opt-in owners may specialize mail idle."""
+        return self.last_normal_stop
+
     def _gate_reason(self, purpose: str = "compact") -> str | None:
         """Return the first failed final eligibility condition, if any."""
         if not self.enabled:
@@ -3213,7 +3217,8 @@ class Supervisor:
             return "pty-or-process-gone"
         if not self.session_id or not SESSION_RE.fullmatch(self.session_id):
             return "session-unbound"
-        if not self.last_normal_stop:
+        idle_boundary = self._injection_idle_boundary(purpose)
+        if not idle_boundary:
             return "no-normal-stop"
         # Activity after the last Stop only blocks while it is younger than
         # the idle threshold; old activity has had its full idle window.
@@ -3223,13 +3228,13 @@ class Supervisor:
         if (
             window_open
             and self.last_lifecycle_activity
-            and self.last_lifecycle_activity > self.last_normal_stop
+            and self.last_lifecycle_activity > idle_boundary
         ):
             return "lifecycle-activity"
         if (
             window_open
             and self.last_local_input
-            and self.last_local_input > self.last_normal_stop
+            and self.last_local_input > idle_boundary
         ):
             return "user-input"
         if purpose == "compact":
@@ -3271,7 +3276,7 @@ class Supervisor:
                 # last_channel_event away from `removed'.
                 if self.last_channel_activity != self.transcript_activity_at:
                     return "transcript-activity"
-        elif purpose != "manual":
+        elif purpose not in {"manual", "mailcortex"}:
             return "unknown-injection-purpose"
         # A cold cache no longer vetoes compaction (ruling 2026-08-21): the
         # first morning turn pays the cold read either way, and it is better

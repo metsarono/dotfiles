@@ -245,6 +245,17 @@ def private_path(path, kind):
         raise ValueError("unsafe Claude runtime ownership")
 
 
+def private_tmux_socket(path):
+    """tmux uses group-writable sockets behind an owner-only directory."""
+    parent = path.parent.lstat()
+    info = path.lstat()
+    if (parent.st_uid != os.getuid() or not stat.S_ISDIR(parent.st_mode)
+            or stat.S_IMODE(parent.st_mode) != 0o700
+            or info.st_uid != os.getuid() or not stat.S_ISSOCK(info.st_mode)
+            or info.st_mode & 0o007):
+        raise ValueError("unsafe Claude runtime ownership")
+
+
 def descendant(pid, ancestor):
     for _ in range(32):
         path = Path(f"/proc/{pid}")
@@ -261,7 +272,7 @@ def descendant(pid, ancestor):
 
 def resolve_owner(target):
     validate_target(target)
-    private_path(Path(target["tmux_socket"]), stat.S_ISSOCK)
+    private_tmux_socket(Path(target["tmux_socket"]))
     result = subprocess.run(["/usr/bin/tmux", "-S", target["tmux_socket"], "list-panes", "-s",
         "-t", "=" + target["tmux_session"], "-F",
         "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_tty}\t#{pane_dead}\t#{pane_in_mode}"],
@@ -437,16 +448,25 @@ def owner_control(owner, request, warm):
         return dict(ack, status="accepted")
 
 
+def wake_idle_boundary(owner):
+    if owner.last_normal_stop:
+        return owner.last_normal_stop
+    if owner.completed_turn_epoch == 0:
+        return getattr(owner, "mailcortex_startup_idle_at", None)
+    return None
+
+
 def admission_busy(owner):
+    boundary = wake_idle_boundary(owner)
     return (owner.status != "idle" or owner.screen_state != "idle" or owner.lifecycle_health != "wired"
             or owner.compacting or owner.recovery_pending or owner.recovery_awaiting
             or getattr(owner, "mailcortex_input_dirty", True)
             or owner.transcript_gate_blocked or owner.transcript_partial
             or owner.transcript_quiescence_deadline is not None
-            or not owner.last_normal_stop
-            or (owner.last_local_input is not None and owner.last_local_input >= owner.last_normal_stop)
-            or (owner.last_lifecycle_activity is not None and owner.last_lifecycle_activity > owner.last_normal_stop)
-            or owner._gate_reason("manual") is not None)
+            or not boundary
+            or (owner.last_local_input is not None and owner.last_local_input >= boundary)
+            or (owner.last_lifecycle_activity is not None and owner.last_lifecycle_activity > boundary)
+            or owner._gate_reason("mailcortex") is not None)
 
 
 def barrier_guardian(descriptor):
@@ -586,12 +606,20 @@ def launch(argv):
             self.mailcortex_admission_lock = threading.RLock()
             self.mailcortex_start_time = process_start_time(os.getpid())
             self.mailcortex_input_dirty = False
+            self.mailcortex_startup_pending = False
+            self.mailcortex_startup_idle_at = None
             super().__init__(*args, **kwargs)
 
         def state(self):
             value = super().state()
             value["supervisor_start_time"] = self.mailcortex_start_time
+            value["mailcortex_startup_idle_at"] = self.mailcortex_startup_idle_at
             return value
+
+        def _injection_idle_boundary(self, purpose):
+            if purpose == "mailcortex":
+                return wake_idle_boundary(self)
+            return super()._injection_idle_boundary(purpose)
 
         def _mailcortex_barrier(self):
             return paused_child(self)
@@ -612,15 +640,42 @@ def launch(argv):
                 warm.write_all(sys.stdout.fileno(), data)
             else:
                 raise ValueError("child output exceeds barrier bound")
+            self._mailcortex_classify_screen()
+            return changed
+
+        def _mailcortex_classify_screen(self):
             visible = self.screen_classifier._visible_text()
             self.screen_state = self.screen_classifier._classify(visible)
             prompts = list(self.screen_classifier.PROMPT_RE.finditer(visible))
             # The base classifier permits a draft. Admission requires an EMPTY
             # final prompt and refuses blockers even alongside a prompt glyph.
             if (not prompts or visible[prompts[-1].start():].strip() != "❯"
-                    or any(marker in visible.lower() for marker in self.screen_classifier.STRONG_BLOCKERS)):
+                    or any(marker in visible.lower() for marker in self.screen_classifier.STRONG_BLOCKERS)
+                    or (self.completed_turn_epoch == 0 and self.last_normal_stop is None
+                        and warm.DevelopmentChannelPromptMatcher.TITLE.lower() in visible.lower())):
                 self.screen_state = "unknown"
-            return changed
+
+        def _mailcortex_finish_startup(self):
+            # SessionStart binds identity, but does not prove the TUI is ready.
+            # Never infer startup completion from status "starting" alone.
+            if not self.mailcortex_startup_pending or self.status != "starting":
+                return
+            self._record_transcript_activity()
+            self._mailcortex_classify_screen()
+            if (not self.mailcortex_startup_pending or self.completed_turn_epoch != 0
+                    or self.last_normal_stop is not None or self.last_local_input is not None
+                    or self.lifecycle_health != "wired" or self.screen_state != "idle"
+                    or self.mailcortex_input_dirty or self.compacting
+                    or self.recovery_pending or self.recovery_awaiting
+                    or self.transcript_gate_blocked or self.transcript_partial
+                    or self.transcript_quiescence_deadline is not None or pending_terminal(self)):
+                return
+            self.mailcortex_startup_pending = False
+            self.mailcortex_startup_idle_at = warm.now()
+            self.status = "idle"
+            self.last_state_transition = "mailcortex-startup-idle"
+            self._guard_log("mailcortex-startup-idle")
+            self._write_state()
 
         def _read_stdin(self):
             with self.mailcortex_admission_lock:
@@ -628,7 +683,10 @@ def launch(argv):
 
         def _read_master(self):
             with self.mailcortex_admission_lock:
-                return super()._read_master()
+                result = super()._read_master()
+                if result:
+                    self._mailcortex_finish_startup()
+                return result
 
         def _record_input_observations(self, observations, forwarded=True):
             with self.mailcortex_admission_lock:
@@ -637,19 +695,33 @@ def launch(argv):
         def _mailcortex_record_input(self, observations, forwarded):
             if any(human for _kind, _length, human in observations):
                 self.mailcortex_input_dirty = True
+                self.mailcortex_startup_pending = False
+                self.mailcortex_startup_idle_at = None
             return super()._record_input_observations(observations, forwarded=forwarded)
+
+        def _record_transcript_observation(self, classification, **fields):
+            if classification in {"user-turn", "assistant-output"}:
+                self.mailcortex_startup_pending = False
+                self.mailcortex_startup_idle_at = None
+            return super()._record_transcript_observation(classification, **fields)
 
         def _handle_event(self, message):
             with self.mailcortex_admission_lock:
                 return self._mailcortex_event(message)
 
         def _mailcortex_event(self, message):
+            previous_session = self.session_id
             response = super()._handle_event(message)
             # A normal Stop resets the governor's activity timestamp, but must
             # NEVER erase unfinished input typed while the preceding turn ran.
-            if (isinstance(response, dict) and response.get("ok") is True and not response.get("ignored")
-                    and message.get("event") == "user-prompt-submit"):
-                self.mailcortex_input_dirty = False
+            if isinstance(response, dict) and response.get("ok") is True and not response.get("ignored"):
+                self.mailcortex_startup_idle_at = None
+                self.mailcortex_startup_pending = (
+                    message.get("event") == "session-start" and previous_session is None
+                    and not self.mailcortex_input_dirty and self.last_local_input is None)
+                if message.get("event") == "user-prompt-submit":
+                    self.mailcortex_input_dirty = False
+                self._write_state()
             return response
 
         def _handle_control(self, message):
@@ -658,6 +730,7 @@ def launch(argv):
 
         def _mailcortex_control(self, message):
             if message.get("command") in {"mailcortex-status", "mailcortex-admit"}:
+                self._mailcortex_finish_startup()
                 return owner_control(self, message, types.SimpleNamespace(now=warm.now, write_all=write_wake))
             return super()._handle_control(message)
 

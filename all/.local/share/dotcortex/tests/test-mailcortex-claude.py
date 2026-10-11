@@ -264,14 +264,14 @@ class ClaudeWakeTests(unittest.TestCase):
 
     def test_resolve_owner_binds_private_runtime_to_exact_single_tmux_pane(self):
         import socket
-        target = dict(self.record["claude_target"], tmux_socket=str(self.short_dir("tmux.sock") / "s"),
-                      runtime_dir=str(self.short_dir("runtime")))
+        target = dict(self.record["claude_target"], tmux_socket=str(self.short_dir("sock") / "s"),
+                      runtime_dir=str(self.short_dir("rt")))
         root = Path(target["runtime_dir"]) / "claude-idle-compaction" / self.owner["channel"]
         root.mkdir(parents=True)
         root.chmod(0o700); root.parent.chmod(0o700)
         control = root / "control.sock"
         with socket.socket(socket.AF_UNIX) as tmux, socket.socket(socket.AF_UNIX) as ipc:
-            tmux.bind(target["tmux_socket"]); os.chmod(target["tmux_socket"], 0o600)
+            tmux.bind(target["tmux_socket"]); os.chmod(target["tmux_socket"], 0o660)
             ipc.bind(str(control)); control.chmod(0o600)
             state = root / "state.json"
             state.write_text(json.dumps(dict(self.owner, supervisor_pid=os.getpid(),
@@ -291,6 +291,86 @@ class ClaudeWakeTests(unittest.TestCase):
                 result.stdout = row
                 state.chmod(0o644)
                 with self.assertRaises(ValueError): self.c.resolve_owner(target)
+
+    def test_tmux_socket_permissions_require_a_real_private_parent(self):
+        import socket
+        directory = self.short_dir("sock")
+        path = directory / "s"
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(path))
+            for mode in (0o600, 0o660, 0o770):
+                with self.subTest(socket_mode=oct(mode)):
+                    path.chmod(mode)
+                    self.c.private_tmux_socket(path)
+            for mode in (0o601, 0o602, 0o604, 0o667):
+                with self.subTest(socket_mode=oct(mode)):
+                    path.chmod(mode)
+                    with self.assertRaises(ValueError): self.c.private_tmux_socket(path)
+            path.chmod(0o660)
+            for mode in (0o710, 0o720, 0o740, 0o701, 0o702, 0o704, 0o750, 0o770, 0o755, 0o1700, 0o600):
+                with self.subTest(parent_mode=oct(mode)):
+                    directory.chmod(mode)
+                    with self.assertRaises((ValueError, OSError)): self.c.private_tmux_socket(path)
+            directory.chmod(0o700)
+            link = self.base / 'linked-parent'
+            link.symlink_to(directory, target_is_directory=True)
+            with self.assertRaises(ValueError): self.c.private_tmux_socket(link / path.name)
+            socket_link = directory / 'linked-socket'
+            socket_link.symlink_to(path)
+            with self.assertRaises(ValueError): self.c.private_tmux_socket(socket_link)
+            ordinary = directory / 'ordinary'
+            ordinary.write_text('fixture'); ordinary.chmod(0o600)
+            with self.assertRaises(ValueError): self.c.private_tmux_socket(ordinary)
+            with self.assertRaises((ValueError, OSError)): self.c.private_tmux_socket(ordinary / 's')
+            # The exception is only for tmux; control sockets stay owner-only.
+            import stat
+            with self.assertRaises(ValueError): self.c.private_path(path, stat.S_ISSOCK)
+
+    def test_tmux_socket_and_parent_foreign_owners_refuse(self):
+        import socket
+        directory = self.short_dir("sock")
+        path = directory / "s"
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(path)); path.chmod(0o660)
+            original = Path.lstat
+            for foreign in (path, directory):
+                def lstat(candidate):
+                    value = original(candidate)
+                    return types.SimpleNamespace(st_mode=value.st_mode,
+                        st_uid=value.st_uid + 1 if candidate == foreign else value.st_uid)
+                with self.subTest(foreign=foreign.name), mock.patch.object(Path, 'lstat', lstat):
+                    with self.assertRaises(ValueError): self.c.private_tmux_socket(path)
+
+    def test_fresh_idle_boundary_preserves_every_admission_gate(self):
+        fresh = self.fake_owner()
+        fresh.completed_turn_epoch = 0
+        fresh.last_normal_stop = None
+        fresh.mailcortex_startup_idle_at = 10
+        gates = (("status", "starting"), ("status", "active"),
+                 ("screen_state", "blocked"), ("screen_state", "unknown"),
+                 ("lifecycle_health", "missing"), ("compacting", True),
+                 ("recovery_pending", True), ("recovery_awaiting", True),
+                 ("mailcortex_input_dirty", True), ("transcript_gate_blocked", True),
+                 ("transcript_partial", b'{'), ("transcript_quiescence_deadline", 20),
+                 ("last_local_input", 10), ("last_lifecycle_activity", 11),
+                 ("completed_turn_epoch", 1), ("mailcortex_startup_idle_at", None))
+        for field, value in gates:
+            with self.subTest(field=field, value=value):
+                previous = getattr(fresh, field)
+                setattr(fresh, field, value)
+                warm = self.fake_warm()
+                with mock.patch.object(self.c, 'owner_matches', return_value=True), \
+                     mock.patch.object(self.c, 'pending_terminal', return_value=False):
+                    self.assertEqual(self.c.owner_control(fresh, self.request(), warm)['status'], 'busy')
+                warm.write_all.assert_not_called()
+                setattr(fresh, field, previous)
+        warm = self.fake_warm()
+        with mock.patch.object(self.c, 'owner_matches', return_value=True), \
+             mock.patch.object(self.c, 'pending_terminal', return_value=True):
+            self.assertEqual(self.c.owner_control(fresh, self.request(), warm)['status'], 'busy')
+        warm.write_all.assert_not_called()
+        fresh._gate_reason = lambda purpose: 'session-disabled'
+        self.assertTrue(self.c.admission_busy(fresh))
 
     def test_status_failure_and_bad_claude_mail_do_not_block_other_seats(self):
         self.mail(1)
@@ -458,24 +538,21 @@ class ClaudeWakeTests(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(path, ignore_errors=True))
         return path
 
-    def start_pty(self, admission_race=False):
+    def start_pty(self, admission_race=False, fresh=False, startup_screen="❯ ", expected_status="idle"):
         import pty
         import select
         import time
         runtime = self.short_dir("rt")
-        home = self.base / "pty-home"
-        home.mkdir()
+        home = Path(tempfile.mkdtemp(dir=self.base, prefix="pty-home-"))
         fake = self.base / "fake-claude"
         fake.write_text("#!/usr/bin/env python3\nimport os,sys,signal\n"
                         "signal.signal(signal.SIGUSR1, lambda *a: print('Do you want to proceed?', flush=True))\n"
-                        "signal.signal(signal.SIGUSR2, lambda *a: print('\\u276f ', flush=True))\n"
+                        "signal.signal(signal.SIGUSR2, lambda *a: print(" + repr(startup_screen) + ", flush=True))\n"
                         "print('\\u276f ', flush=True)\n"
                         "for line in sys.stdin: print('RECEIVED:' + line.strip(), flush=True)\n")
         fake.chmod(0o755)
         master, slave = pty.openpty()
         tty = os.ttyname(slave)
-        # XDG_STATE_HOME must ALSO be short: claude-warm puts its control
-        # socket under it (AF_UNIX 108-byte cap).
         env = dict(os.environ, HOME=str(home), XDG_RUNTIME_DIR=str(runtime), MAILCORTEX_CLAUDE_WAKE='1',
                    XDG_STATE_HOME=str(self.short_dir("st")), TMUX_PANE='%1',
                    CLAUDE_IDLE_REAL_EXECUTABLE=str(fake), CLAUDE_IDLE_CACHE_PROFILE='short',
@@ -532,17 +609,18 @@ class ClaudeWakeTests(unittest.TestCase):
         path = paths[0]
         state = json.loads(path.read_text())
         control = Path(state['control_socket'])
-        transcript = self.base / 'transcript.jsonl'; transcript.write_text('')
+        transcript = home / 'transcript.jsonl'; transcript.write_text('')
         sid = 'b' * 32
         def event(name):
             return self.c.socket_request(control, dict(kind='event', channel=state['channel'],
                 event=name, session_id=sid, transcript_path=str(transcript), stop_hook_active=False))
         self.assertTrue(event('session-start')['ok'])
-        self.assertTrue(event('stop')['ok'])
+        if not fresh:
+            self.assertTrue(event('stop')['ok'])
         import signal
         os.kill(state['pid'], signal.SIGUSR2)
         owner = dict(self.owner, channel=state['channel'], session_id=sid,
-                     supervisor_pid=process.pid, supervisor_start_time=state["supervisor_start_time"], epoch=1, pane_tty=tty)
+                     supervisor_pid=process.pid, supervisor_start_time=state["supervisor_start_time"], epoch=0 if fresh else 1, pane_tty=tty)
         request = dict(self.request(), channel=state['channel'], owner=owner)
         # Status requests omit the admission-only text field.
         def status():
@@ -550,9 +628,73 @@ class ClaudeWakeTests(unittest.TestCase):
             return self.c.socket_request(control, r)
         while time.monotonic() < deadline:
             drain()
-            if status()['status'] == 'idle': break
-        self.assertEqual(status()['status'], 'idle', output.decode(errors='replace'))
+            if status()['status'] == expected_status: break
+        self.assertEqual(status()['status'], expected_status, output.decode(errors='replace'))
         return control, request, event, master, output, drain, path
+
+    def test_real_pty_fresh_idle_seat_admits_without_a_stop(self):
+        control, request, event, master, output, drain, path = self.start_pty(fresh=True)
+        state = json.loads(path.read_text())
+        self.assertEqual(state['completed_turn_epoch'], 0)
+        self.assertIsNone(state['last_normal_stop'])
+        self.assertFalse(state['dirty'])
+        self.assertIsNone(state['timer_deadline'])
+        self.assertIsNotNone(state['mailcortex_startup_idle_at'])
+        # Startup readiness is exclusively a mail boundary. Neither native
+        # compaction nor other manual injections may borrow it.
+        for command in ('trigger', 'inject'):
+            response = self.c.socket_request(control, dict(kind='control',
+                channel=state['channel'], command=command, text='/reload-plugins'))
+            self.assertFalse(response['ok'])
+            self.assertEqual(response['state']['last_gate_rejection_reason'], 'no-normal-stop')
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'accepted')
+        drain(0.2)
+        self.assertIn(b'RECEIVED:short wake', output)
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+
+    def test_real_pty_fresh_startup_notice_or_prompt_gets_no_wake(self):
+        for screen in ('Starting Claude; please wait',
+                       'WARNING: Loading development channels\n❯ ',
+                       'WARNING: Loading development channels\nEnter to confirm\n❯ ',
+                       'Do you want to proceed?\n❯ ', '❯ unfinished draft',
+                       '✻ Working…', 'Select a startup option\n❯ Continue'):
+            with self.subTest(screen=screen):
+                control, request, event, master, output, drain, path = self.start_pty(
+                    fresh=True, startup_screen=screen, expected_status='busy')
+                drain(0.2)
+                self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+                self.assertNotIn(b'RECEIVED:short wake', output)
+                self.assertEqual(json.loads(path.read_text())['completed_turn_epoch'], 0)
+
+    def test_real_pty_fresh_activity_cannot_borrow_startup_idle(self):
+        for activity in ('user-prompt-submit', 'session-activity', 'typing',
+                         'user-record', 'assistant-record', 'malformed-record', 'partial-record'):
+            with self.subTest(activity=activity):
+                control, request, event, master, output, drain, path = self.start_pty(fresh=True)
+                state = json.loads(path.read_text())
+                if activity in ('user-prompt-submit', 'session-activity'):
+                    self.assertTrue(event(activity)['ok'])
+                elif activity == 'typing':
+                    os.write(master, b'half typed')
+                else:
+                    payload = {'user-record': '{"type":"user"}\n',
+                               'assistant-record': '{"type":"assistant"}\n',
+                               'malformed-record': '{bad-json}\n',
+                               'partial-record': '{"type":'}[activity]
+                    with Path(state['transcript_path']).open('a') as stream:
+                        stream.write(payload)
+                drain(0.2)
+                self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+                self.assertNotIn(b'RECEIVED:short wake', output)
+
+    def test_real_pty_fresh_permission_between_check_and_write_gets_no_wake(self):
+        control, request, event, master, output, drain, path = self.start_pty(
+            admission_race=True, fresh=True)
+        self.assertEqual(self.c.socket_request(control, request)['status'], 'busy')
+        drain(0.2)
+        self.assertIn(b'Do you want to proceed?', output)
+        self.assertNotIn(b'RECEIVED:', output)
+        self.assertNotIn(b'short wake', output)
 
     def test_real_pty_owner_admits_once_without_terminal_typing(self):
         control, request, event, master, output, drain, path = self.start_pty()
