@@ -1388,6 +1388,141 @@ def child_alive(pid: int | None) -> bool:
         return False
 
 
+
+def _hold_child_pause(pid):
+    """SIGSTOP/SIGCONT the direct child around a guarded PTY write. The write
+    happens with the child frozen: no new output, no redraws, no dialogs."""
+    import contextlib
+    import signal as _signal
+
+    @contextlib.contextmanager
+    def _paused():
+        if not pid:
+            yield
+            return
+        stopped = False
+        try:
+            os.kill(pid, _signal.SIGSTOP)
+            stopped = True
+        except OSError:
+            pass
+        try:
+            yield
+        finally:
+            if stopped:
+                try:
+                    os.kill(pid, _signal.SIGCONT)
+                except OSError:
+                    pass
+
+    return _paused()
+
+
+# ---- universal PTY hold-with-timeout (pty-hold-20261012) --------------------
+# Profiles and the guarded deny live in approval_hold_pty.py (public, data
+# driven); claude-warm only feeds screens and fires the timer.
+
+def _hold_module():
+    """Load approval_hold_pty.py (sibling in the dotcortex lib path)."""
+    import importlib.util as _util
+    import sys as _sys
+    cached = _sys.modules.get("approval_hold_pty")
+    if cached is not None:
+        return cached
+    path = None
+    for candidate in (
+        pathlib.Path(__file__).resolve().parent.parent / "lib/dotcortex/approval_hold_pty.py",
+        pathlib.Path.home() / ".local/lib/dotcortex/approval_hold_pty.py",
+    ):
+        if candidate.is_file():
+            path = candidate
+            break
+    if path is None:
+        return None
+    spec = _util.spec_from_file_location("approval_hold_pty", path)
+    module = _util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _sys.modules["approval_hold_pty"] = module
+    return module
+
+
+def _hold_profile():
+    module = _hold_module()
+    if module is None:
+        return None
+    return getattr(module, "CLAUDE_CODE_PROFILE", None)
+
+
+def _hold_now():
+    return monotonic()
+
+
+def _hold_timeout_seconds():
+    """unattended.hold_timeout_minutes from the approval manifest, default 10.
+    Missing manifest or module -> the default; the timer is still bounded."""
+    module = _hold_module()
+    default = 10 * 60.0
+    if module is None:
+        return default
+    try:
+        import json as _json
+        path = pathlib.Path.home() / ".config/dotcortex/claude-approval-canary.kikin.v1.local.json"
+        section = {}
+        if path.is_file():
+            manifest = _json.loads(path.read_text())
+            section = manifest.get("unattended", {}) if isinstance(manifest, dict) else {}
+        return module.hold_timeout_seconds(section)
+    except Exception:
+        return default
+
+
+def _hold_queue_write(supervisor, profile, identity):
+    """After a successful deny write: the request enters the smart approval
+    queue (reason hold_timeout, deduped by the queue's own upsert) and a
+    durable ledger records the action. Failures never raise into the loop."""
+    try:
+        import json as _json
+        import time as _time
+        visible = supervisor.screen_classifier._visible_text()
+        event = {
+            "hook_event_name": "PermissionRequest",
+            "hold_pty": True,
+            "profile": profile.name,
+            "screen_text_snippet": visible[:200],
+            "prompt_identity": identity,
+            "session_id": supervisor.session_id,
+        }
+        runtime_path = (pathlib.Path(__file__).resolve().parent.parent
+                        / "lib/dotcortex/claude_approval_runtime.py")
+        import importlib.util as _util
+        import sys as _sys
+        runtime = _sys.modules.get("claude_approval_runtime")
+        if runtime is None and runtime_path.is_file():
+            spec = _util.spec_from_file_location("claude_approval_runtime", runtime_path)
+            runtime = _util.module_from_spec(spec)
+            spec.loader.exec_module(runtime)
+            _sys.modules["claude_approval_runtime"] = runtime
+        if runtime is not None:
+            try:
+                manifest = runtime._runtime_manifest()
+            except Exception:
+                manifest = {}
+            runtime._queue_upsert(event, "hold_timeout", "hold_timeout", manifest)
+        ledger = pathlib.Path.home() / ".local/state/dotcortex/pty-hold-ledger.jsonl"
+        ledger.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        record = {"ts": _time.time(), "action": "hold_timeout_denied",
+                  "profile": profile.name, "prompt_identity": identity,
+                  "session": supervisor.session_id,
+                  "screen_text_snippet": visible[:120]}
+        with open(ledger, "a", encoding="utf-8") as handle:
+            handle.write(_json.dumps(record, separators=(",", ":")) + "\n")
+    except Exception:
+        # The deny already landed; queue/ledger failures must not crash the
+        # supervisor loop. The prompt is gone either way; the queue is the
+        # follow-up record, not the authority.
+        pass
+
+
 def write_all(fd: int, data: bytes) -> None:
     """Write all DATA to a nonblocking descriptor."""
     offset = 0
@@ -2043,6 +2178,15 @@ class Supervisor:
         self.herdr = HerdrReporter()
         self.screen_classifier = ClaudeScreenClassifier()
         self.screen_state: str | None = None
+        # Universal PTY hold-with-timeout (pty-hold-20261012): the supervisor
+        # owns this PTY, so it owns the hold timer. This is the SAME lock the
+        # mail wake subclass installs; plain claude-warm creates it here first
+        # and the wake subclass reuses it when present (fail-closed for the
+        # hold means NO lock, no write).
+        if not hasattr(self, "mailcortex_admission_lock"):
+            import threading as _threading
+            self.mailcortex_admission_lock = _threading.RLock()
+        self.hold_timer = None  # created on first permission-prompt sighting
         self.preservation_federation = PreservationFederationClient(self)
         self.lifecycle_health = "pending"
         self.lifecycle_deadline = monotonic() + LIFECYCLE_WAIT_SECONDS
@@ -4064,7 +4208,76 @@ class Supervisor:
         self._maybe_accept_development_channel_prompt(data)
         if state is not None:
             self._report_screen_state(state)
+        self._hold_maybe_record(state)
         return True
+
+    def _mailcortex_barrier(self):
+        """Pause the child process tree for a guarded write (the same kernel-
+        acknowledged pause discipline the mail wake guardian uses). Plain
+        claude-warm pauses the direct child; the wake subclass may override
+        with its own guardian."""
+        import contextlib
+        return _hold_child_pause(self.pid)
+
+    def _mailcortex_refresh_screen(self):
+        """Drain pending child output (bounded) and re-classify the screen.
+        Returns True when NEW output arrived (the caller aborts)."""
+        import select as _select
+        changed = False
+        for _ in range(16):
+            ready, _, _ = _select.select([self.master_fd], [], [], 0)
+            if not ready:
+                break
+            data = os.read(self.master_fd, 65536)
+            if not data:
+                raise ValueError("child PTY closed")
+            changed = True
+            self.screen_classifier.feed(data)
+            write_all(sys.stdout.fileno(), data)
+        return changed
+
+    def _hold_maybe_record(self, state: str | None) -> None:
+        """Record the on-screen permission prompt for the hold-with-timeout.
+
+        Universal (pty-hold-20261012): profiles are data in
+        approval_hold_pty.py; Claude Code is the first profile. Only a
+        BLOCKED screen carrying this profile's prompt markers records an
+        identity; any other screen clears the timer (the Admiral answering
+        first makes the prompt disappear and the timer does nothing).
+        """
+        profile = _hold_profile()
+        if profile is None:
+            return
+        visible = self.screen_classifier._visible_text()
+        if state == "blocked" and profile.matches(visible):
+            if self.hold_timer is None:
+                self.hold_timer = _hold_module().PtyHoldTimer(
+                    timeout=_hold_timeout_seconds())
+            self.hold_timer.record(visible, profile, now=_hold_now())
+        elif self.hold_timer is not None:
+            self.hold_timer.clear()
+
+    def _hold_expire(self) -> None:
+        """Deny the timed permission prompt at the deadline (deny-only),
+        then queue the request into the smart approval queue. Every guard of
+        the wake seam applies: under the owner lock, child barrier-paused,
+        screen re-read, identity re-checked. Any anomaly aborts silently."""
+        timer = self.hold_timer
+        if timer is None or not timer.expired(_hold_now()):
+            return
+        profile = _hold_profile()
+        if profile is None:
+            return
+        from importlib import util as importlib_util
+        module = _hold_module()
+        def _queue_write(identity):
+            _hold_queue_write(self, profile, identity)
+        module.deny_expired_prompt(
+            self, timer, profile,
+            read_screen=lambda: self.screen_classifier._visible_text(),
+            now=_hold_now,
+            queue_write=_queue_write,
+        )
 
     def _child_has_exited(self) -> bool:
         """Reap the child once and retain its real exit status."""
@@ -4116,6 +4329,11 @@ class Supervisor:
                     and now() >= self.transcript_quiescence_deadline
                 ):
                     self._complete_transcript_quiescence()
+                # Universal PTY hold-with-timeout: fire the guarded deny when
+                # the recorded permission prompt outlives the deadline. The
+                # deny itself re-validates everything under the owner lock.
+                if self.hold_timer is not None and self.hold_timer.expired(_hold_now()):
+                    self._hold_expire()
                 if (
                     self.compacting
                     and self.compaction_requested_at

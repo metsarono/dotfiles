@@ -279,7 +279,7 @@ def _floor_verb(lowered, coordinator=None):
         return True
     if lowered and lowered[0] in {'cp', 'mv', 'ln', 'install'} and '-f' in lowered[1:]:
         return True
-    if lowered and lowered[0] in {'approval-telegram-verdict', 'approval-telegram-presence', 'approval-telegram-hold'}:
+    if lowered and lowered[0] in {'approval-telegram-verdict', 'approval-telegram-presence'}:
         return True
     if lowered[:1] == ['approval-presence'] and lowered[1:2] != ['status']:
         return True

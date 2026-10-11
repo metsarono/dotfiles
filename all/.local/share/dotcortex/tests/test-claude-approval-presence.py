@@ -161,14 +161,19 @@ class RemotePresenceTests(unittest.TestCase):
         self.assertEqual(e._away_status(self.loaded(), now=now), (True, 'away_flag'))
 
     def test_present_hold_timeout_queues_and_note_has_id(self):
+        # pty-hold-20261012: the Telegram plugin hold is gone. When the
+        # Admiral is present the gate returns the NATIVE ask exactly as
+        # today (the harness relay shows it; nothing is queued at the gate).
+        # The PTY owner (claude-warm) owns the timeout and writes the queue
+        # item with reason hold_timeout when the prompt outlives the
+        # deadline (covered by test-approval-pty-hold.py).
         self.configure()
         self.stamp.touch()
+        self.manifest['unattended'].pop('hold_notify_argv', None)
         result = self.hook(self.event('rm report'))
-        self.assertEqual(result['behavior'], 'deny')
-        record = self.records()[0]
-        self.assertEqual(record['away_reason'], 'hold_timeout')
-        self.assertIn(record['id'], result['message'])
-        self.assertIn('never retry, rephrase or route around this refusal', result['message'])
+        self.assertEqual(result['behavior'], 'ask')
+        self.assertFalse(self.queue.exists(),
+                         'the present gate must not write the queue')
 
     def test_later_policy_allow_resolves_same_request(self):
         self.configure()
@@ -428,120 +433,6 @@ class RemotePresenceTests(unittest.TestCase):
         for command in ['approval-presence stamp','approval-telegram-verdict','approval-telegram-presence',
                         'approval-queue approve abc --sender 123456','approval-queue claim abc --confirmation abc']:
             self.assertFalse(e._decide_request(self.event(command),self.loaded())[0],command)
-
-    def test_hold_notifier_deadline_and_failure_stay_fail_closed(self):
-        self.configure()
-        argv = [str(REPO/'all/.local/bin/approval-telegram-hold')]
-        self.manifest['unattended']['hold_notify_argv'] = argv
-        manifest = self.loaded()
-        request = self.event('rm report')
-        for result, expected in [(subprocess.TimeoutExpired(argv, 0.75), 'unavailable'),
-                                 (subprocess.CompletedProcess(argv, 1), 'failed')]:
-            with self.subTest(expected=expected), mock.patch.object(e.subprocess, 'run') as run:
-                if isinstance(result, Exception):
-                    run.side_effect = result
-                else:
-                    run.return_value = result
-                self.assertEqual(e._notify_hold(request, 'true_floor', 'item', 'nonce', manifest), expected)
-                self.assertEqual(run.call_args.kwargs['timeout'], 0.75)
-                self.assertEqual(run.call_args.args[0], argv)
-                self.assertEqual(json.loads(run.call_args.kwargs['input'])['request'], request)
-
-    def telegram_button_flow(self, mode):
-        self.configure();self.loaded();self.stamp.touch()
-        # Run the real engine, adapter and plugin with injected test watchdogs.
-        # Their short production deadlines are contracts checked separately;
-        # scheduling a preview and callback must not decide an integration test.
-        adapter = self.base/'hold-adapter.py'
-        adapter.write_text('import importlib.machinery, importlib.util\n'
-            'loader = importlib.machinery.SourceFileLoader("adapter", '+
-            repr(str(REPO/'all/.local/bin/approval-telegram-hold'))+')\n'
-            'module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))\n'
-            'loader.exec_module(module)\n'
-            'class FixtureSocket(module.socket.socket):\n'
-            '    def settimeout(self, seconds):\n'
-            '        assert seconds == 0.65, seconds\n'
-            '        return super().settimeout('+str(SUBPROCESS_TIMEOUT)+')\n'
-            'module.socket.socket = FixtureSocket\n'
-            'raise SystemExit(module.main())\n')
-        notify_argv = ['/usr/bin/python3', str(adapter)]
-        engine = self.base/'hold-engine.py'
-        engine.write_text('import importlib.util\n'
-            'spec = importlib.util.spec_from_file_location("engine", '+repr(str(fixture.ENGINE))+')\n'
-            'module = importlib.util.module_from_spec(spec)\n'
-            'spec.loader.exec_module(module)\n'
-            'original_run = module.subprocess.run\n'
-            'def fixture_run(argv, **kwargs):\n'
-            '    if argv == '+repr(notify_argv)+':\n'
-            '        assert kwargs["timeout"] == 0.75, kwargs\n'
-            '        kwargs["timeout"] = '+str(SUBPROCESS_TIMEOUT)+'\n'
-            '    return original_run(argv, **kwargs)\n'
-            'module.subprocess.run = fixture_run\n'
-            'raise SystemExit(module.main())\n')
-        self.manifest['unattended'].update(hold_timeout_minutes=SUBPROCESS_TIMEOUT/60,
-            hold_notify_argv=notify_argv)
-        self.loaded()
-        socket_path=self.base/'holds.sock'
-        module=str(REPO/'all/.local/share/dotcortex/approval-telegram/approval-holds.ts')
-        runner=self.base/'bridge.ts'
-        runner.write_text('import {startApprovalHolds,handleApprovalCallback} from '+json.dumps(module)+';\n'
-            'const fixtureWatchdog = '+str(SUBPROCESS_TIMEOUT*1000)+';\n'+r'''
-const originalSetTimeout=globalThis.setTimeout;
-globalThis.setTimeout=((fn,ms,...args)=>{
-  if(ms!==2000)throw new Error('unexpected helper watchdog');
-  return originalSetTimeout(fn,fixtureWatchdog,...args);
-}) as typeof setTimeout;
-const access={allowFrom:['123456']};
-const ctx={from:{id:123456},answerCallbackQuery:async()=>{},editMessageReplyMarkup:async()=>{}};
-const bot={api:{sendMessage:async(_chat,text,options)=>{
-  if(!text.includes('rm report'))throw new Error('missing preview');
-  if(process.env.APPROVAL_FIXTURE_MODE==='failed')throw new Error('synthetic delivery failure');
-  const data=options.reply_markup.inline_keyboard[0][process.env.APPROVAL_FIXTURE_MODE==='deny'?1:0].callback_data;
-  void handleApprovalCallback(ctx,data,access);
-}}};
-startApprovalHolds(bot,()=>access,process.env.TELEGRAM_STATE_DIR!);
-console.log('approval-fixture-ready');
-''')
-        env={**os.environ,'SO_APPROVAL_KIKIN_MANIFEST':str(self.path),'SO_APPROVAL_MORNING_QUEUE':str(self.queue),
-             'SO_APPROVAL_KIKIN_LOG':str(self.ledger),'APPROVAL_TELEGRAM_HOLD_SOCKET':str(socket_path),
-             'APPROVAL_VERDICT_HELPER':str(REPO/'all/.local/bin/approval-telegram-verdict'),
-             'APPROVAL_PRESENCE_HELPER':str(REPO/'all/.local/bin/approval-telegram-presence'),
-             'APPROVAL_FIXTURE_MODE':mode,'TELEGRAM_STATE_DIR':str(self.base),'DOTCORTEX_KIKIN_APPROVAL_ENGINE':str(engine)}
-        process=subprocess.Popen(['bun',str(runner)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-        try:
-            # startApprovalHolds binds and chmods synchronously before signalling.
-            with selectors.DefaultSelector() as ready:
-                ready.register(process.stdout, selectors.EVENT_READ)
-                self.assertTrue(ready.select(SUBPROCESS_TIMEOUT), 'bridge did not signal readiness')
-            self.assertEqual(process.stdout.readline(), b'approval-fixture-ready\n')
-            self.assertTrue(socket_path.exists())
-            result=subprocess.run([str(REPO/'all/.local/bin/claude-hook-approval-inverted')],env=env,
-                input=json.dumps(self.event('rm report')),text=True,capture_output=True,timeout=2*SUBPROCESS_TIMEOUT,check=True)
-            ledger=json.loads(self.ledger.read_text().splitlines()[-1])
-            expected='allow' if mode=='allow' else 'deny'
-            self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['decision']['behavior'],expected,(result.stdout,ledger))
-            self.assertEqual(self.records()[0]['status'],'resolved' if mode=='allow' else 'open')
-            if mode=='allow':self.assertTrue(ledger['human_approved'])
-            else:self.assertEqual(ledger['hold_status'],'deny' if mode=='deny' else 'unavailable')
-            self.assertEqual(ledger['reason'],'true_floor')
-        finally:
-            process.terminate()
-            try:
-                process.communicate(timeout=SUBPROCESS_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate(timeout=SUBPROCESS_TIMEOUT)
-                self.fail('bridge did not terminate')
-
-
-    def test_complete_hook_plugin_allow_button_flow(self):
-        self.telegram_button_flow('allow')
-
-    def test_complete_hook_plugin_deny_button_flow(self):
-        self.telegram_button_flow('deny')
-
-    def test_complete_hook_plugin_delivery_failure_flow(self):
-        self.telegram_button_flow('failed')
 
     def test_fable_absolute_scratch_write_from_protected_cwd(self):
         self.configure()

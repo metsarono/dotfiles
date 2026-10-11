@@ -1,0 +1,86 @@
+#+TITLE: Universal PTY hold-with-timeout: the approval gate through the PTY owner
+
+The Admiral's design and word (Telegram 6257-6259, 2026-10-12): the
+hold-with-timeout must run through the PTY owner, universal across
+harnesses — no vendor-plugin patch, no second bot. This file is the
+canonical source for =approval_hold_pty.py= and its tests.
+
+* How it works
+
+- PRESENT (fresh presence stamp): the gate returns the native ask
+  exactly as today. The harness's own relay shows it. Nothing in any
+  plugin changes.
+- TIMEOUT THROUGH THE PTY OWNER: the process owning the session's PTY
+  (claude-warm for Claude seats) records a permission prompt with a
+  screen identity (prompt-text hash plus position). If the SAME prompt
+  is still on screen after =unattended.hold_timeout_minutes=
+  (default 10), it answers NO through the PTY, writes the request into
+  the smart queue (same file and API as approval-queue, reason
+  =hold_timeout=, deduped by the queue's own upsert) and stamps the
+  ledger.
+- AWAY: unchanged; the gate defers to the queue at once.
+
+* Hard rules (test-enforced)
+
+- Deny-ONLY, structurally: a profile whose deny sequence contains
+  Enter, newline, y or Y is rejected at construction. The holder can
+  never confirm anything.
+- Only to the EXACT prompt it timed: identity re-checked under the
+  owner lock, with the child barrier-paused, the screen drained and
+  re-classified immediately before the write. Any change (new prompt,
+  user typing, prompt gone, compaction, recovery) aborts without
+  writing. The Admiral answering first makes the prompt disappear; the
+  timer then does nothing.
+- A test proves it can never write to a newer prompt or into typed
+  input (test-approval-pty-hold.py).
+
+* Profiles are data, not forks
+
+A harness plugs in by adding a =HoldProfile=: prompt markers, an
+identity function, and deny keys. Claude Code is the first profile
+(~claude-code~, deny key: ESC — the dialog's own "esc to cancel" cue
+the screen classifier already trusts). =fixture-dialog= proves the
+interface is not Claude-specific.
+
+- Herdr panes: a profile over the Herdr screen protocol.
+- The Emacs integration: a profile over the Emacs process's PTY
+  classification (the compaction supervisor already reads it).
+- Codex/OpenCode TUIs: a profile over their idle-supervisor
+  classifiers (agents-codex-idle-supervisor.org,
+  agents-opencode-idle-supervisor.org carry the same screen feed
+  shape claude-warm exposes: =_visible_text()=).
+
+* Module
+
+#+BEGIN_SRC python :tangle all/.local/lib/dotcortex/approval_hold_pty.py
+<<<hold-module>>>
+#+END_SRC
+
+The tangled module is committed verbatim; the org holds the identical
+source (loom convention: edit both, they must not drift).
+
+* Tests
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-approval-pty-hold.py
+<<<hold-tests>>>
+#+END_SRC
+
+* claude-warm seam
+
+The supervisor (agents-claude-idle-supervisor.org) feeds every screen
+state through =_hold_maybe_record= and fires =_hold_expire= in its run
+loop. The seam reuses the mail-wake lock
+(=mailcortex_admission_lock=; plain claude-warm now creates it first)
+and the barrier discipline. The deny write happens only after the
+guarded re-validation.
+
+* Telegram plugin patch path: REMOVED (pty-hold-20261012)
+
+=holds.patch=, =approval-holds.ts=, =approval-telegram-stage=,
+=approval-telegram-hold=, their env template, the manifest
+=hold_notify_argv= wiring, and the gate's hook-side hold
+(=_hold_admiral= at the kikin gate) are deleted. Presence stamping via
+UserPromptSubmit stays. The queue and presence machinery stays. The
+plugin-button flow tests were removed with the flow; the hold-timeout
+gate test was adapted to assert the new shape (present -> native ask,
+nothing queued at the gate).

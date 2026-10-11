@@ -154,7 +154,6 @@ authorize local Kikin reads or writes.
     "presence_window_minutes": 20,
     "hold_timeout_minutes": 10,
     "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
-    "hold_notify_argv": ["/home/YOUR_SEAT/.local/bin/approval-telegram-hold"],
     "quiet_hours": {
       "enabled": true,
       "start": "23:00",
@@ -1198,7 +1197,6 @@ restart, installation, pull or push is performed by this review branch.
     "presence_window_minutes": 20,
     "hold_timeout_minutes": 10,
     "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
-    "hold_notify_argv": ["/home/YOUR_SEAT/.local/bin/approval-telegram-hold"],
     "quiet_hours": {
       "enabled": true,
       "start": "23:00",

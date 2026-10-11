@@ -1685,19 +1685,11 @@ def main():
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous)
     item_id, hold_status = None, None
-    if not allow and not away and away_reason == 'presence':
-        # A fresh human stamp selects a bounded Telegram hold, including floor
-        # refusals. Only an authenticated human answer may produce human_allow.
-        try:
-            hold_status, item_id = _hold_admiral(event, reason, manifest)
-            if hold_status == 'allow':
-                allow = True
-                _log_decision.extras.update(human_approved=True, decision='allow')
-            else:
-                away_reason = 'hold_timeout' if hold_status == 'timeout' else 'human_denied' if hold_status == 'deny' else 'away_flag' if hold_status == 'away_flag' else 'hold_unavailable'
-                away = hold_status == 'away_flag'
-        except Exception:
-            hold_status, away_reason = 'unavailable', 'hold_unavailable'
+    # pty-hold-20261012: the Telegram plugin hold is GONE. When the Admiral is
+    # present the gate returns the native ask exactly as today (the harness's
+    # own relay shows it); the PTY owner (claude-warm) owns the timeout and
+    # answers deny into the queue after unattended.hold_timeout_minutes. When
+    # away, the gate defers to the queue at once.
     if allow:
         if not away:
             try:
