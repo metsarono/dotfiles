@@ -3,6 +3,7 @@
     "claude-plugins-official": {"source": {"source": "github", "repo": "anthropics/claude-plugins-official"}}
   },
   "enabledPlugins": {"telegram@claude-plugins-official": true},
+  "promptSuggestionEnabled": false,
   "hooks": {
     "SessionStart": [
       {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}

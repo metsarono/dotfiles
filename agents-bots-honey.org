@@ -610,12 +610,15 @@ if __name__ == "__main__":
     main()
 #+END_SRC
 
+=promptSuggestionEnabled: false= keeps the prompt box truly empty between turns. Claude Code otherwise prints a dimmed suggested next message there, which the mail wake's screen check reads as typed input, so the seat reports busy forever and mail never wakes it (found 2026-10-12 on Bunta's first wake).
+
 #+BEGIN_SRC json :tangle all/.local/share/dotcortex/honey-claude/claude-settings.json
 {
   "extraKnownMarketplaces": {
     "claude-plugins-official": {"source": {"source": "github", "repo": "anthropics/claude-plugins-official"}}
   },
   "enabledPlugins": {"telegram@claude-plugins-official": true},
+  "promptSuggestionEnabled": false,
   "hooks": {
     "SessionStart": [
       {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
