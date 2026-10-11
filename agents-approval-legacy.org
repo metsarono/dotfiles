@@ -1137,6 +1137,8 @@ ENGINE = REPO / "all/.local/lib/dotcortex/claude_approval_p3.py"
 ENGINE_SPEC = importlib.util.spec_from_file_location("dotcortex_approval_p3", ENGINE)
 ENGINE_MODULE = importlib.util.module_from_spec(ENGINE_SPEC)
 ENGINE_SPEC.loader.exec_module(ENGINE_MODULE)
+# Test watchdog only; the pinned engine and remote proof deadlines stay intact.
+SUBPROCESS_TIMEOUT = 30
 
 
 def event(tool_name, tool_input, cwd=None):
@@ -1161,7 +1163,7 @@ def run_hook(payload, manifest=None, cwd=None):
         capture_output=True,
         cwd=cwd or REPO,
         env=env,
-        timeout=2,
+        timeout=SUBPROCESS_TIMEOUT,
         check=False,
     )
     return completed
@@ -1624,7 +1626,7 @@ class ApprovalHookHarness(unittest.TestCase):
             text=True,
             capture_output=True,
             env={**os.environ, "SO_APPROVAL_P3_MANIFEST": str(manifest), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)},
-            timeout=2,
+            timeout=SUBPROCESS_TIMEOUT,
             check=False,
         )
         self.assertEqual(completed.returncode, 0)

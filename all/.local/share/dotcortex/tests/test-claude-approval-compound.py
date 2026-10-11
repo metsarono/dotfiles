@@ -183,14 +183,36 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
 
     def test_compound_deadline_is_shared_by_all_decider_calls(self):
         import time
+        elapsed = 0.0
+        calls = []
+        previous_handler = object()
         def slow(event, config):
-            time.sleep(1.1)
+            nonlocal elapsed
+            calls.append((event['tool_input']['command'], config['timeout_ms']))
+            # Simulate work consuming the one timer installed by main. Invoke
+            # its real handler at expiry without depending on OS scheduling.
+            seconds = timer.call_args_list[0].args[1]
+            if elapsed + 1.375 >= seconds:
+                elapsed = seconds
+                handler.call_args_list[0].args[1](e.signal.SIGALRM, None)
+            elapsed += 1.375
             return True, 'no_risk_veto', 1, 'allow'
-        started = time.monotonic()
-        result, record, _ = self.in_process('make one; make two; make three; make four', verdict=slow)
-        self.assertLess(time.monotonic() - started, 3.5)
+        with mock.patch.object(time, 'monotonic', side_effect=lambda: elapsed), \
+                mock.patch.object(e.signal, 'signal', return_value=previous_handler) as handler, \
+                mock.patch.object(e.signal, 'setitimer') as timer:
+            result, record, _ = self.in_process('make one; make two; make three; make four', verdict=slow)
+        self.assertEqual(elapsed, 3.0)
+        self.assertEqual(calls[:2], [('make one', 500), ('make two', 500)])
+        self.assertEqual(calls[2][0], 'make three')
+        self.assertEqual(calls[2][1], 250)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(timer.call_args_list, [mock.call(e.signal.ITIMER_REAL, 3.0),
+                                               mock.call(e.signal.ITIMER_REAL, 0)])
+        self.assertEqual(handler.call_args_list, [mock.call(e.signal.SIGALRM, e._deadline),
+                                                 mock.call(e.signal.SIGALRM, previous_handler)])
         self.assertEqual(result['behavior'], 'deny')
         self.assertIn('segment_3', record['reason'])
+        self.assertIn('TimeoutError', record['reason'])
 
     def test_compound_cd_uses_the_same_veto_as_standalone(self):
         def risky(event, config):

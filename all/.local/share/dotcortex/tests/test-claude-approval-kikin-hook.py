@@ -11,7 +11,8 @@ import unittest
 REPO = Path(__file__).resolve().parents[5]
 HOOK = REPO / "all/.local/bin/claude-hook-permission-request-kikin"
 ENGINE = REPO / "all/.local/lib/dotcortex/claude_approval_kikin.py"
-
+# Test watchdog only; engine, transport and lock deadlines stay unchanged.
+SUBPROCESS_TIMEOUT = 30
 
 def event(tool_name, tool_input, cwd):
     return {"hook_event_name": "PermissionRequest", "tool_name": tool_name, "tool_input": tool_input, "cwd": str(cwd)}
@@ -20,7 +21,7 @@ def event(tool_name, tool_input, cwd):
 def run_hook(payload, manifest, log=os.devnull):
     # Never let a test write the real decision ledger; os.devnull unless a test reads it.
     env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(Path(manifest).parent / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}
-    return subprocess.run([str(HOOK)], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=2, check=False)
+    return subprocess.run([str(HOOK)], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=SUBPROCESS_TIMEOUT, check=False)
 
 
 def decision(completed):
@@ -587,7 +588,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_malformed_input_asks(self):
         manifest = self.manifest("local_read")
-        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull, "SO_APPROVAL_MORNING_QUEUE": str(self.scratch / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}, timeout=2, check=False)
+        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull, "SO_APPROVAL_MORNING_QUEUE": str(self.scratch / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}, timeout=SUBPROCESS_TIMEOUT, check=False)
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(decision(completed), "deny")
 

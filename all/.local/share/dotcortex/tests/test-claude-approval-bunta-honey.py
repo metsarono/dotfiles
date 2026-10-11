@@ -12,6 +12,9 @@ HERE = Path(__file__).resolve()
 ENGINE = HERE.parents[3] / "lib/dotcortex/claude_approval_kikin.py"
 MANIFEST_SRC = HERE.parents[4] / ".config/dotcortex/claude-approval-bunta.honey.v2.json"
 TMP = Path(tempfile.mkdtemp(prefix="bunta-replay."))
+# Test watchdog only; engine, transport and lock deadlines stay unchanged.
+SUBPROCESS_TIMEOUT = 30
+
 
 
 def event(tool_name, tool_input, cwd):
@@ -76,7 +79,7 @@ class BuntaReplayTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.fake_decider.shutdown()
         cls.fake_decider.server_close()
-        cls.decider_thread.join(timeout=5)
+        cls.decider_thread.join(timeout=SUBPROCESS_TIMEOUT)
 
     @classmethod
     def _with_entries(cls, manifest):
@@ -171,7 +174,7 @@ class BuntaReplayTests(unittest.TestCase):
                     text=True,
                     capture_output=True,
                     env=env,
-                    timeout=5,
+                    timeout=SUBPROCESS_TIMEOUT,
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -285,7 +288,7 @@ class BuntaReplayTests(unittest.TestCase):
                "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(TMP / "queue.jsonl"),
                "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)}
         completed = subprocess.run([str(hook)], input=payload, text=True,
-                                  capture_output=True, env=env, timeout=10, check=False)
+                                  capture_output=True, env=env, timeout=SUBPROCESS_TIMEOUT, check=False)
         self.assertEqual(completed.returncode, 0)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "allow")

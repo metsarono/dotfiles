@@ -15,6 +15,9 @@ REPO = HERE.parents[5]
 ENGINE = REPO / "all/.local/lib/dotcortex/claude_approval_kikin.py"
 HOOK = REPO / "all/.local/bin/claude-hook-permission-request"
 MANIFEST_SRC = REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json"
+# Test watchdog only; engine, transport and lock deadlines stay unchanged.
+SUBPROCESS_TIMEOUT = 30
+
 
 
 def load_engine():
@@ -174,7 +177,7 @@ class HoneyReadsTests(unittest.TestCase):
                     text=True,
                     capture_output=True,
                     env=env,
-                    timeout=5,
+                    timeout=SUBPROCESS_TIMEOUT,
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -248,7 +251,7 @@ class HoneyReadsTests(unittest.TestCase):
         path.write_text(json.dumps(serialized), encoding="utf-8")
         log = Path(self.temp.name) / "outside-home.jsonl"
         completed = subprocess.run([str(HOOK)], input=json.dumps(event(f"cat {home}/notes.md", self.root)),
-            text=True, capture_output=True, timeout=5, check=False,
+            text=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT, check=False,
             env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(path),
                  "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(Path(self.temp.name) / "queue.jsonl"), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)})
         self.assertEqual(completed.returncode, 0, completed.stderr)

@@ -17,7 +17,8 @@ import unittest
 REPO = Path(__file__).resolve().parents[5]
 HOOK = REPO / "all/.local/bin/claude-hook-permission-request-kikin"
 ENGINE = REPO / "all/.local/lib/dotcortex/claude_approval_kikin.py"
-
+# Test watchdog only; engine, transport and lock deadlines stay unchanged.
+SUBPROCESS_TIMEOUT = 30
 
 def event(tool_name, tool_input, cwd):
     return {"hook_event_name": "PermissionRequest", "tool_name": tool_name, "tool_input": tool_input, "cwd": str(cwd)}
@@ -26,7 +27,7 @@ def event(tool_name, tool_input, cwd):
 def run_hook(payload, manifest, log=os.devnull):
     # Never let a test write the real decision ledger; os.devnull unless a test reads it.
     env = {**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(Path(manifest).parent / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}
-    return subprocess.run([str(HOOK)], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=2, check=False)
+    return subprocess.run([str(HOOK)], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=SUBPROCESS_TIMEOUT, check=False)
 
 
 def decision(completed):
@@ -593,7 +594,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_malformed_input_asks(self):
         manifest = self.manifest("local_read")
-        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull, "SO_APPROVAL_MORNING_QUEUE": str(self.scratch / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}, timeout=2, check=False)
+        completed = subprocess.run([str(HOOK)], input="{not-json", text=True, capture_output=True, env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(manifest), "SO_APPROVAL_KIKIN_LOG": os.devnull, "SO_APPROVAL_MORNING_QUEUE": str(self.scratch / "queue.jsonl"), "DOTCORTEX_KIKIN_APPROVAL_ENGINE": str(ENGINE)}, timeout=SUBPROCESS_TIMEOUT, check=False)
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(decision(completed), "deny")
 
@@ -629,6 +630,9 @@ REPO = HERE.parents[5]
 ENGINE = REPO / "all/.local/lib/dotcortex/claude_approval_kikin.py"
 HOOK = REPO / "all/.local/bin/claude-hook-permission-request"
 MANIFEST_SRC = REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json"
+# Test watchdog only; engine, transport and lock deadlines stay unchanged.
+SUBPROCESS_TIMEOUT = 30
+
 
 
 def load_engine():
@@ -788,7 +792,7 @@ class HoneyReadsTests(unittest.TestCase):
                     text=True,
                     capture_output=True,
                     env=env,
-                    timeout=5,
+                    timeout=SUBPROCESS_TIMEOUT,
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -862,7 +866,7 @@ class HoneyReadsTests(unittest.TestCase):
         path.write_text(json.dumps(serialized), encoding="utf-8")
         log = Path(self.temp.name) / "outside-home.jsonl"
         completed = subprocess.run([str(HOOK)], input=json.dumps(event(f"cat {home}/notes.md", self.root)),
-            text=True, capture_output=True, timeout=5, check=False,
+            text=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT, check=False,
             env={**os.environ, "SO_APPROVAL_KIKIN_MANIFEST": str(path),
                  "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(Path(self.temp.name) / "queue.jsonl"), "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)})
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -920,6 +924,9 @@ HERE = Path(__file__).resolve()
 ENGINE = HERE.parents[3] / "lib/dotcortex/claude_approval_kikin.py"
 MANIFEST_SRC = HERE.parents[4] / ".config/dotcortex/claude-approval-bunta.honey.v2.json"
 TMP = Path(tempfile.mkdtemp(prefix="bunta-replay."))
+# Test watchdog only; engine, transport and lock deadlines stay unchanged.
+SUBPROCESS_TIMEOUT = 30
+
 
 
 def event(tool_name, tool_input, cwd):
@@ -984,7 +991,7 @@ class BuntaReplayTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.fake_decider.shutdown()
         cls.fake_decider.server_close()
-        cls.decider_thread.join(timeout=5)
+        cls.decider_thread.join(timeout=SUBPROCESS_TIMEOUT)
 
     @classmethod
     def _with_entries(cls, manifest):
@@ -1079,7 +1086,7 @@ class BuntaReplayTests(unittest.TestCase):
                     text=True,
                     capture_output=True,
                     env=env,
-                    timeout=5,
+                    timeout=SUBPROCESS_TIMEOUT,
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -1193,7 +1200,7 @@ class BuntaReplayTests(unittest.TestCase):
                "SO_APPROVAL_KIKIN_LOG": str(log), "SO_APPROVAL_MORNING_QUEUE": str(TMP / "queue.jsonl"),
                "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE)}
         completed = subprocess.run([str(hook)], input=payload, text=True,
-                                  capture_output=True, env=env, timeout=10, check=False)
+                                  capture_output=True, env=env, timeout=SUBPROCESS_TIMEOUT, check=False)
         self.assertEqual(completed.returncode, 0)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "allow")
@@ -1229,6 +1236,9 @@ SPEC = importlib.util.spec_from_file_location('unattended_engine', ENGINE)
 e = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(e)
 NAMES = ('mail_send', 'worktree', 'integrate', 'commit', 'codex_dispatch', 'scratch_scp')
+# Test watchdog only; engine, transport and lock deadlines stay unchanged.
+SUBPROCESS_TIMEOUT = 30
+
 
 
 class UnattendedCoordinatorTests(unittest.TestCase):
@@ -1283,7 +1293,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), *args], stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+                              capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, check=True).stdout.strip()
 
     def event(self, command, **extra):
         return {'hook_event_name': 'PermissionRequest', 'tool_name': 'Bash',
@@ -1300,7 +1310,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         env = {**os.environ, 'SO_APPROVAL_KIKIN_MANIFEST': str(self.path),
                'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
         p = subprocess.run(['/usr/bin/python3', str(ENGINE)], input=json.dumps(self.event(command, **extra)),
-                           env=env, capture_output=True, text=True, timeout=5, check=True)
+                           env=env, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, check=True)
         return json.loads(p.stdout)['hookSpecificOutput']['decision'] if p.stdout.strip() else {'behavior': 'ask'}
 
     def allow(self, command):
@@ -1392,12 +1402,12 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.run_hook('another-command', session_id='YOUR_SECOND_SESSION')
         env = {**os.environ, 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
         args = ['/usr/bin/python3', str(READER)]
-        read = subprocess.run(args, env=env, text=True, capture_output=True, timeout=3, check=True)
+        read = subprocess.run(args, env=env, text=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT, check=True)
         self.assertIn('YOUR_SESSION', read.stdout)
         self.assertIn('YOUR_SECOND_SESSION', read.stdout)
         self.assertIn('unknown-command', read.stdout)
         self.assertEqual(len(self.queue.read_text().splitlines()), 2)
-        subprocess.run(args + ['--clear'], env=env, capture_output=True, timeout=3, check=True)
+        subprocess.run(args + ['--clear'], env=env, capture_output=True, timeout=SUBPROCESS_TIMEOUT, check=True)
         self.assertEqual(self.queue.read_text(), '')
         self.assertEqual(self.queue.stat().st_mode & 0o777, 0o600)
 

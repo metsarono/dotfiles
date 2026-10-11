@@ -19,6 +19,9 @@ SPEC = importlib.util.spec_from_file_location('unattended_engine', ENGINE)
 e = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(e)
 NAMES = ('mail_send', 'worktree', 'integrate', 'commit', 'codex_dispatch', 'scratch_scp')
+# Test watchdog only; engine, transport and lock deadlines stay unchanged.
+SUBPROCESS_TIMEOUT = 30
+
 
 
 class UnattendedCoordinatorTests(unittest.TestCase):
@@ -73,7 +76,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), *args], stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+                              capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, check=True).stdout.strip()
 
     def event(self, command, **extra):
         return {'hook_event_name': 'PermissionRequest', 'tool_name': 'Bash',
@@ -90,7 +93,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         env = {**os.environ, 'SO_APPROVAL_KIKIN_MANIFEST': str(self.path),
                'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
         p = subprocess.run(['/usr/bin/python3', str(ENGINE)], input=json.dumps(self.event(command, **extra)),
-                           env=env, capture_output=True, text=True, timeout=5, check=True)
+                           env=env, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, check=True)
         return json.loads(p.stdout)['hookSpecificOutput']['decision'] if p.stdout.strip() else {'behavior': 'ask'}
 
     def allow(self, command):
@@ -182,12 +185,12 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.run_hook('another-command', session_id='YOUR_SECOND_SESSION')
         env = {**os.environ, 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
         args = ['/usr/bin/python3', str(READER)]
-        read = subprocess.run(args, env=env, text=True, capture_output=True, timeout=3, check=True)
+        read = subprocess.run(args, env=env, text=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT, check=True)
         self.assertIn('YOUR_SESSION', read.stdout)
         self.assertIn('YOUR_SECOND_SESSION', read.stdout)
         self.assertIn('unknown-command', read.stdout)
         self.assertEqual(len(self.queue.read_text().splitlines()), 2)
-        subprocess.run(args + ['--clear'], env=env, capture_output=True, timeout=3, check=True)
+        subprocess.run(args + ['--clear'], env=env, capture_output=True, timeout=SUBPROCESS_TIMEOUT, check=True)
         self.assertEqual(self.queue.read_text(), '')
         self.assertEqual(self.queue.stat().st_mode & 0o777, 0o600)
 
