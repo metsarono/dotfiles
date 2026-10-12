@@ -30,6 +30,8 @@ def load(name, path):
     return module
 
 
+FULLSCREEN = load("fullscreen_captures", Path(__file__).with_name("claude_renderer_captures.py")).FULLSCREEN
+
 # Claude Code 2.1.296, dark theme, 100 columns, real isolated PTY capture.
 # A local API fixture supplied public text; native cursor mode was enabled.
 # Preserve the real SGR, column positioning, footer and incremental redraws.
@@ -60,6 +62,38 @@ class PromptScreenTests(unittest.TestCase):
         classifier = warm.ClaudeScreenClassifier()
         classifier.feed(screen)
         return classifier
+
+    def test_fullscreen_captured_empty_suggestion_typed_busy_and_permission(self):
+        for mode, frames in FULLSCREEN.items():
+            for name in ("empty", "post-turn", "suggestion", "typed", "busy", "permission"):
+                with self.subTest(mode=mode, frame=name):
+                    c = self.classifier(frames[name])
+                    self.assertTrue(c.screen.complete())
+                    self.assertEqual(c.prompt_input_state(), "typed" if name in {"typed", "permission"} else "empty")
+                    self.assertEqual(c.state, {"busy": "working", "permission": "blocked"}.get(name, "idle"))
+
+    def test_fullscreen_exact_box_and_fragmented_bytes(self):
+        transport = load("fullscreen_transport", BIN / "mailcortex_claude.py")
+        for mode, frames in FULLSCREEN.items():
+            with self.subTest(mode=mode):
+                c = self.classifier(b"")
+                for byte in frames["suggestion"]:
+                    c.feed(bytes([byte]))
+                self.assertEqual(c.prompt_input_state(), "empty")
+                self.assertTrue(transport.wake_prompt_matches(c, None))
+                c = self.classifier(frames["typed"])
+                self.assertTrue(transport.wake_prompt_matches(c, "read the public fixture"))
+                self.assertFalse(transport.wake_prompt_matches(c, None))
+                c.feed(b"\x1b[")
+                self.assertEqual(c.prompt_input_state(), "unknown")
+                self.assertFalse(transport.wake_prompt_matches(c, "read the public fixture"))
+
+    def test_fullscreen_exit_and_unknown_mutations_refuse(self):
+        for frames in FULLSCREEN.values():
+            for mutation in (b"\x1b[?1049l", b"\x1b[1P", b"\x1bM"):
+                c = self.classifier(frames["empty"])
+                c.feed(mutation)
+                self.assertEqual(c.prompt_input_state(), "unknown")
 
     def test_captured_suggestion_only_is_empty(self):
         c = self.classifier(CAPTURED_SUGGESTION)
@@ -823,7 +857,7 @@ class ClaudeWakeTests(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(path, ignore_errors=True))
         return path
 
-    def start_pty(self, admission_race=False, fresh=False, startup_screen="❯ ", expected_status="idle"):
+    def start_pty(self, admission_race=False, fresh=False, startup_screen="❯ ", expected_status="idle", paint_before_session=False):
         import pty
         import select
         import time
@@ -837,10 +871,11 @@ class ClaudeWakeTests(unittest.TestCase):
                         "box=lambda t:'\\x1b[2J\\x1b[H\\u276f '+t+'\\r\\n────────\\x1b[1A\\r\\x1b[2C'\n"
                         "signal.signal(signal.SIGUSR1, lambda *a: print('Do you want to proceed?', flush=True))\n"
                         "signal.signal(signal.SIGUSR2, lambda *a: print(" + repr(startup_screen) + ", end='', flush=True))\n"
-                        "print(box(''),end='',flush=True)\n"
+                        "print(" + (repr(startup_screen) if paint_before_session else "box('')") + ",end='',flush=True)\n"
                         "draft=''\n"
                         "while True:\n"
                         " data=os.read(0,4096)\n"
+                        " if data==b'\\x1b[<35;20;10M': continue\n"
                         " if data==b'\\r':\n"
                         "  print('RECEIVED:'+draft,flush=True);draft='';print(box(''),end='',flush=True)\n"
                         " else:\n"
@@ -913,7 +948,8 @@ class ClaudeWakeTests(unittest.TestCase):
         if not fresh:
             self.assertTrue(event('stop')['ok'])
         import signal
-        os.kill(state['pid'], signal.SIGUSR2)
+        if not paint_before_session:
+            os.kill(state['pid'], signal.SIGUSR2)
         owner = dict(self.owner, channel=state['channel'], session_id=sid,
                      supervisor_pid=process.pid, supervisor_start_time=state["supervisor_start_time"], epoch=0 if fresh else 1, pane_tty=tty)
         request = dict(self.request(), channel=state['channel'], owner=owner)
@@ -926,6 +962,35 @@ class ClaudeWakeTests(unittest.TestCase):
             if status()['status'] == expected_status: break
         self.assertEqual(status()['status'], expected_status, output.decode(errors='replace'))
         return control, request, event, master, output, drain, path
+
+    def test_real_pty_fullscreen_painted_before_first_bind_admits(self):
+        for mode, frames in FULLSCREEN.items():
+            with self.subTest(mode=mode):
+                control, request, event, master, output, drain, path = self.start_pty(
+                    fresh=True, startup_screen=frames["empty"].decode(), paint_before_session=True)
+                state = json.loads(path.read_text())
+                self.assertIsNotNone(state["mailcortex_startup_idle_at"])
+                self.assertEqual(state["completed_turn_epoch"], 0)
+                self.assertFalse(state["dirty"])
+                self.assertIsNone(state["timer_deadline"])
+                os.write(master, b"\x1b[<35;20;10M")
+                drain(0.2)
+                self.assertIsNone(json.loads(path.read_text())["last_local_input"])
+                self.assertEqual(self.c.socket_request(control, request)["status"], "accepted")
+
+    def test_real_pty_first_bind_keeps_classic_reset_and_new_session_fence(self):
+        for screen in (CAPTURED_PLACEHOLDER.decode(), FULLSCREEN["native"]["typed"].decode(),
+                       FULLSCREEN["native"]["permission"].decode(), FULLSCREEN["native"]["busy"].decode()):
+            with self.subTest(screen=screen[:30]):
+                self.start_pty(fresh=True, startup_screen=screen, paint_before_session=True, expected_status="busy")
+        control, request, event, master, output, drain, path = self.start_pty(
+            fresh=True, startup_screen=FULLSCREEN["native"]["empty"].decode(), paint_before_session=True)
+        state = json.loads(path.read_text())
+        changed = dict(kind="event", channel=state["channel"], event="session-start",
+                       session_id="c" * 32, transcript_path=state["transcript_path"])
+        self.assertTrue(self.c.socket_request(control, changed)["ok"])
+        self.assertEqual(self.c.socket_request(control, request)["status"], "unavailable")
+        self.assertIsNone(json.loads(path.read_text())["mailcortex_startup_idle_at"])
 
     def test_real_pty_captured_suggestion_admits_once(self):
         control, request, event, master, output, drain, path = self.start_pty(

@@ -45,6 +45,32 @@ COMPAT_DUMMY = 0
 
 
 class PtyHoldTests(unittest.TestCase):
+    def test_fullscreen_captured_permission_is_holdable_and_deny_only(self):
+        warm = load("fullscreen_hold_owner", BIN / "claude-warm")
+        captures = load("fullscreen_hold_captures", Path(__file__).with_name("claude_renderer_captures.py"))
+        for mode, frames in captures.FULLSCREEN.items():
+            with self.subTest(mode=mode):
+                owner = self.screen_owner(warm, "")
+                owner.screen_classifier.reset()
+                owner.screen_classifier.feed(frames["permission"])
+                visible = owner._hold_screen()
+                self.assertIsNotNone(visible)
+                self.assertEqual(owner.screen_classifier.prompt_input_state(permission_selection=True), "empty")
+                self.assertEqual(self.hold.deny_bytes(self.hold.CLAUDE_CODE_PROFILE), b"\x1b")
+                timer = self.hold.PtyHoldTimer(1)
+                timer.record(visible, self.hold.CLAUDE_CODE_PROFILE, 0)
+                guarded, _timer, queue, _deny = self.guarded_fixture()
+                with mock.patch.object(os, "write", return_value=1) as write:
+                    self.assertTrue(self.hold.deny_expired_prompt(guarded, timer,
+                        self.hold.CLAUDE_CODE_PROFILE, read_screen=owner._hold_screen,
+                        now=lambda: 1, queue_write=queue))
+                    write.assert_called_once_with(guarded.master_fd, b"\x1b")
+                owner.mailcortex_input_dirty = True
+                owner._hold_maybe_record("blocked")
+                self.assertIsNone(owner.hold_timer)
+                owner.screen_classifier.feed(b"\x1b[")
+                self.assertIsNone(owner._hold_screen())
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

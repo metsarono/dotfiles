@@ -957,6 +957,8 @@ def launch(argv):
                 if message.get("event") == "user-prompt-submit":
                     self.mailcortex_input_dirty = False
                 self._write_state()
+                if self.mailcortex_startup_pending:
+                    self._mailcortex_finish_startup()
             return response
 
         def _handle_control(self, message):

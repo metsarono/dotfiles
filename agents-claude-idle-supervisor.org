@@ -897,6 +897,7 @@ class TerminalScreenModel:
         self.pending = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.uncertain = False
+        self.alternate_screen = False
 
     def _sgr(self, body):
         try:
@@ -955,6 +956,16 @@ class TerminalScreenModel:
                 self.uncertain = True
             return
         body, final = sequence[2:-1], sequence[-1]
+        if body == "?1049" and final in {"h", "l"}:
+            if final == "h" and not self.alternate_screen:
+                self.cells.clear()
+                self.row = self.column = 0
+            elif final == "l" and self.alternate_screen:
+                # The restored primary buffer is not in this bounded model.
+                # Require an explicit clear/redraw before trusting its cells.
+                self.uncertain = True
+            self.alternate_screen = final == "h"
+            return
         if final == "m":
             # Private keyboard negotiation (>4m) is not SGR.
             if not body.startswith((">", "?")):
@@ -1137,6 +1148,29 @@ class ClaudeScreenClassifier:
         dialog = permission_selection and self._classify(self._visible_text()) == "blocked"
         if dialog:
             selection = re.compile(r"\s*❯\s*[123]\.\s*(?:Yes|Yes, and don't ask again|No)\s*")
+            if self.screen.alternate_screen:
+                selection = re.compile(
+                    r"\s*❯\s*[1-4]\.\s*(?:Yes|Yes, and don't ask again|No|"
+                    r"Yes, and always allow access to .+|"
+                    r"Yes, and switch to auto mode · auto mode handles these prompts for you)\s*")
+                selected = [index for index in prompts
+                            if selection.fullmatch("".join(cell[0] for cell in lines[index][1]))]
+                questions = [index for index, (_row, cells) in enumerate(lines)
+                             if any(marker in "".join(cell[0] for cell in cells).lower()
+                                    for marker in ("do you want to proceed?", "would you like to proceed?", "allow command?"))]
+                if len(selected) != 1 or not questions or selected[0] <= questions[-1]:
+                    return "unknown"
+                menu_row, menu_cells = lines[selected[0]]
+                menu_column = next(i for i, cell in enumerate(menu_cells) if cell[0] == self.prompt_glyph)
+                if (self.screen.row, self.screen.column) != (menu_row, menu_column):
+                    return "unknown"
+                # Fullscreen keeps submitted prompts above its modal. Only
+                # the validated question/selection/cancel layout scopes them
+                # out; an editable row inside the modal still vetoes a deny.
+                if not any("esc to cancel" in "".join(c[0] for c in cells).lower()
+                           for _row, cells in lines[selected[0] + 1:]):
+                    return "unknown"
+                prompts = [index for index in prompts if index > questions[-1]]
             prompts = [index for index in prompts
                        if not selection.fullmatch("".join(cell[0] for cell in lines[index][1]))]
         if not prompts:
@@ -1188,6 +1222,10 @@ class ClaudeScreenClassifier:
         # approval screen after Claude redraws it with erase/cursor bytes.
         if last_blocker >= 0 and last_blocker >= max(last_working, last_prompt):
             return "blocked"
+        if self.screen.alternate_screen and "esc to interrupt" in bottom.lower():
+            # Fullscreen leaves the empty input box beneath its spinner.
+            # Its captured interrupt footer is the active-turn cue.
+            return "working"
         if last_working >= 0 and (
             last_working >= last_prompt
             or (last_prompt < 0 and (
@@ -3892,6 +3930,7 @@ class Supervisor:
             return {"ok": False, "error": "invalid-event"}
         self._note_lifecycle_event()
         if event == "session-start":
+            first_session = self.session_id is None
             new_session = self.session_id != session_id
             if new_session and self.session_id and not self._same_project_transcript(
                 message.get("transcript_path")
@@ -3942,8 +3981,12 @@ class Supervisor:
             self.status = "starting"
             if self.hold_timer is not None:
                 self.hold_timer.clear()
-            self.screen_classifier.reset()
-            self.screen_state = None
+            if not (first_session and self.screen_classifier.screen.alternate_screen):
+                self.screen_classifier.reset()
+                self.screen_state = None
+            # Fullscreen may paint before the first SessionStart hook arrives.
+            # Keep that same owned child's model: subsequent cursor deltas do
+            # not repaint the prompt. Rebinds and classic starts still reset.
             self.last_lifecycle_activity = now()
             self._register_herdr()
             self._guard_log("session-bound")
