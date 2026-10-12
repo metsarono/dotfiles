@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Build a candidate only; installation and service restart are separate actions.
+[[ "${1:-}" == "--build-candidate" && $# == 1 ]] || {
+  echo 'Usage: filebrowser-milkdown-build --build-candidate' >&2; exit 2;
+}
+for tool in git podman sha256sum base64 gzip; do
+  command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 69; }
+done
+podman info >/dev/null 2>&1 || {
+  echo 'Podman runtime unavailable; candidate build left untouched.' >&2
+  exit 69
+}
+payload="${FILEBROWSER_MILKDOWN_PAYLOAD:-$HOME/.local/share/filebrowser/patches/milkdown.patch.gz.b64}"
+patch_sha=da9422bfc3d8d88d0f90f21d74cf8f980888e07d1363ad413a7b2ef7f33c846a
+build_parent="${FILEBROWSER_BUILD_PARENT:-$HOME/.local/share/filebrowser/builds}"
+mkdir -p "$build_parent"
+build_root="$(mktemp -d "$build_parent/milkdown.XXXXXXXX")"
+src="$build_root/source"
+patch_file="$build_root/milkdown.patch"
+cat "$payload.part1" "$payload.part2" | base64 --decode | gzip --decompress > "$patch_file"
+printf '%s  %s\n' "$patch_sha" "$patch_file" | sha256sum --check --status
+git init -q "$src"
+git -C "$src" remote add origin https://github.com/gtsteffaniak/filebrowser.git
+git -C "$src" fetch --depth 1 origin 5d9b4df2a21d1ba4a6af481181a7402cb5cbb5ca
+git -C "$src" checkout -q --detach FETCH_HEAD
+[[ "$(git -C "$src" rev-parse HEAD)" == 5d9b4df2a21d1ba4a6af481181a7402cb5cbb5ca ]]
+git -C "$src" apply --check "$patch_file"
+git -C "$src" apply "$patch_file"
+# Locked frontend dependencies are installed only inside the pinned container.
+podman run --rm --userns keep-id --user "$(id -u):$(id -g)" \
+  --security-opt no-new-privileges --cap-drop all --cpus 2 --memory 6g \
+  -v "$src:/src:rw" -w /src/frontend -e HOME=/tmp \
+  docker.io/library/node@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8 \
+  bash -ec 'npm ci; npm run build'
+podman run --rm --userns keep-id --user "$(id -u):$(id -g)" \
+  --security-opt no-new-privileges --cap-drop all --cpus 2 --memory 6g \
+  -v "$src:/src:rw" -w /src/backend \
+  -e HOME=/tmp -e GOCACHE=/src/.go-build -e GOMODCACHE=/src/.go-mod -e GOFLAGS=-mod=readonly -e GOMAXPROCS=2 \
+  docker.io/library/golang@sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea \
+  go build -o /src/filebrowser-milkdown \
+  --ldflags="-w -s -X github.com/gtsteffaniak/filebrowser/backend/common/version.CommitSHA=edb3681-milkdown-saveas -X github.com/gtsteffaniak/filebrowser/backend/common/version.Version=v1.5.6-stable"
+"$src/filebrowser-milkdown" version
+sha256sum "$src/filebrowser-milkdown"
+printf 'Candidate: %s\nReview before installing as ~/.local/bin/filebrowser-milkdown.\n' "$src/filebrowser-milkdown"

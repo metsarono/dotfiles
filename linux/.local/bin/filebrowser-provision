@@ -35,7 +35,17 @@ fi
 mkdir -p "$(dirname "$DEST")"
 # Render: expand $HOME and the RENDERED_USER token. The template's YAML is
 # plain substitution — no shell evaluation, so sed is the honest tool.
-sed -e "s|\$HOME|$HOME|g" -e "s|RENDERED_USER|$(id -un)|g" "$TEMPLATE" > "$DEST"
+umask 077
+TMP="$(mktemp "$(dirname "$DEST")/.filebrowser-config.XXXXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+"${FILEBROWSER_OFFICE_HELPER:-$HOME/.local/bin/filebrowser-office}" --render "$TEMPLATE" | sed "s|RENDERED_USER|$(id -un)|g" > "$TMP"
+# Never follow a config symlink, even during an explicit reprovision.
+[ ! -L "$DEST" ] || { echo "$TAG: refusing config symlink" >&2; exit 1; }
+if [ "$FORCE" = 1 ]; then
+  mv "$TMP" "$DEST"
+else
+  ln "$TMP" "$DEST"  # no overwrite if another provision wins the race
+fi
 chmod 600 "$DEST"
 
 echo "$TAG: rendered $DEST from $TEMPLATE"

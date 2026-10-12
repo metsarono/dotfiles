@@ -1,0 +1,60 @@
+#!/usr/bin/python3
+"""Merge the declared FileBrowser settings without replacing local identities or sources."""
+import argparse, os, pathlib, stat, tempfile, time
+import yaml
+p = argparse.ArgumentParser()
+p.add_argument('--apply', action='store_true', help='write reviewed settings; default is read-only')
+p.add_argument('--office-url')
+p.add_argument('--office-internal-url')
+p.add_argument('--callback-url')
+a = p.parse_args()
+urls = (a.office_url, a.office_internal_url, a.callback_url)
+if any(urls) and not all(urls):
+    p.error('office requires --office-url, --office-internal-url and --callback-url together')
+if all(urls):
+    from urllib.parse import urlparse
+    if any(urlparse(u).scheme not in ('http', 'https') or not urlparse(u).netloc for u in urls):
+        p.error('office URLs must be absolute HTTP(S) URLs')
+config = pathlib.Path.home() / '.config/filebrowser/config.yaml'
+if config.is_symlink():
+    p.error('machine-local config must not be a symlink')
+info = config.stat()
+if info.st_uid != os.getuid():
+    p.error('config must belong to the current user')
+original = config.read_bytes()
+data = yaml.safe_load(original)
+if not isinstance(data, dict):
+    p.error('expected a YAML mapping')
+data.setdefault('auth', {})['tokenExpirationHours'] = 720
+data.setdefault('userDefaults', {}).setdefault('fileViewer', {})['preferEditorForMarkdown'] = True
+settings = ['auth.tokenExpirationHours', 'userDefaults.fileViewer.preferEditorForMarkdown']
+if all(urls):
+    data.setdefault('server', {})['internalUrl'] = a.callback_url
+    office = data.setdefault('integrations', {}).setdefault('office', {})
+    office['url'] = a.office_url
+    office['internalUrl'] = a.office_internal_url
+    settings.extend(['server.internalUrl', 'integrations.office.url', 'integrations.office.internalUrl'])
+# Only setting names are printed. Existing credential fields stay local.
+print(('Apply: ' if a.apply else 'Dry-run: ') + ', '.join(settings))
+print('For an existing account, enable Settings > Profile > prefer editor for markdown.')
+if not a.apply:
+    raise SystemExit(0)
+rendered = yaml.safe_dump(data, sort_keys=False).encode()
+if config.read_bytes() != original:
+    p.error('config changed during review; refusing write')
+backup = config.with_name(config.name + '.before-parity-' + str(time.time_ns()))
+with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as out:
+    out.write(original)
+fd, name = tempfile.mkstemp(prefix='.config.parity-', dir=config.parent)
+try:
+    with os.fdopen(fd, 'wb') as out:
+        os.fchmod(out.fileno(), stat.S_IMODE(info.st_mode) & 0o600)
+        out.write(rendered)
+        out.flush()
+        os.fsync(out.fileno())
+    if config.read_bytes() != original:
+        p.error('config changed before replacement; refusing write')
+    os.replace(name, config)
+finally:
+    if os.path.exists(name):
+        os.unlink(name)

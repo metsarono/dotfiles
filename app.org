@@ -822,6 +822,7 @@ server:
   # Absolute cache path: the default "tmp" is RELATIVE to the cwd — running the
   # binary from a worktree litters it with cache dirs (observed 2026-10-09).
   cacheDir: $HOME/.local/state/filebrowser/cache
+  internalUrl: YOUR_CALLBACK_URL
   sources:
     # Hard drive root: read-only whole-filesystem view. The Admiral's
     # 'hard drive' icon opens here. readOnly is a real per-source flag
@@ -880,10 +881,18 @@ server:
         defaultEnabled: true
         private: true
 auth:
+  tokenExpirationHours: 720  # 30 days for tokens issued at the next login
   methods:
     password:
       enabled: true
       signup: false
+userDefaults:
+  fileViewer:
+    preferEditorForMarkdown: true  # existing accounts still choose their profile preference
+integrations:
+  office:
+    url: YOUR_OFFICE_URL
+    internalUrl: YOUR_OFFICE_INTERNAL_URL
 #+END_EXAMPLE
 
 Notes on rules: Quantum rules are OR-based; each entry is an exclude filter (verified against the v1.5.6-stable =config.generated.yaml=, fetched from the pinned tag 2026-10-09). Key corrections from that reference, Fable's review round: =listen:= is the bind-address key (=host:= does not exist); there is no =frontend.disableShares= — shares are gated per-source with =private: true=; per-source =readOnly: true= exists and covers UI, WebDAV, and API writes. On the root source, ignoreHidden is deliberately NOT set: hidden dot-directories under / are system entries Mètsàtron expects to see in a hard-drive view; the explicit deny rules above carry the security weight. Every source is =private= — no off-tailnet share links, per the sovereignty rule (sealed 2026-08-26).
@@ -901,9 +910,14 @@ The Caddyfile lives beside the HelmCortex lane that owns it (caddy-serve writes 
 	admin off
 }
 
-kikin-kushi.sphinx-draco.ts.net:9090 {
-	tls $HOME/.local/share/caddy/kikin-kushi.crt $HOME/.local/share/caddy/kikin-kushi.key
-	reverse_proxy 127.0.0.1:9091
+YOUR_FILEBROWSER_SITE {
+	tls YOUR_TLS_CERT YOUR_TLS_KEY
+	reverse_proxy YOUR_FILEBROWSER_UPSTREAM
+}
+
+YOUR_OFFICE_SITE {
+	tls YOUR_TLS_CERT YOUR_TLS_KEY
+	reverse_proxy YOUR_OFFICE_UPSTREAM
 }
 #+END_EXAMPLE
 
@@ -926,11 +940,21 @@ set -euo pipefail
 port="${FILEBROWSER_PORT:-9091}"
 config_dir="${FILEBROWSER_CONFIG:-$HOME/.config/filebrowser}"
 bin="${FILEBROWSER_BIN:-$HOME/.local/bin/filebrowser}"
+# A reviewed custom build has a separate name so app-apply cannot erase it.
+if [ -z "${FILEBROWSER_BIN:-}" ] && [ -x "$HOME/.local/bin/filebrowser-milkdown" ]; then
+  bin="$HOME/.local/bin/filebrowser-milkdown"
+fi
 
 [ -x "$bin" ] || { echo "filebrowser-serve: missing $bin (run app-apply)" >&2; exit 1; }
 [ -f "$config_dir/config.yaml" ] || { echo "filebrowser-serve: missing $config_dir/config.yaml (machine-local template in DotCortex app.org)" >&2; exit 1; }
 
 echo "filebrowser-serve: config $config_dir/config.yaml (bind/port live in the config; loopback only)"
+office_helper="${FILEBROWSER_OFFICE_HELPER:-$HOME/.local/bin/filebrowser-office}"
+if [ -x "$office_helper" ]; then
+  exec "$office_helper" --exec "$bin" -c "$config_dir/config.yaml"
+fi
+# A deployment must carry both launchers together; avoid dropping a configured JWT.
+[ ! -e "$HOME/.config/filebrowser/onlyoffice-secret" ] || { echo "filebrowser-serve: missing Office helper" >&2; exit 69; }
 exec "$bin" -c "$config_dir/config.yaml"
 #+END_SRC
 
@@ -973,7 +997,17 @@ fi
 mkdir -p "$(dirname "$DEST")"
 # Render: expand $HOME and the RENDERED_USER token. The template's YAML is
 # plain substitution — no shell evaluation, so sed is the honest tool.
-sed -e "s|\$HOME|$HOME|g" -e "s|RENDERED_USER|$(id -un)|g" "$TEMPLATE" > "$DEST"
+umask 077
+TMP="$(mktemp "$(dirname "$DEST")/.filebrowser-config.XXXXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+"${FILEBROWSER_OFFICE_HELPER:-$HOME/.local/bin/filebrowser-office}" --render "$TEMPLATE" | sed "s|RENDERED_USER|$(id -un)|g" > "$TMP"
+# Never follow a config symlink, even during an explicit reprovision.
+[ ! -L "$DEST" ] || { echo "$TAG: refusing config symlink" >&2; exit 1; }
+if [ "$FORCE" = 1 ]; then
+  mv "$TMP" "$DEST"
+else
+  ln "$TMP" "$DEST"  # no overwrite if another provision wins the race
+fi
 chmod 600 "$DEST"
 
 echo "$TAG: rendered $DEST from $TEMPLATE"
@@ -1000,6 +1034,7 @@ server:
   # Absolute cache path: the default "tmp" is RELATIVE to the cwd — running the
   # binary from a worktree litters it with cache dirs (observed 2026-10-09).
   cacheDir: $HOME/.local/state/filebrowser/cache
+  internalUrl: YOUR_CALLBACK_URL
   sources:
     # Hard drive root: read-only whole-filesystem view. The Admiral's
     # 'hard drive' icon opens here. readOnly is a real per-source flag
@@ -1058,10 +1093,18 @@ server:
         defaultEnabled: true
         private: true
 auth:
+  tokenExpirationHours: 720  # 30 days for tokens issued at the next login
   methods:
     password:
       enabled: true
       signup: false
+userDefaults:
+  fileViewer:
+    preferEditorForMarkdown: true  # existing accounts still choose their profile preference
+integrations:
+  office:
+    url: YOUR_OFFICE_URL
+    internalUrl: YOUR_OFFICE_INTERNAL_URL
 #+END_SRC
 
 ** Cron supervision: filebrowser-cron-apply
@@ -1794,4 +1837,390 @@ app-apply:
 app-health:
 | @chmod +x $(HOME)/.local/bin/app-health 2>/dev/null || true
 | $(HOME)/.local/bin/app-health
+#+END_SRC
+
+
+** Preserve local config while applying parity settings
+
+Both template blocks declare a 30-day token lifetime and the rich-editor preference for new users. For an existing installation, use =filebrowser-settings-apply= (dry-run by default), then =--apply= after reviewing its setting list. This merges only the named settings, retaining local sources, database, paths and credential fields, with a private backup and an atomic replacement. Do not re-provision the whole config with =--force=. Existing accounts must enable Settings → Profile → prefer editor for markdown, or open a Markdown file with =#wysiwyg=.
+
+The optional =--office-url=, =--office-internal-url= and =--callback-url= arguments add the three office integration URLs only after a local Document Server and its TLS front exist. These addresses stay machine-local. The integration also needs a newly provisioned local =FILEBROWSER_ONLYOFFICE_SECRET= in the launcher environment; keep its value out of this repo. Office infrastructure and credential delivery must be ready before applying those optional settings.
+
+#+BEGIN_SRC python :tangle linux/.local/bin/filebrowser-settings-apply :shebang "#!/usr/bin/python3" :tangle-mode (identity #o755) :comments no
+"""Merge the declared FileBrowser settings without replacing local identities or sources."""
+import argparse, os, pathlib, stat, tempfile, time
+import yaml
+p = argparse.ArgumentParser()
+p.add_argument('--apply', action='store_true', help='write reviewed settings; default is read-only')
+p.add_argument('--office-url')
+p.add_argument('--office-internal-url')
+p.add_argument('--callback-url')
+a = p.parse_args()
+urls = (a.office_url, a.office_internal_url, a.callback_url)
+if any(urls) and not all(urls):
+    p.error('office requires --office-url, --office-internal-url and --callback-url together')
+if all(urls):
+    from urllib.parse import urlparse
+    if any(urlparse(u).scheme not in ('http', 'https') or not urlparse(u).netloc for u in urls):
+        p.error('office URLs must be absolute HTTP(S) URLs')
+config = pathlib.Path.home() / '.config/filebrowser/config.yaml'
+if config.is_symlink():
+    p.error('machine-local config must not be a symlink')
+info = config.stat()
+if info.st_uid != os.getuid():
+    p.error('config must belong to the current user')
+original = config.read_bytes()
+data = yaml.safe_load(original)
+if not isinstance(data, dict):
+    p.error('expected a YAML mapping')
+data.setdefault('auth', {})['tokenExpirationHours'] = 720
+data.setdefault('userDefaults', {}).setdefault('fileViewer', {})['preferEditorForMarkdown'] = True
+settings = ['auth.tokenExpirationHours', 'userDefaults.fileViewer.preferEditorForMarkdown']
+if all(urls):
+    data.setdefault('server', {})['internalUrl'] = a.callback_url
+    office = data.setdefault('integrations', {}).setdefault('office', {})
+    office['url'] = a.office_url
+    office['internalUrl'] = a.office_internal_url
+    settings.extend(['server.internalUrl', 'integrations.office.url', 'integrations.office.internalUrl'])
+# Only setting names are printed. Existing credential fields stay local.
+print(('Apply: ' if a.apply else 'Dry-run: ') + ', '.join(settings))
+print('For an existing account, enable Settings > Profile > prefer editor for markdown.')
+if not a.apply:
+    raise SystemExit(0)
+rendered = yaml.safe_dump(data, sort_keys=False).encode()
+if config.read_bytes() != original:
+    p.error('config changed during review; refusing write')
+backup = config.with_name(config.name + '.before-parity-' + str(time.time_ns()))
+with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as out:
+    out.write(original)
+fd, name = tempfile.mkstemp(prefix='.config.parity-', dir=config.parent)
+try:
+    with os.fdopen(fd, 'wb') as out:
+        os.fchmod(out.fileno(), stat.S_IMODE(info.st_mode) & 0o600)
+        out.write(rendered)
+        out.flush()
+        os.fsync(out.fileno())
+    if config.read_bytes() != original:
+        p.error('config changed before replacement; refusing write')
+    os.replace(name, config)
+finally:
+    if os.path.exists(name):
+        os.unlink(name)
+#+END_SRC
+
+
+** OnlyOffice provision and supervision
+
+OnlyOffice shares FileBrowser's cron ownership on the observed Devuan sysvinit substrate. It is a separate rootless Podman container, not a sanctuary. The pinned Document Server uses 2 GiB memory and 3 GiB memory plus swap with unless-stopped; cron starts an attached foreground owner behind flock. The provision command creates but never starts the container. No helper removes or replaces a container. Private persisted data lives outside DotCortex, under the serving user's FileBrowser data directory. OnlyOffice's JWT_ENABLED, JWT_SECRET, JWT_HEADER and private callback flag follow https://github.com/ONLYOFFICE/Docker-DocumentServer; JWT_SECRET is inherited from the private local file, never placed in argv or a template.
+
+Copy the address template into the machine-local FileBrowser directory, fill every YOUR_* key from the coordinator's rollout card and chmod 0600. Values are parsed as data, never sourced as shell code. filebrowser-office --apply creates a fresh 0600 secret once; filebrowser-office --container is dry-run, and --container --apply creates the reviewed container without starting it. filebrowser-office-serve is dry-run by default; its supervisor alone invokes --apply. FileBrowser inherits the same secret on every foreground launch, including cron startup. Existing config is merged with filebrowser-settings-apply after Office health and callback TLS checks. Do not force-reprovision an existing config.
+
+The Caddyfile template renders with filebrowser-office --render into a coordinator-reviewed temporary file before the live gate. The OnlyOffice site uses the same TLS certificate as FileBrowser. Machine addresses and ports belong only in office.env; no new network coordinates are published here. See tools-filebrowser-milkdown.org for the candidate builder and tools-filebrowser-tests.org for isolated tests.
+
+#+BEGIN_SRC conf :tangle linux/.local/share/filebrowser/office.env.template :comments no
+# Machine-local address settings only; never add the JWT secret here.
+YOUR_OFFICE_URL=
+YOUR_OFFICE_INTERNAL_URL=
+YOUR_CALLBACK_URL=
+YOUR_OFFICE_PUBLISH=
+YOUR_OFFICE_SITE=
+YOUR_OFFICE_UPSTREAM=
+YOUR_FILEBROWSER_SITE=
+YOUR_FILEBROWSER_UPSTREAM=
+YOUR_TLS_CERT=
+YOUR_TLS_KEY=
+#+END_SRC
+
+#+BEGIN_SRC conf :tangle linux/.local/share/filebrowser/Caddyfile.template :comments no
+{
+	admin off
+}
+
+YOUR_FILEBROWSER_SITE {
+	tls YOUR_TLS_CERT YOUR_TLS_KEY
+	reverse_proxy YOUR_FILEBROWSER_UPSTREAM
+}
+
+YOUR_OFFICE_SITE {
+	tls YOUR_TLS_CERT YOUR_TLS_KEY
+	reverse_proxy YOUR_OFFICE_UPSTREAM
+}
+#+END_SRC
+
+#+BEGIN_SRC python :tangle linux/.local/bin/filebrowser-office :shebang "#!/usr/bin/python3" :tangle-mode (identity #o755) :comments no
+"""Private OnlyOffice provisioning and foreground Podman owner; default is read-only."""
+import argparse, hashlib, ipaddress, json, os, pathlib, re, secrets, stat, subprocess, sys, tempfile
+IMAGE = 'docker.io/onlyoffice/documentserver@sha256:3ab6ebc7c605e5a32b7ae3ff19daed4925090245acc8100ce2230bd766c88212'
+NAME = 'filebrowser-onlyoffice'
+HOME = pathlib.Path.home()
+ROOT = HOME / '.config/filebrowser'
+SECRET = ROOT / 'onlyoffice-secret'
+ENV = ROOT / 'office.env'
+KEYS = ('YOUR_OFFICE_URL', 'YOUR_OFFICE_INTERNAL_URL', 'YOUR_CALLBACK_URL', 'YOUR_OFFICE_PUBLISH', 'YOUR_OFFICE_SITE', 'YOUR_OFFICE_UPSTREAM', 'YOUR_FILEBROWSER_SITE', 'YOUR_FILEBROWSER_UPSTREAM', 'YOUR_TLS_CERT', 'YOUR_TLS_KEY')
+
+def private(path):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise ValueError('private file must be regular, owned by this user and mode 0600: ' + str(path))
+
+def secret():
+    private(SECRET)
+    value = SECRET.read_text().strip()
+    if not re.fullmatch(r'[0-9a-f]{64}', value):
+        raise ValueError('invalid local OnlyOffice secret format')
+    return value
+
+def settings():
+    private(ENV)
+    result = {}
+    for line in ENV.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        key, sep, value = line.partition('=')
+        if not sep or key not in KEYS or key in result or not value or 'YOUR_' in value or any(c in value for c in '\r\n\x00{};"\'`$\\'):
+            raise ValueError('invalid or unresolved office.env setting')
+        result[key] = value
+    if set(result) != set(KEYS):
+        raise ValueError('office.env must supply all template keys')
+    from urllib.parse import urlsplit
+    for key in KEYS[:3]:
+        u = urlsplit(result[key])
+        if u.scheme not in ('https', 'http') or not u.hostname or u.username or u.password or u.query or u.fragment or u.path not in ('', '/'):
+            raise ValueError('invalid integration URL')
+        if key != 'YOUR_OFFICE_INTERNAL_URL' and u.scheme != 'https':
+            raise ValueError('external and callback URLs require TLS')
+        _ = u.port
+    host, port, target = result['YOUR_OFFICE_PUBLISH'].split(':')
+    if not ipaddress.ip_address(host).is_loopback or not port.isdigit() or not target.isdigit() or not (0 < int(port) < 65536) or not (0 < int(target) < 65536):
+        raise ValueError('Document Server publish must be loopback only')
+    for key in KEYS[4:8]:
+        if not re.fullmatch(r'[a-zA-Z0-9.-]+:[0-9]+', result[key]) or not 0 < int(result[key].rsplit(':', 1)[1]) < 65536:
+            raise ValueError('invalid Caddy endpoint')
+    for key in ('YOUR_OFFICE_UPSTREAM', 'YOUR_FILEBROWSER_UPSTREAM'):
+        if not ipaddress.ip_address(result[key].split(':')[0]).is_loopback:
+            raise ValueError('Caddy upstream must be loopback only')
+    if result['YOUR_OFFICE_UPSTREAM'] != host + ':' + port or result['YOUR_OFFICE_INTERNAL_URL'].rstrip('/') != 'http://' + host + ':' + port or result['YOUR_OFFICE_URL'].rstrip('/') != 'https://' + result['YOUR_OFFICE_SITE'] or result['YOUR_CALLBACK_URL'].rstrip('/') != 'https://' + result['YOUR_FILEBROWSER_SITE']:
+        raise ValueError('Office, publish, proxy and callback endpoints disagree')
+    for key in KEYS[8:]:
+        if not pathlib.Path(result[key]).is_absolute() or any(c.isspace() for c in result[key]):
+            raise ValueError('TLS paths must be absolute without whitespace')
+    return result
+
+def provision(apply):
+    if SECRET.exists() or SECRET.is_symlink():
+        secret()
+        print('OnlyOffice secret already provisioned; retained')
+        return
+    if not apply:
+        print('Dry-run: create private OnlyOffice secret on first provision')
+        return
+    ROOT.mkdir(parents=True, exist_ok=True)
+    if ROOT.is_symlink() or ROOT.stat().st_uid != os.getuid():
+        raise ValueError('FileBrowser config directory must be local and user-owned')
+    os.chmod(ROOT, 0o700)
+    fd, name = tempfile.mkstemp(prefix='.onlyoffice-secret-', dir=ROOT)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            os.fchmod(f.fileno(), 0o600)
+            f.write(secrets.token_hex(32) + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+        # Link without replacement: simultaneous provisions retain the winner.
+        try:
+            os.link(name, SECRET)
+        except FileExistsError:
+            secret()
+    finally:
+        os.unlink(name)
+    print('Provisioned private OnlyOffice secret')
+
+def run_office(apply, serve):
+    s = settings()
+    jwt = secret()
+    podman = os.environ.get('FILEBROWSER_PODMAN_BIN', '/usr/bin/podman')
+    storage = HOME / '.local/share/filebrowser/onlyoffice'
+    mounts = [('logs', '/var/log/onlyoffice'), ('data', '/var/www/onlyoffice/Data'), ('lib', '/var/lib/onlyoffice'), ('db', '/var/lib/postgresql')]
+    spec = json.dumps({'image': IMAGE, 'publish': s['YOUR_OFFICE_PUBLISH'], 'home': str(HOME), 'jwt': hashlib.sha256(jwt.encode()).hexdigest(), 'memory': '2g', 'swap': '3g'}, sort_keys=True)
+    label = hashlib.sha256(spec.encode()).hexdigest()
+    args = [podman, 'create', '--name', NAME, '--label', 'org.dotcortex.filebrowser.office=' + label, '--restart', 'unless-stopped', '--memory', '2g', '--memory-swap', '3g', '--publish', s['YOUR_OFFICE_PUBLISH'], '--env', 'JWT_ENABLED=true', '--env', 'JWT_SECRET', '--env', 'JWT_HEADER=Authorization', '--env', 'ALLOW_PRIVATE_IP_ADDRESS=true']
+    for folder, dest in mounts:
+        args.extend(['--volume', str(storage / folder) + ':' + dest + ':rw'])
+    args.append(IMAGE)
+    if not apply:
+        print('Dry-run: create pinned Document Server, loopback publish, memory 2g, memory+swap 3g; secret inherited privately')
+        return
+    env = os.environ.copy()
+    env['JWT_SECRET'] = jwt
+    found = subprocess.run([podman, 'container', 'exists', NAME], env=env)
+    if found.returncode not in (0, 1):
+        raise ValueError('Podman container lookup failed')
+    if found.returncode == 1:
+        if serve:
+            raise ValueError('Document Server not provisioned; run --container --apply after review')
+        for folder, _ in mounts:
+            (storage / folder).mkdir(parents=True, exist_ok=True)
+        subprocess.run(args, env=env, check=True)
+    else:
+        check = subprocess.check_output([podman, 'inspect', '--format', '{{ index .Config.Labels "org.dotcortex.filebrowser.office" }}', NAME], env=env, text=True).strip()
+        if check != label:
+            raise ValueError('existing container differs from reviewed definition; refusing replacement')
+    if serve:
+        # Podman is the foreground child; cron + flock supervise its lifetime.
+        os.execve(podman, [podman, 'start', '--attach', NAME], env)
+    print('Document Server provisioned; not started')
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--apply', action='store_true')
+    p.add_argument('--container', action='store_true')
+    p.add_argument('--serve', action='store_true')
+    p.add_argument('--render', metavar='TEMPLATE')
+    p.add_argument('--exec', dest='command', nargs=argparse.REMAINDER)
+    a = p.parse_args()
+    if a.command:
+        env = os.environ.copy()
+        if SECRET.exists() or SECRET.is_symlink():
+            env['FILEBROWSER_ONLYOFFICE_SECRET'] = secret()
+        elif '-c' in a.command:
+            import yaml
+            config = pathlib.Path(a.command[a.command.index('-c') + 1])
+            office = (yaml.safe_load(config.read_text()) or {}).get('integrations', {}).get('office')
+            if office:
+                raise ValueError('OnlyOffice secret has not been provisioned')
+        cmd = [v for v in a.command if v != '--require-office-secret']
+        os.execvpe(cmd[0], cmd, env)
+    elif a.render:
+        text = pathlib.Path(a.render).read_text().replace('$HOME', str(HOME))
+        for key, value in settings().items():
+            text = text.replace(key, value)
+        if re.search(r'YOUR_[A-Z_]+', text):
+            raise ValueError('unresolved template setting')
+        sys.stdout.write(text)
+    elif a.container or a.serve:
+        if a.serve and not a.apply:
+            p.error('--serve requires --apply')
+        run_office(a.apply, a.serve)
+    else:
+        provision(a.apply)
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError, subprocess.CalledProcessError) as e:
+        print('filebrowser-office: ' + str(e), file=sys.stderr)
+        sys.exit(1)
+#+END_SRC
+
+#+BEGIN_SRC bash :tangle linux/.local/bin/filebrowser-office-serve :shebang "#!/bin/bash" :tangle-mode (identity #o755) :comments no
+set -euo pipefail
+helper="${FILEBROWSER_OFFICE_HELPER:-$HOME/.local/bin/filebrowser-office}"
+case "${1:-}" in
+  '') exec "$helper" --container ;;
+  --apply) [ "$#" = 1 ] || exit 2; exec "$helper" --serve --apply ;;
+  --help) echo 'Usage: filebrowser-office-serve [--apply] (default: dry-run)' ;;
+  *) exit 2 ;;
+esac
+#+END_SRC
+
+#+BEGIN_SRC bash :tangle linux/.local/bin/filebrowser-office-supervise :shebang "#!/bin/bash" :tangle-mode (identity #o755) :comments no
+set -euo pipefail
+
+TAG="filebrowser-office-supervise"
+EXPECTED_HOST=""
+DELAY=15
+RETRY_SECONDS=5
+LAUNCHER="${FILEBROWSER_OFFICE_SUPERVISE_LAUNCHER:-$HOME/.local/bin/filebrowser-office-serve}"
+HOSTNAME_BIN="${FILEBROWSER_OFFICE_SUPERVISE_HOSTNAME_BIN:-hostname}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --expected-host) [ "$#" -ge 2 ] || { echo "$TAG: --expected-host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --delay) [ "$#" -ge 2 ] || { echo "$TAG: --delay requires a value" >&2; exit 2; }; DELAY="$2"; shift ;;
+    --retry-seconds) [ "$#" -ge 2 ] || { echo "$TAG: --retry-seconds requires a value" >&2; exit 2; }; RETRY_SECONDS="$2"; shift ;;
+    -h|--help|help) echo "Usage: $TAG --expected-host HOST [--delay N] [--retry-seconds N]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -n "$EXPECTED_HOST" ] || { echo "$TAG: --expected-host is required" >&2; exit 2; }
+CURRENT_HOST="$($HOSTNAME_BIN -s)"
+[ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: wrong host ($CURRENT_HOST != $EXPECTED_HOST), nothing to do" >&2; exit 1; }
+[ -x "$LAUNCHER" ] || { echo "$TAG: launcher is not executable: $LAUNCHER" >&2; exit 69; }
+
+LOG_DIR="$HOME/.local/state/filebrowser/onlyoffice"
+mkdir -p "$LOG_DIR"
+exec 9>"$LOG_DIR/supervisor.lock"
+if ! flock -n 9; then
+  # Boot watchdog and liveness poll may meet; only one supervisor owns the service.
+  exit 0
+fi
+
+log() { printf '%s %s %s\n' "$(date -Is)" "$TAG" "$*" >> "$LOG_DIR/supervisor.log"; }
+
+log "supervisor starting (host=$CURRENT_HOST, launcher=$LAUNCHER)"
+
+# Boot path: give the machine a moment, then own the daemon forever,
+# respawning on death — herdr-web-tailnet --autostart shape.
+sleep "$DELAY"
+while :; do
+  "$LAUNCHER" --apply >> "$LOG_DIR/service.log" 2>&1 || true
+  log "service exited, respawning in ${RETRY_SECONDS}s"
+  sleep "$RETRY_SECONDS"
+done
+#+END_SRC
+
+#+BEGIN_SRC bash :tangle linux/.local/bin/filebrowser-office-cron-apply :shebang "#!/bin/bash" :tangle-mode (identity #o755) :comments no
+set -euo pipefail
+
+TAG="filebrowser-office-cron-apply"
+TARGET="/etc/cron.d/dotcortex-filebrowser-office"
+EXPECTED_HOST=""
+DRY=1
+REMOVE=0
+HOSTNAME_BIN="${FILEBROWSER_OFFICE_CRON_HOSTNAME_BIN:-hostname}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "$TAG: --host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --dry-run) DRY=1 ;;
+    --apply) DRY=0 ;;
+    --remove) REMOVE=1 ;;
+    -h|--help|help) echo "Usage: $TAG --host EXACT_HOST [--apply] [--remove] (default: dry-run)"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+run_priv() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
+
+if [ "$REMOVE" = 1 ]; then
+  if [ "$DRY" = 1 ]; then echo "remove $TARGET"; else run_priv rm -f "$TARGET"; echo "$TAG: removed $TARGET"; fi
+  exit 0
+fi
+
+[ -n "$EXPECTED_HOST" ] || { echo "$TAG: --host EXACT_HOST is required" >&2; exit 2; }
+CURRENT_HOST="$($HOSTNAME_BIN -s)"
+[ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: refusing installation on $CURRENT_HOST; expected $EXPECTED_HOST" >&2; exit 1; }
+
+USER_NAME="$(id -un)"
+USER_ID="$(id -u)"
+TARGET_HOME="$HOME"
+SUPERVISOR="$TARGET_HOME/.local/bin/filebrowser-office-supervise"
+[ "$DRY" = 1 ] || [ -x "$SUPERVISOR" ] || { echo "$TAG: missing $SUPERVISOR; tangle and stow first" >&2; exit 1; }
+
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+cat >"$TMP" <<EOF
+# DotCortex FileBrowser Quantum owner; managed by $TAG.
+@reboot $USER_NAME HOME=$TARGET_HOME PATH=$TARGET_HOME/.guix-extra-profiles/core/core/bin:$TARGET_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$USER_ID $SUPERVISOR --expected-host $EXPECTED_HOST --delay 15 --retry-seconds 15
+*/2 * * * * $USER_NAME HOME=$TARGET_HOME PATH=$TARGET_HOME/.guix-extra-profiles/core/core/bin:$TARGET_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$USER_ID $SUPERVISOR --expected-host $EXPECTED_HOST
+EOF
+
+if [ "$DRY" = 1 ]; then
+  cat "$TMP"
+else
+  run_priv install -o root -g root -m 0644 "$TMP" "$TARGET"
+  echo "$TAG: installed $TARGET"
+fi
 #+END_SRC

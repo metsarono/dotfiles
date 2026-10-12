@@ -1,0 +1,156 @@
+"""Isolated FileBrowser contracts; launch every program with a minimal environment."""
+import base64, gzip, hashlib, ipaddress, os, pathlib, re, signal, stat, subprocess, tempfile, time, unittest
+import yaml
+# An explicit path makes this suite reviewable and runnable in any checkout.
+REPO = pathlib.Path(os.environ['FILEBROWSER_TEST_REPO'])
+BIN = REPO / 'linux/.local/bin'
+DATA = REPO / 'linux/.local/share/filebrowser'
+
+class Contracts(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='filebrowser-contract-', dir='/tmp')
+        self.home = pathlib.Path(self.tmp.name)
+        self.env = {'HOME': str(self.home), 'PATH': '/usr/bin:/bin'}
+        self.loopback = str(ipaddress.ip_address(0x7f000001))
+        self.office_port, self.file_port, self.proxy_port = ('28095', '29090', '29091')
+        self.publish = self.loopback + ':' + self.office_port + ':' + self.office_port
+        self.office_url = 'https://test.example:' + self.office_port
+        self.office_internal = 'http://' + self.loopback + ':' + self.office_port
+        (self.home / '.local/bin').mkdir(parents=True)
+        (self.home / '.config/filebrowser').mkdir(parents=True)
+        self.config = self.home / '.config/filebrowser/config.yaml'
+        self.config.write_text('server: {}\nauth: {}\n')
+        self.helper = BIN / 'filebrowser-office'
+        self.env['FILEBROWSER_OFFICE_HELPER'] = str(self.helper)
+    def tearDown(self):
+        self.tmp.cleanup()
+    def run_script(self, name, *args, ok=True, env=None):
+        path = BIN / name if name != 'filebrowser-serve' else REPO / 'all/.local/bin'/name
+        r = subprocess.run(['/usr/bin/env', '-i', *[k+'='+v for k,v in (env or self.env).items()], str(path), *args], text=True, capture_output=True)
+        if ok:
+            self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        else:
+            self.assertNotEqual(r.returncode, 0)
+        return r
+    def fake(self, name, body):
+        p = self.home / '.local/bin'/name
+        p.write_text('#!/bin/bash\nset -eu\n'+body+'\n'); p.chmod(0o755)
+        return p
+    def provision(self):
+        self.run_script('filebrowser-office', '--apply')
+    def addresses(self):
+        v = {'YOUR_OFFICE_URL': self.office_url, 'YOUR_OFFICE_INTERNAL_URL': self.office_internal, 'YOUR_CALLBACK_URL': 'https://test.example:' + self.file_port, 'YOUR_OFFICE_PUBLISH': self.publish, 'YOUR_OFFICE_SITE': 'test.example:' + self.office_port, 'YOUR_OFFICE_UPSTREAM': self.loopback + ':' + self.office_port, 'YOUR_FILEBROWSER_SITE': 'test.example:' + self.file_port, 'YOUR_FILEBROWSER_UPSTREAM': self.loopback + ':' + self.proxy_port, 'YOUR_TLS_CERT': '/tmp/example.crt', 'YOUR_TLS_KEY': '/tmp/example.key'}
+        p=self.home/'.config/filebrowser/office.env';p.write_text(''.join(k+'='+x+'\n' for k,x in v.items()));p.chmod(0o600)
+        return v
+    def test_binary_preference_override_and_missing(self):
+        self.fake('filebrowser','echo STOCK "$@"')
+        self.assertIn('STOCK -c',self.run_script('filebrowser-serve').stdout)
+        self.fake('filebrowser-milkdown','echo MILKDOWN "$@"')
+        self.assertIn('MILKDOWN -c',self.run_script('filebrowser-serve').stdout)
+        env=self.env|{'FILEBROWSER_BIN':str(self.home/'.local/bin/filebrowser')}
+        self.assertIn('STOCK -c',self.run_script('filebrowser-serve',env=env).stdout)
+        self.run_script('filebrowser-serve',env=self.env|{'FILEBROWSER_BIN':'/missing'},ok=False)
+        self.config.unlink();self.run_script('filebrowser-serve',ok=False)
+    def test_launcher_receives_secret_and_fails_without_configured_secret(self):
+        self.config.write_text('integrations:\n  office:\n    url: https://test.example\n')
+        self.fake('filebrowser','test -n "${FILEBROWSER_ONLYOFFICE_SECRET:-}"; echo "$FILEBROWSER_ONLYOFFICE_SECRET" | sha256sum')
+        self.run_script('filebrowser-serve',ok=False)
+        self.provision()
+        value=(self.home/'.config/filebrowser/onlyoffice-secret').read_bytes()
+        self.assertIn(hashlib.sha256(value).hexdigest(),self.run_script('filebrowser-serve').stdout)
+    def test_secret_dry_default_idempotence_permissions_and_symlink(self):
+        secret=self.home/'.config/filebrowser/onlyoffice-secret'
+        self.run_script('filebrowser-office');self.assertFalse(secret.exists())
+        self.provision(); original=secret.read_bytes()
+        self.assertEqual(stat.S_IMODE(secret.stat().st_mode),0o600)
+        self.assertEqual(stat.S_IMODE(secret.parent.stat().st_mode),0o700)
+        self.provision();self.assertEqual(secret.read_bytes(),original)
+        secret.chmod(0o644);self.run_script('filebrowser-office',ok=False)
+        secret.chmod(0o600); target=self.home/'other';target.write_bytes(original);target.chmod(0o600)
+        secret.unlink();secret.symlink_to(target);self.run_script('filebrowser-office',ok=False)
+    def test_settings_merge_preserves_unknown_credentials_sources_and_backup(self):
+        initial={'server':{'sources':[{'name':'kept','config':{'rules':[{'fileName':'keep'}]}}],'database':'fixture.db'},'auth':{'key':'synthetic-test-key','methods':{'password':{'enabled':True}}},'unknown':{'nested':[1,2]},'userDefaults':{'fileViewer':{'other':7}},'integrations':{'office':{'secret':'synthetic-test-credential','viewOnly':True}}}
+        self.config.write_text(yaml.safe_dump(initial));original=self.config.read_bytes()
+        r=self.run_script('filebrowser-settings-apply');self.assertIn('Dry-run:',r.stdout);self.assertNotIn('synthetic',r.stdout);self.assertEqual(original,self.config.read_bytes())
+        self.run_script('filebrowser-settings-apply','--office-url','https://test.example',ok=False)
+        self.run_script('filebrowser-settings-apply','--apply','--office-url','https://test.example','--office-internal-url','http://localhost','--callback-url','https://callback.example')
+        data=yaml.safe_load(self.config.read_bytes())
+        self.assertEqual(data['auth']['key'],initial['auth']['key']);self.assertEqual(data['server']['sources'],initial['server']['sources']);self.assertEqual(data['unknown'],initial['unknown'])
+        self.assertEqual(data['integrations']['office']['secret'],'synthetic-test-credential');self.assertTrue(data['integrations']['office']['viewOnly']);self.assertEqual(data['auth']['tokenExpirationHours'],720)
+        self.assertTrue(data['userDefaults']['fileViewer']['preferEditorForMarkdown']);self.assertEqual(data['userDefaults']['fileViewer']['other'],7)
+        backups=list(self.config.parent.glob('*.before-parity-*'));self.assertEqual(len(backups),1);self.assertEqual(backups[0].read_bytes(),original);self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode),0o600)
+        self.config.unlink();self.config.symlink_to(backups[0]);self.run_script('filebrowser-settings-apply','--apply',ok=False)
+    def test_render_and_provision_preserve_five_sources_and_exact_deny_rules(self):
+        self.addresses()
+        baseline=subprocess.check_output(['git','show','1088ba83a:app.org'],cwd=REPO,text=True)
+        old=re.search(r'#\+BEGIN_SRC yaml :tangle linux/\.local/share/filebrowser/config.template.yaml\n(.*?)#\+END_SRC',baseline,re.S).group(1)
+        user=subprocess.check_output(['id','-un'],text=True).strip()
+        expected=yaml.safe_load(old.replace('$HOME',str(self.home)).replace('RENDERED_USER',user))['server']['sources']
+        env=self.env|{'FILEBROWSER_TEMPLATE':str(DATA/'config.template.yaml')}
+        self.config.unlink();self.run_script('filebrowser-provision',env=env)
+        actual=yaml.safe_load(self.config.read_text())
+        self.assertEqual(actual['server']['sources'],expected);self.assertEqual(len(expected),5)
+        self.assertEqual(actual['auth']['tokenExpirationHours'],720);self.assertTrue(actual['userDefaults']['fileViewer']['preferEditorForMarkdown'])
+        self.assertEqual(actual['integrations']['office']['url'],self.office_url)
+        original=self.config.read_bytes();self.run_script('filebrowser-provision',env=env,ok=False);self.assertEqual(self.config.read_bytes(),original)
+        caddy=self.run_script('filebrowser-office','--render',str(DATA/'Caddyfile.template')).stdout
+        self.assertIn('test.example:' + self.office_port,caddy);self.assertIn('reverse_proxy ' + self.loopback + ':' + self.office_port,caddy);self.assertNotIn('YOUR_',caddy)
+    def test_office_container_dry_create_no_start_and_existing_drift(self):
+        self.addresses();self.provision()
+        log=self.home/'podman.log'
+        podman=self.fake('podman', '''echo "$*" >> "$HOME/podman.log"
+case "$1" in
+ container) exit 1;;
+ create) test -n "$JWT_SECRET"; printf %s "$JWT_SECRET" | sha256sum > "$HOME/jwt.sha";;
+ *) exit 9;;
+esac''')
+        env=self.env|{'FILEBROWSER_PODMAN_BIN':str(podman)}
+        self.run_script('filebrowser-office','--container',env=env);self.assertFalse(log.exists())
+        self.run_script('filebrowser-office-serve',env=env);self.assertFalse(log.exists())
+        self.run_script('filebrowser-office','--container','--apply',env=env)
+        text=log.read_text();self.assertIn('--memory 2g --memory-swap 3g',text);self.assertIn('--publish ' + self.publish,text);self.assertIn('--env JWT_SECRET ',text);self.assertFalse(any(line.split()[0] == 'start' for line in text.splitlines()));self.assertIn('@sha256:3ab6',text)
+        value=(self.home/'.config/filebrowser/onlyoffice-secret').read_text().strip();self.assertNotIn(value,text);self.assertIn(hashlib.sha256(value.encode()).hexdigest(),(self.home/'jwt.sha').read_text())
+        self.run_script('filebrowser-office-serve','--apply',env=env,ok=False)
+        self.fake('podman','case "$1" in container) exit 0;; inspect) echo drift;; *) exit 9;; esac')
+        self.run_script('filebrowser-office','--container','--apply',env=env,ok=False)
+    def test_invalid_addresses_and_public_permissions_rejected(self):
+        self.addresses();p=self.home/'.config/filebrowser/office.env'
+        text=p.read_text();p.write_text(text.replace(self.publish, str(ipaddress.IPv4Address(0)) + ':' + self.office_port + ':' + self.office_port))
+        self.run_script('filebrowser-office','--render',str(DATA/'Caddyfile.template'),ok=False)
+        p.write_text(text);p.chmod(0o644);self.run_script('filebrowser-office','--render',str(DATA/'Caddyfile.template'),ok=False)
+    def test_cron_dry_host_guard_and_remove(self):
+        host=self.fake('hostname','echo fixture-host');env=self.env|{'FILEBROWSER_OFFICE_CRON_HOSTNAME_BIN':str(host)}
+        text=self.run_script('filebrowser-office-cron-apply','--host','fixture-host',env=env).stdout
+        self.assertIn('@reboot',text);self.assertIn('*/2 * * * *',text);self.assertIn('filebrowser-office-supervise',text)
+        self.run_script('filebrowser-office-cron-apply','--host','wrong',env=env,ok=False)
+        self.assertIn('remove /etc/cron.d/dotcortex-filebrowser-office',self.run_script('filebrowser-office-cron-apply','--remove',env=env).stdout)
+    def test_supervisor_singleton_and_retries(self):
+        host=self.fake('hostname','echo fixture-host');launch=self.fake('office-launcher','echo "$*" >> "$HOME/launch.log"; exit 1')
+        env=self.env|{'FILEBROWSER_OFFICE_SUPERVISE_HOSTNAME_BIN':str(host),'FILEBROWSER_OFFICE_SUPERVISE_LAUNCHER':str(launch)}
+        self.run_script('filebrowser-office-supervise','--expected-host','wrong',env=env,ok=False)
+        cmd=['/usr/bin/env','-i',*[k+'='+v for k,v in env.items()],str(BIN/'filebrowser-office-supervise'),'--expected-host','fixture-host','--delay','0','--retry-seconds','1']
+        proc=subprocess.Popen(cmd,start_new_session=True)
+        try:
+            limit=time.monotonic()+5
+            while time.monotonic()<limit:
+                p=self.home/'launch.log'
+                if p.exists() and len(p.read_text().splitlines())>=2:break
+                time.sleep(.05)
+            self.assertGreaterEqual(len(p.read_text().splitlines()),2)
+            self.assertTrue(all(x=='--apply' for x in p.read_text().splitlines()))
+            duplicate=subprocess.run(cmd,timeout=2,capture_output=True);self.assertEqual(duplicate.returncode,0)
+        finally:
+            os.killpg(proc.pid,signal.SIGTERM);proc.wait(timeout=3)
+    def test_builder_gate_payload_provenance_and_source_output_parity(self):
+        self.run_script('filebrowser-milkdown-build',ok=False)
+        payload=b''.join((DATA/'patches'/('milkdown.patch.gz.b64.part'+n)).read_bytes() for n in ('1','2'))
+        diff=gzip.decompress(base64.b64decode(payload));self.assertEqual(len(diff),351990);self.assertEqual(hashlib.sha256(diff).hexdigest(),'da9422bfc3d8d88d0f90f21d74cf8f980888e07d1363ad413a7b2ef7f33c846a')
+        for source in ['app.org','tools-filebrowser-milkdown.org','tools-filebrowser-milkdown-payload.org','tools-filebrowser-tests.org']:
+            text=(REPO/source).read_text()
+            for header,body in re.findall(r'#\+BEGIN_SRC ([^\n]+)\n(.*?)#\+END_SRC',text,re.S):
+                m=re.search(r':tangle (\S+)',header)
+                if not m or m[1]=='no':continue
+                output=(REPO/m[1]).read_text()
+                self.assertIn(body.rstrip('\n'),output,source+' -> '+m[1])
+
+if __name__=='__main__':unittest.main(verbosity=2)

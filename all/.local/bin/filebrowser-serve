@@ -17,10 +17,20 @@ set -euo pipefail
 port="${FILEBROWSER_PORT:-9091}"
 config_dir="${FILEBROWSER_CONFIG:-$HOME/.config/filebrowser}"
 bin="${FILEBROWSER_BIN:-$HOME/.local/bin/filebrowser}"
+# A reviewed custom build has a separate name so app-apply cannot erase it.
+if [ -z "${FILEBROWSER_BIN:-}" ] && [ -x "$HOME/.local/bin/filebrowser-milkdown" ]; then
+  bin="$HOME/.local/bin/filebrowser-milkdown"
+fi
 
 [ -x "$bin" ] || { echo "filebrowser-serve: missing $bin (run app-apply)" >&2; exit 1; }
 [ -f "$config_dir/config.yaml" ] || { echo "filebrowser-serve: missing $config_dir/config.yaml (machine-local template in DotCortex app.org)" >&2; exit 1; }
 
 echo "filebrowser-serve: config $config_dir/config.yaml (bind/port live in the config; loopback only)"
+office_helper="${FILEBROWSER_OFFICE_HELPER:-$HOME/.local/bin/filebrowser-office}"
+if [ -x "$office_helper" ]; then
+  exec "$office_helper" --exec "$bin" -c "$config_dir/config.yaml"
+fi
+# A deployment must carry both launchers together; avoid dropping a configured JWT.
+[ ! -e "$HOME/.config/filebrowser/onlyoffice-secret" ] || { echo "filebrowser-serve: missing Office helper" >&2; exit 69; }
 exec "$bin" -c "$config_dir/config.yaml"
 # Launcher: filebrowser-serve:1 ends here

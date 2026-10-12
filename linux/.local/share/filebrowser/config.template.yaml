@@ -11,6 +11,7 @@ server:
   # Absolute cache path: the default "tmp" is RELATIVE to the cwd — running the
   # binary from a worktree litters it with cache dirs (observed 2026-10-09).
   cacheDir: $HOME/.local/state/filebrowser/cache
+  internalUrl: YOUR_CALLBACK_URL
   sources:
     # Hard drive root: read-only whole-filesystem view. The Admiral's
     # 'hard drive' icon opens here. readOnly is a real per-source flag
@@ -69,7 +70,15 @@ server:
         defaultEnabled: true
         private: true
 auth:
+  tokenExpirationHours: 720  # 30 days for tokens issued at the next login
   methods:
     password:
       enabled: true
       signup: false
+userDefaults:
+  fileViewer:
+    preferEditorForMarkdown: true  # existing accounts still choose their profile preference
+integrations:
+  office:
+    url: YOUR_OFFICE_URL
+    internalUrl: YOUR_OFFICE_INTERNAL_URL
