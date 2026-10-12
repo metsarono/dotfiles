@@ -381,6 +381,105 @@ def owner_matches(owner, expected):
         return False
 
 
+# Measured against Claude Code 2.1.296 in isolated native/software-cursor PTYs.
+# Render acknowledgement plus a quiet window separates text from the submit key.
+WAKE_SCREEN_TIMEOUT = 0.75
+WAKE_RENDER_QUIET = 0.1
+
+
+def wake_prompt_matches(classifier, text):
+    """Prove the current boxed draft has exactly the printable wake text.
+
+    Retain internal spacing and attributes. Ink wraps at words (dropping one
+    separator) or inside a long word; only those two joins are allowed. Extra
+    rows, grey/faint text, truncated escapes and unbounded boxes refuse.
+    None means a cleared prompt, where rendered hints may count as empty.
+    """
+    screen = classifier.screen
+    visible = classifier._visible_text()
+    if (not screen.complete()
+            or any(m in visible.lower() for m in classifier.STRONG_BLOCKERS)):
+        return False
+    lines = screen.lines()
+    prompts = [(row, cells) for row, cells in lines
+               if classifier.PROMPT_RE.fullmatch("".join(c[0] for c in cells))]
+    if not prompts:
+        return False
+    row, cells = prompts[-1]
+    glyph = next(i for i, c in enumerate(cells) if c[0] == classifier.prompt_glyph)
+    start = glyph + 2
+    if glyph != 0 or len(cells) < start or cells[1][0] not in {" ", "\xa0"}:
+        return False
+    borders = [r for r, cs in lines if r > row and len(cs) >= 3
+               and set("".join(c[0] for c in cs).strip()) == {classifier.prompt_border}]
+    if not borders:
+        return False
+    end = borders[0]
+    if not row <= screen.row < end or end - row > 16:
+        return False
+    if text is None:
+        return classifier.prompt_input_state() == "empty"
+    by_row = dict(lines)
+    parts = []
+    for r in range(row, end):
+        cs = by_row.get(r, [])
+        if r != row and any(c[0] != " " for c in cs[:start]):
+            return False
+        content = cs[start:]
+        while content and content[-1][0] == " ":
+            content = content[:-1]
+        if not content:
+            return False
+        for column, cell in enumerate(content, start):
+            char, faint, bold, inverse, foreground = cell
+            if (len(char) != 1 or not 32 <= ord(char) <= 126 or faint or bold
+                    or foreground in classifier.ghost_foregrounds
+                    or inverse and (r, column) != (screen.row, screen.column)):
+                return False
+        parts.append("".join(c[0] for c in content))
+    candidates = {parts[0]}
+    for part in parts[1:]:
+        candidates = {candidate + join + part for candidate in candidates for join in ("", " ")
+                      if text.startswith(candidate + join + part)}
+    return text in candidates
+
+
+def wake_wait_screen(owner, text):
+    """Observe fresh output while keeping all local forwarding locked out."""
+    deadline = time.monotonic() + WAKE_SCREEN_TIMEOUT
+    quiet_at = None
+    observed = False
+    while time.monotonic() < deadline:
+        if owner._mailcortex_poll_screen(min(0.02, max(0, deadline - time.monotonic()))):
+            observed = True
+            quiet_at = time.monotonic()
+        if observed and wake_prompt_matches(owner.screen_classifier, text):
+            if text is None or time.monotonic() - quiet_at >= WAKE_RENDER_QUIET:
+                return True
+    return False
+
+
+def wake_submit_unsafe(owner, expected):
+    # The turn is already claimed. Do not borrow the idle-only gate or erase
+    # the input-dirty veto just because the expected wake is on screen.
+    return (not owner_matches(owner, expected) or pending_terminal(owner)
+            or owner.status != "active" or owner.lifecycle_health != "wired"
+            or owner.mailcortex_input_dirty or owner.compacting
+            or owner.recovery_pending or owner.recovery_awaiting
+            or owner.transcript_gate_blocked or owner.transcript_partial
+            or owner.transcript_quiescence_deadline is not None)
+
+
+def wake_failure(owner, ack, stage, reason):
+    owner.mailcortex_input_dirty = True
+    owner.mailcortex_delivery = dict(request_id=ack["request_id"], status="unknown",
+                                    stage=stage, reason=reason)
+    owner.last_state_transition = "mailcortex-submit-failed"
+    owner._guard_log("mailcortex-submit-failed", **owner.mailcortex_delivery)
+    owner._write_state()
+    return dict(ack, status="unknown", reason=reason)
+
+
 def owner_control(owner, request, warm):
     ack = {"protocol": PROTOCOL, "request_id": request.get("request_id"),
            "owner": request.get("owner"), "status": "invalid"}
@@ -401,7 +500,8 @@ def owner_control(owner, request, warm):
             return ack
     # One lock owns input forwarding, screen reads, lifecycle changes and admission.
     # Legacy supervisors without the barrier are deliberately incapable of writing.
-    if not hasattr(owner, "mailcortex_admission_lock"):
+    if (not hasattr(owner, "mailcortex_admission_lock")
+            or not callable(getattr(owner, "_mailcortex_poll_screen", None))):
         return dict(ack, status="unavailable")
     with owner.mailcortex_admission_lock:
         if not owner_matches(owner, request["owner"]):
@@ -411,6 +511,8 @@ def owner_control(owner, request, warm):
             return dict(ack, status="busy")
         if operation == "mailcortex-status":
             return dict(ack, status="idle")
+        claimed = False
+        stage = "text"
         try:
             # A mutex alone cannot stop the child producing a permission screen.
             # Obtain a kernel-acknowledged pause of the child's process tree first.
@@ -435,14 +537,34 @@ def owner_control(owner, request, warm):
                 owner.timer_generation += 1
                 owner.last_lifecycle_activity = warm.now()
                 owner.last_state_transition = "mailcortex-admitted"
-                try:
-                    warm.write_all(owner.master_fd, (request["text"] + "\r").encode("ascii"))
-                except OSError:
-                    owner._write_state()
-                    return dict(ack, status="unknown")
-        except (OSError, ValueError, AttributeError, RuntimeError):
-            # If anything may already have been written, do not report non-admission.
-            return dict(ack, status="unknown" if owner.status == "active" else "unavailable")
+                claimed = True
+                owner.mailcortex_delivery = dict(request_id=ack["request_id"], status="pending", stage=stage)
+                warm.write_all(owner.master_fd, request["text"].encode("ascii"))
+            # The guardian resumes the child; the owner lock remains held.
+            stage = "render"
+            if not wake_wait_screen(owner, request["text"]):
+                return wake_failure(owner, ack, stage, "draft-not-observed")
+            stage = "submit"
+            with owner._mailcortex_barrier():
+                owner._mailcortex_refresh_screen()
+                owner._record_transcript_activity()
+                if wake_submit_unsafe(owner, request["owner"]):
+                    return wake_failure(owner, ack, stage, "submit-guard-changed")
+                # Final read under the acknowledged pause, then no callbacks
+                # or state-file I/O before the standalone submit keystroke.
+                owner._mailcortex_refresh_screen()
+                if (not wake_prompt_matches(owner.screen_classifier, request["text"])
+                        or wake_submit_unsafe(owner, request["owner"])):
+                    return wake_failure(owner, ack, stage, "draft-or-input-changed")
+                warm.write_all(owner.master_fd, b"\r")
+            stage = "observe"
+            if not wake_wait_screen(owner, None):
+                return wake_failure(owner, ack, stage, "submission-not-observed")
+        except (OSError, ValueError, AttributeError, RuntimeError, TypeError):
+            if claimed:
+                return wake_failure(owner, ack, stage, "pty-or-barrier-failed")
+            return dict(ack, status="unavailable")
+        owner.mailcortex_delivery = dict(request_id=ack["request_id"], status="accepted", stage=stage)
         owner._guard_log("mailcortex-admitted")
         owner._write_state()
         return dict(ack, status="accepted")
@@ -614,6 +736,7 @@ def launch(argv):
             value = super().state()
             value["supervisor_start_time"] = self.mailcortex_start_time
             value["mailcortex_startup_idle_at"] = self.mailcortex_startup_idle_at
+            value["mailcortex_delivery"] = getattr(self, "mailcortex_delivery", None)
             return value
 
         def _injection_idle_boundary(self, purpose):
@@ -642,6 +765,10 @@ def launch(argv):
                 raise ValueError("child output exceeds barrier bound")
             self._mailcortex_classify_screen()
             return changed
+
+        def _mailcortex_poll_screen(self, timeout):
+            ready, _, _ = select.select([self.master_fd], [], [], timeout)
+            return self._mailcortex_refresh_screen() if ready else False
 
         def _mailcortex_classify_screen(self):
             visible = self.screen_classifier._visible_text()
