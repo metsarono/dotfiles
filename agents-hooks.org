@@ -43,7 +43,13 @@ def main():
     for engine in candidates:
         if engine.is_file():
             try:
-                os.execv("/usr/bin/python3", ["/usr/bin/python3", str(engine)])
+                # Claude invokes hooks with a deliberately small environment;
+                # retain the seat's CLI prefixes so coordinator_codex_dispatch
+                # resolves the same codex binary the seat uses interactively.
+                env = os.environ.copy()
+                prefixes = [Path.home() / ".local/bin", Path.home() / ".npm-global/bin", Path.home() / ".bun/bin"]
+                env["PATH"] = ":".join(str(path) for path in prefixes) + ":" + env.get("PATH", "/usr/bin:/bin")
+                os.execve("/usr/bin/python3", ["/usr/bin/python3", str(engine)], env)
             except OSError:
                 return 0
     return 0

@@ -130,7 +130,7 @@ class RemotePresenceTests(unittest.TestCase):
         path = self.scratch / 'YOUR_SEAT-evidence.md'
         command = f"cat > {path} <<'EOF'\nOPENROUTER_API_KEY (name only)\nEOF\nscp {path} YOUR_PEER_HOST:/tmp/YOUR_SEAT/evidence.md\nssh YOUR_PEER_HOST mailcortex send --from YOUR_SEAT@YOUR_HOST.helm --to YOUR_REVIEWER@YOUR_HOST.helm --subject evidence --body-file /tmp/YOUR_SEAT/evidence.md"
         with mock.patch.object(e, '_coordinator_remote_proof', return_value=True):
-            self.assertTrue(e._decide_request(self.event(command), self.loaded())[0])
+            self.assertFalse(e._decide_request(self.event(command), self.loaded())[0])
 
     def test_remote_floor_every_position_even_with_allow_decider(self):
         self.configure()
@@ -338,6 +338,17 @@ class RemotePresenceTests(unittest.TestCase):
         with mock.patch.object(e.subprocess,'run',side_effect=subprocess.TimeoutExpired('ssh',.7)):
             self.assertEqual(e._away_status(self.loaded(),now=now),(True,'quiet_hours'))
 
+    def test_first_human_allow_auto_clears_away_with_receipt(self):
+        self.configure()
+        self.flag.touch()
+        receipt = self.base / 'away-receipts.jsonl'
+        with mock.patch.dict(os.environ, {'SO_APPROVAL_AWAY_RECEIPT': str(receipt)}):
+            self.assertTrue(e._clear_away_flag(self.loaded(), 'human_allow_hold'))
+        self.assertFalse(self.flag.exists())
+        record = json.loads(receipt.read_text().splitlines()[-1])
+        self.assertEqual(record['action'], 'away_auto_cleared')
+        self.assertEqual(record['reason'], 'human_allow_hold')
+
     def test_remote_local_expansion_and_wrong_nested_quoting_are_floor(self):
         self.configure()
         dispatch='nohup codex exec --model YOUR_MODEL --approve-for-me --skip-git-repo-check "$(cat /tmp/YOUR_SEAT/prompt.txt)" < /dev/null > /tmp/YOUR_SEAT/log.txt 2>&1 &'
@@ -464,7 +475,7 @@ class RemotePresenceTests(unittest.TestCase):
             # No remote body exists yet: only the proved copy may supply it.
             return regular_input is None
         with mock.patch.object(e,'_coordinator_remote_proof',side_effect=proof):
-            self.assertTrue(e._decide_request(self.event(command),self.loaded())[0])
+            self.assertFalse(e._decide_request(self.event(command),self.loaded())[0])
             self.assertFalse(e._decide_request(self.event(command.split('EOF\n')[-1].split('\n')[-1]),self.loaded())[0])
         manifest=self.manifest.copy();manifest['_compound_remote_created_files']=[('YOUR_PEER_HOST',remote)]
         with self.assertRaises(ValueError):e._load_manifest(manifest)

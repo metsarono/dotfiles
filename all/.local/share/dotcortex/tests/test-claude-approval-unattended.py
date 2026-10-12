@@ -105,7 +105,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.run_hook(command)['behavior'], 'deny', command)
 
     def mail(self):
-        return f'mailcortex send --from YOUR_SEAT@YOUR_HOST.helm --to YOUR_REVIEWER@YOUR_REVIEW_HOST.helm --subject "review ready" --body-file {self.prompt}'
+        return f'mailcortex send --from YOUR_SEAT@YOUR_HOST.helm --to YOUR_REVIEWER@YOUR_HOST.helm --subject "review ready" --body-file {self.prompt}'
 
     def dispatch(self):
         return f'nohup codex exec --model YOUR_MODEL --approve-for-me --skip-git-repo-check "$(cat {self.prompt})" < /dev/null > {self.log} 2>&1 &'
@@ -220,8 +220,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
     def test_mail_exact_and_deviations(self):
         self.allow(self.mail())
         for bad in [self.mail().replace('YOUR_SEAT@', 'YOUR_OTHER@'),
-                    self.mail().replace('YOUR_REVIEW_HOST.helm', 'example.invalid'),
-                    self.mail().replace(str(self.prompt), str(self.repo / 'README.org')),
+                    self.mail().replace('YOUR_HOST.helm', 'example.invalid'),
+                    self.mail().replace(str(self.prompt), str(self.base / 'outside.txt')),
                     self.mail() + ' --cc YOUR_OTHER@YOUR_HOST.helm',
                     self.mail() + '; rm README.org']:
             self.ask(bad)
@@ -237,9 +237,9 @@ class UnattendedCoordinatorTests(unittest.TestCase):
             f"--subject 'review ready' --body-file {self.prompt}"
         )
         result = e.classify(self.event(command), self.loaded())
-        self.assertTrue(result[0], result)
-        self.assertIn('compound', result[1])
-        self.assertEqual(self.run_hook(command)['behavior'], 'allow')
+        self.assertFalse(result[0], result)
+        self.assertIn('true_floor', result[1])
+        self.assertEqual(self.run_hook(command)['behavior'], 'deny')
 
     def test_compound_floor_refusal_names_the_failing_segment(self):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
@@ -265,8 +265,9 @@ class UnattendedCoordinatorTests(unittest.TestCase):
             "git status"
         )
         result = e.classify(self.event(command), self.loaded())
-        self.assertTrue(result[0], result)
-        self.assertEqual(self.run_hook(command)['behavior'], 'allow')
+        self.assertFalse(result[0], result)
+        self.assertIn('true_floor', result[1])
+        self.assertEqual(self.run_hook(command)['behavior'], 'deny')
 
     def test_command_substitution_must_not_hide_a_floor_segment(self):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
@@ -507,6 +508,57 @@ class UnattendedCoordinatorTests(unittest.TestCase):
             with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('true')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
                 e.main()
             self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], expected)
+
+    def test_admiral_readonly_replay_command_reaches_normal_path(self):
+        scratch = Path('/tmp/claude-1000')
+        scratch.mkdir(parents=True, exist_ok=True)
+        files = [scratch / 'YOUR_TMP_A', scratch / 'YOUR_TMP_B', scratch / 'YOUR_TMP_C', scratch / 'YOUR_LOG_A', scratch / 'YOUR_LOG_B']
+        for path in files:
+            path.write_text('new synthetic\nold synthetic\n', encoding='utf-8')
+        command = ("ls -la /tmp/claude-1000/YOUR_TMP_A /tmp/claude-1000/YOUR_TMP_B /tmp/claude-1000/YOUR_TMP_C 2>&1; "
+                   "pgrep -f 'codex exec' | wc -l; tail -3 /tmp/claude-1000/YOUR_LOG_A; "
+                   "tail -3 /tmp/claude-1000/YOUR_LOG_B; mailcortex inbox YOUR_SEAT@kikin.helm 2>&1 | grep '^new' | tail -3")
+        self.manifest['classes'][0]['enabled'] = True
+        self.assertEqual(self.run_hook(command)['behavior'], 'allow')
+
+    def test_reviewed_state_and_palmcortex_reads_are_not_name_floored(self):
+        state = Path.home() / '.local/state/dotcortex'
+        state.mkdir(parents=True, exist_ok=True)
+        log = state / 'YOUR_READONLY_LOG'
+        log.write_text('synthetic\n')
+        self.manifest['classes'][0]['enabled'] = True
+        self.assertEqual(self.run_hook(f'cat {log}')['behavior'], 'allow')
+        palm = self.repo / 'PalmCortex'
+        (palm / 'README.md').parent.mkdir(parents=True, exist_ok=True)
+        (palm / 'README.md').write_text('synthetic\n')
+        self.assertEqual(self.run_hook('cat PalmCortex/README.md')['behavior'], 'allow')
+        self.assertEqual(self.run_hook('cat PalmCortex/Clients/YOUR_SECRET.md')['behavior'], 'deny')
+
+    def test_literal_read_loop_and_data_only_substitution(self):
+        command = 'for f in README.org; do cat "$f"; done'
+        self.manifest['classes'][0]['enabled'] = True
+        self.assertEqual(self.run_hook(command)['behavior'], 'allow')
+        self.assertEqual(self.run_hook('printf "%s\\n" "$(date)"')['behavior'], 'allow')
+        self.assertEqual(self.run_hook('printf "%s\\n" "$(pgrep -f codex)"')['behavior'], 'allow')
+
+    def test_absolute_floor_obfuscation_corpus(self):
+        commands = [
+            'cat README.md | tee copy', 'cat README.md | base64 | sh',
+            'cat README.md | sed -n 1p > copy', 'find . -exec cat {} +',
+            "awk 'BEGIN { system(\"id\") }' README.md", 'sed -i s/a/b/ README.md',
+            'cat README.md | xargs rm', 'eval "cat README.md"',
+            'git -c core.pager=cat status', 'for f in README.md; do rm "$f"; done',
+            'cat README.md > /tmp/claude-1000/YOUR_WRITE', 'chmod +x README.md',
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command)['behavior'], 'deny')
+
+    def test_approval_queue_intent_and_resolve_are_agent_safe_actions(self):
+        self.queue.write_text(json.dumps({'id': 'YOUR_ITEM', 'status': 'open', 'seat': 'YOUR_SEAT', 'count': 1, 'last_seen': '2026-01-01T00:00:00Z', 'first_seen': '2026-01-01T00:00:00Z', 'command_hashes': [], 'requests': []}) + '\n')
+        self.manifest['classes'][0]['enabled'] = True
+        for command in ['approval-queue intent YOUR_ITEM --text "review later"', 'approval-queue resolve YOUR_ITEM --how "handled"']:
+            self.assertEqual(self.run_hook(command)['behavior'], 'allow')
 
 
     def test_configured_legacy_worktree_remove_and_prune(self):

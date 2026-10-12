@@ -55,6 +55,12 @@ class KikinApprovalHookTests(unittest.TestCase):
         self.message.write_text("test: synthetic\n")
         os.chmod(self.message, 0o600)
 
+    def test_permission_wrapper_preserves_cli_prefixes_for_dispatch(self):
+        text = HOOK.read_text()
+        self.assertIn("os.execve", text)
+        self.assertIn(".bun/bin", text)
+        self.assertIn("env[\"PATH\"]", text)
+
     def manifest(self, *enabled):
         data = json.loads(json.dumps(self.base))
         data["gate_inversion"] = {"enabled": False, "present_refusal": "deny"}
@@ -259,7 +265,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         url = self._fake_decider(self._c1_answers(allow=False))
         manifest = self._decider_manifest(kikin=url)
         log = self.scratch / "decider.jsonl"
-        run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
+        run_hook(event("Bash", {"command": "unknown-command"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "deny")
         self.assertEqual(records[-1]["decider_status"], "threshold_failed")
@@ -267,7 +273,7 @@ class KikinApprovalHookTests(unittest.TestCase):
     def test_decider_down_asks(self):
         manifest = self._decider_manifest(kikin=unavailable_decider_url())
         log = self.scratch / "decider.jsonl"
-        run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
+        run_hook(event("Bash", {"command": "unknown-command"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "deny")
         self.assertEqual(records[-1]["decider_status"], "unavailable")
@@ -276,7 +282,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         url = self._fake_decider(self._c1_answers(allow=True), delay=3.0)
         manifest = self._decider_manifest(kikin=url)
         log = self.scratch / "decider.jsonl"
-        run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
+        run_hook(event("Bash", {"command": "unknown-command"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "deny")
         self.assertEqual(records[-1]["decider_status"], "timeout")
@@ -385,10 +391,9 @@ class KikinApprovalHookTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
 
-    def test_plain_chmod_not_floored(self):
-        # chmod without -R stays a grey-zone ask, not an absolute floor.
+    def test_plain_chmod_is_an_absolute_write_floor(self):
         reason = self._classify_reason(event("Bash", {"command": "chmod +x script.sh"}, self.root), self.manifest("local_read"))
-        self.assertIn(reason, ("no_match_decider", "syntax"))
+        self.assertEqual(reason, "true_floor")
 
     def test_interpreter_body_detection(self):
         self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())  # load the engine
@@ -483,7 +488,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "deny")
-        self.assertEqual(records[-1]["decider_status"], "threshold_failed")
+        self.assertEqual(records[-1]["reason"], "true_floor")
 
     def test_r2d2d_wire_round_trip(self):
         self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())  # load engine
@@ -554,7 +559,7 @@ class KikinApprovalHookTests(unittest.TestCase):
             run_hook(event("Bash", {"command": "echo hi > out.txt && stat x"}, self.root), manifest, log2)
             records2 = [json.loads(line) for line in log2.read_text().splitlines()]
             self.assertEqual(records2[-1]["decision"], "deny")
-            self.assertEqual(records2[-1]["decider_status"], "threshold_failed")
+            self.assertIn("true_floor", records2[-1]["reason"])
         finally:
             server.shutdown()
 
@@ -568,7 +573,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "deny")
-        self.assertEqual(records[-1]["decider_status"], "threshold_failed")
+        self.assertEqual(records[-1]["reason"], "true_floor")
 
     def test_dual_mode_allows_when_both_clear(self):
         url = self._fake_decider({
@@ -579,8 +584,8 @@ class KikinApprovalHookTests(unittest.TestCase):
         log = self.scratch / "dual-ok.jsonl"
         run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "allow")
-        self.assertEqual(records[-1]["reason"], "decider_allow")
+        self.assertEqual(records[-1]["decision"], "deny")
+        self.assertEqual(records[-1]["reason"], "true_floor")
 
     def test_v1_manifest_still_loads_without_decider(self):
         manifest = self.manifest("local_read")

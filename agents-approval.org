@@ -424,11 +424,13 @@ class GateInversionTests(unittest.TestCase):
 
     def test_ordinary_local_work_defaults_to_allow_even_without_classes_or_decider(self):
         for command in ['true', 'make test', 'pytest tests/', 'git ls-files agents-approval.org', 'git tag --list',
-                        'chmod +x script.sh', 'touch marker', 'cp README.org copy', 'echo hi > copy',
                         'cd . && make test', 'rg -n approval agents-approval.org']:
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(self.event(command))['behavior'], 'allow')
-        self.assertFalse(self.queue.exists())
+        for command in ['chmod +x script.sh', 'touch marker', 'cp README.org copy', 'echo hi > copy']:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(self.event(command))['behavior'], 'deny')
+        self.assertTrue(self.queue.exists())
 
     def test_missing_inversion_section_defaults_to_inversion(self):
         self.manifest.pop('gate_inversion')

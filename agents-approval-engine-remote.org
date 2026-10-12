@@ -19,7 +19,7 @@ UNITTEST_RE = re.compile(r"^/usr/bin/python3(?:\.\d+)?\s+-m\s+unittest\s+[\w.]+$
 REMOTE_REALPATH_TIMEOUT_SECONDS = 2.5
 GIT_READERS = {"status", "log", "diff", "show", "branch", "ls-files", "remote", "tag"}
 GIT_UNSAFE_READ_OPTIONS = {"-C", "--output", "--exec", "--ext-diff", "--textconv", "--paginate", "--exec-path"}
-READERS = {"cat", "head", "tail", "grep", "rg", "find", "ls", "stat", "wc", "pgrep", "ps", "date", "mailcortex", "tmux"}
+READERS = {"cat", "head", "tail", "grep", "rg", "find", "ls", "stat", "wc", "pgrep", "ps", "date", "mailcortex", "tmux", "awk", "sed", "jq", "sort", "uniq", "cut", "tr", "ss"}
 FIND_WRITE_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 REMOTE_EXCLUDED_COMPONENTS = {"private", "secrets", ".secrets", "keys", "credentials", ".git", ".ssh", ".env"}
 
@@ -496,7 +496,7 @@ def _coordinator_config(manifest):
     config = manifest.get('coordinator_ops')
     if not isinstance(config, dict):
         return None
-    if set(config) - {'peer_host'} != {'classes', 'seat_account', 'repo_roots', 'worktree_roots', 'scratch_roots',
+    if set(config) - {'peer_host', 'fleet_domains'} != {'classes', 'seat_account', 'repo_roots', 'worktree_roots', 'scratch_roots',
                        'build_host', 'remote_scratch_roots', 'remote_scratch_prefixes'}:
         return None
     flags = config.get('classes')
@@ -521,7 +521,16 @@ def _coordinator_config(manifest):
         return None
     if 'peer_host' in config and (not isinstance(config['peer_host'], str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', config['peer_host'])):
         return None
+    if 'fleet_domains' in config and (not isinstance(config['fleet_domains'], list) or any(not isinstance(domain, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+\.helm', domain) for domain in config['fleet_domains'])):
+        return None
     return config
+
+
+def _mail_recipient_allowed(address, config):
+    if not isinstance(address, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', address):
+        return False
+    domains = set(config.get('fleet_domains') or ()) | {'kikin.helm', config['seat_account'].split('@', 1)[1]}
+    return address.rsplit('@', 1)[1] in domains
 
 
 def _coordinator_path(raw, roots, *, regular=False, exists=True):
@@ -544,8 +553,10 @@ def _coordinator_path(raw, roots, *, regular=False, exists=True):
     return path
 
 
-def _coordinator_regular_input(raw, config, manifest):
+def _coordinator_regular_input(raw, config, manifest, *, allow_policy=False):
     if _coordinator_path(raw, config['scratch_roots'], regular=True):
+        return True
+    if allow_policy and _coordinator_path(raw, _policy_roots(manifest), regular=True):
         return True
     # Only the internal compound walker supplies this proof. _load_manifest
     # rejects the key in external policy files; request data cannot grant it.
@@ -717,7 +728,7 @@ def _peer_coordinator_match(command, words, config, manifest):
     if remote[:2] == ['mailcortex','send'] and config['classes']['mail_send']:
         if (SHELL_META.search(remote_text) or _dynamic_shell(remote_text) or len(remote) != 10
                 or remote[2::2] != ['--from','--to','--subject','--body-file']
-                or remote[3] != config['seat_account'] or not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', remote[5])
+                or remote[3] != config['seat_account'] or not _mail_recipient_allowed(remote[5], config)
                 or not remote[7] or not _coordinator_remote_path(remote[9], config)):
             return None
         planned = (peer,remote[9]) in manifest.get('_compound_remote_created_files',())
@@ -762,8 +773,8 @@ def _coordinator_match(event, manifest):
         return remote_grant
     if words[:2] == ['mailcortex', 'send'] and flags['mail_send'] and not SHELL_META.search(command):
         if (len(words) == 10 and words[2::2] == ['--from', '--to', '--subject', '--body-file']
-                and words[3] == config['seat_account'] and re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', words[5])
-                and words[7] and _coordinator_regular_input(words[9], config, manifest)):
+                and words[3] == config['seat_account'] and _mail_recipient_allowed(words[5], config)
+                and words[7] and _coordinator_regular_input(words[9], config, manifest, allow_policy=True)):
             return 'coordinator_mail_send'
         return None
     dispatch = DISPATCH_RE.fullmatch(command)
@@ -855,6 +866,10 @@ def _inversion_enabled(manifest):
 
 def _policy_roots(manifest):
     roots = tuple(manifest.get('roots') or ()) + tuple(manifest.get('scratch_roots') or ())
+    # Read-only replay and diagnostics are reviewed beneath the state and
+    # Claude scratch roots. They are observation roots only; write verbs still
+    # hit the absolute floor in the local engine.
+    roots += (str(Path.home() / '.local/state'), '/tmp/claude-1000')
     config = _coordinator_config(manifest)
     if config is not None and _inversion_enabled(manifest):
         roots += tuple(config['repo_roots'] + config['worktree_roots'] + config['scratch_roots'])
@@ -939,6 +954,10 @@ def _classify_single(event, manifest):
     command = payload.get('command') if isinstance(payload, dict) else None
     if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and _inert_local_command(command, event.get('cwd','/')):
         return (True, 'local_read') if manifest['entries']['local_read']['enabled'] else (False, 'no_match_decider')
+    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and _for_readonly(event, manifest):
+        return True, 'local_read'
+    if _approval_queue_safe(event):
+        return True, 'approval_queue'
     if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS:
         try:
             cd_words = shlex.split(command)
@@ -971,6 +990,12 @@ def _classify_single(event, manifest):
             return False, f"{name}_disabled"
     if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str) and _coordinator_candidate(tool_input["command"]):
         return False, "coordinator_refused"
+    if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
+        substitutions = _shell_substitutions(tool_input["command"])
+        if (substitutions and _substitution_data_only(tool_input["command"], substitutions)
+                and not _substitution_floor(event, manifest)
+                and manifest["entries"]["local_read"]["enabled"]):
+            return True, "local_read"
     if _syntax_refusal(event):
         return False, "syntax"
     return False, "no_match_decider"
@@ -1091,6 +1116,8 @@ def _substitutions_approval(event, manifest, judge):
 def classify(event, manifest):
     if not isinstance(event, dict) or event.get('hook_event_name') != 'PermissionRequest':
         return False, 'not_permission_request'
+    if _for_readonly(event, manifest):
+        return True, 'local_read'
     compound = _compound_approval(event, manifest)
     if compound is not None:
         return compound
@@ -1105,6 +1132,8 @@ _approval_deadline = None
 
 def _decide_request(event, manifest):
     """Apply the complete gate recursively; main owns the single final ledger."""
+    if _for_readonly(event, manifest):
+        return True, 'local_read'
     compound = _compound_approval(event, manifest, judge=_decide_request)
     if compound is not None:
         return compound

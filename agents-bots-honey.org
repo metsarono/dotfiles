@@ -650,6 +650,9 @@ if __name__ == "__main__":
        "hooks": [{"type": "command", "command": "honey-claude-voice-reply", "timeout": 10}]},
       {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
     ],
+    "PermissionRequest": [
+      {"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=$HOME/.config/dotcortex/claude-approval-bunta.honey.local.json claude-hook-permission-request-kikin", "timeout": 5}]}
+    ],
     "Stop": [
       {"hooks": [{"type": "command", "command": "claude-hook-telegram-delivery-guard", "timeout": 10},
                  {"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
@@ -829,6 +832,11 @@ Everything else the bots call comes from the host or =agent-claude='s own profil
 /all/.local/bin/codex-warm
 /all/.local/bin/codex-warmctl
 /all/.local/bin/codex-hook-idle-event
+/all/.local/bin/approval-queue
+/all/.local/bin/approval-presence
+/all/.local/bin/claude-hook-permission-request-kikin
+/all/.local/lib/dotcortex/claude_approval_kikin.py
+/all/.local/lib/dotcortex/claude_approval_runtime.py
 #+END_SRC
 
 ** Installer

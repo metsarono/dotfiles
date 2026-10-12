@@ -122,6 +122,25 @@ def _away_status(manifest, now=None):
         return True, 'invalid_unattended'
 
 
+def _clear_away_flag(manifest, receipt='human_allow'):
+    """Disarm the away latch once the Admiral has actually allowed a request."""
+    raw = _unattended(manifest).get('away_flag', '~/.config/dotcortex/approval-away')
+    path = Path(raw).expanduser()
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            return False
+        path.unlink()
+        receipt_path = Path(os.environ.get('SO_APPROVAL_AWAY_RECEIPT') or Path.home() / '.local/state/dotcortex/approval-away-receipts.jsonl')
+        receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(receipt_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'a') as stream:
+            stream.write(json.dumps({'ts': _utc(), 'action': 'away_auto_cleared', 'reason': receipt}, separators=(',', ':')) + '\n')
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
 def _presence_stamp(manifest):
     section = _unattended(manifest)
     host = section.get('presence_host')
@@ -418,6 +437,8 @@ def _queue_live_allow(event, manifest):
                 item.update(status='resolved', resolution='approved live at ' + now, resolved_at=now)
                 _queue_append(file, item)
                 resolved.append(item['id'])
+    if resolved:
+        _clear_away_flag(manifest, 'human_allow_live')
     return resolved
 
 
@@ -564,7 +585,14 @@ def _finish_hold(item_id, nonce, outcome):
             item.update(status='open', away_reason='hold_timeout' if outcome == 'timeout' else 'human_denied' if outcome == 'deny' else 'away_flag' if outcome == 'away_flag' else 'hold_unavailable')
         item.pop('hold_nonce', None)
         item.pop('hold_answer', None)
-    return _queue_update(item_id, update)
+    accepted = _queue_update(item_id, update)
+    if accepted and outcome == 'allow':
+        try:
+            manifest = _runtime_manifest()
+            _clear_away_flag(manifest, 'human_allow_hold')
+        except Exception:
+            pass
+    return accepted
 
 
 def _notify_hold(event, reason, item_id, nonce, manifest):
@@ -628,7 +656,7 @@ def observe_main():
     try:
         event = json.loads(sys.stdin.read(1024*1024+1))
         manifest = _runtime_manifest()
-        if event.get('hook_event_name') != 'PostToolUse' or _away_status(manifest)[0] or not _morning_queue_path().exists():
+        if event.get('hook_event_name') != 'PostToolUse' or not _morning_queue_path().exists():
             return 0
         resolved = _queue_live_allow(event, manifest)
         if resolved:

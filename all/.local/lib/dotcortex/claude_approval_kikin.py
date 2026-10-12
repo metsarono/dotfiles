@@ -50,9 +50,11 @@ GREP_FLAGS = re.compile(r"^-[nivEFhHlLwxcoIs]+$")
 LS_FLAGS = re.compile(r"^-[alhtrdAF1S]+$")
 SED_PRINT = re.compile(r"^(?:\d+|\$)(?:,(?:\d+|\$))?p$")
 COUNT_VALUE = re.compile(r"^\+?\d+$")
-FILTERS = {"head", "tail", "cut", "sort", "uniq", "wc", "tr", "grep", "rg", "sed"}
+FILTERS = {"head", "tail", "cut", "sort", "uniq", "wc", "tr", "grep", "rg", "sed", "awk"}
 BRANCH_OPTIONS = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--show-current", "--no-color"}
-SYSTEM_READERS = {"ps", "pgrep", "uptime", "df", "free"}
+SYSTEM_READERS = {"ps", "pgrep", "uptime", "df", "free", "ss", "date"}
+WRITE_COMMANDS = {"cp", "mv", "ln", "tee", "touch", "install", "mkdir", "rmdir", "truncate", "chmod", "chown", "rm", "unlink"}
+OPAQUE_COMMANDS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "eval", "source", ".", "xargs"}
 PYTHON_READERS = {"python", "python3", "python3.11", "python3.12", "python3.13", "python3.14"}
 RG_FLAGS = re.compile(r"^-[nivEFhHlLwxcoIs]+$")
 
@@ -70,7 +72,7 @@ def _protected(value):
     from urllib.parse import unquote
     lowered = unicodedata.normalize('NFKC', unquote(str(value))).replace("\\", "/").casefold()
     parts = tuple(part for part in lowered.split("/") if part)
-    if "palmcortex" in parts or any(parts[i:i + 3] == ("logs", "telegram", "personal") for i in range(max(0, len(parts) - 2))):
+    if ("palmcortex" in parts and "clients" in parts) or any(parts[i:i + 3] == ("logs", "telegram", "personal") for i in range(max(0, len(parts) - 2))):
         return True
     if re.search(r"secret[\W_]*vault", lowered) or "nexus/keys" in posixpath.normpath(lowered):
         return True
@@ -97,6 +99,18 @@ def _unreviewed_home_path(value, roots=()):
                        for root in reviewed):
                 return True
     return False
+
+
+def _unsafe_redirect(command):
+    """Return true for a redirect that can write or feed a command.
+
+    The only inert redirects in the reviewed read lane are stderr merged into
+    stdout and stdout/stderr discarded. Everything else remains fail-closed.
+    """
+    scrubbed = re.sub(r"(?<!\S)2\s*>\s*(?:/dev/null|&1)(?=\s|$|[;&|])", "", command)
+    scrubbed = re.sub(r"(?<!\S)>\s*/dev/null(?=\s|$|[;&|])", "", scrubbed)
+    scrubbed = re.sub(r"(?<!\S)2\s*>\s*/dev/null(?=\s|$|[;&|])", "", scrubbed)
+    return bool(re.search(r"(?<![<>=])[<>]", scrubbed))
 
 
 # 2026-10-09 (Fable/SO-APPROVAL-C1 decider-in-the-loop): the old hard floor mixed
@@ -126,7 +140,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         if _credential_content(tool_input):
             return True
         raw = json.dumps({key: tool_input[key] for key in ('file_path', 'notebook_path', 'path') if key in tool_input}).casefold()
-    if _protected(raw) or "logs/telegram/personal" in raw or "palmcortex" in raw:
+    if _protected(raw) or "logs/telegram/personal" in raw:
         return True
     roots = _policy_roots(manifest) if manifest is not None and _inversion_enabled(manifest) else (tuple(manifest.get("roots") or ()) + tuple(manifest.get("scratch_roots") or ())) if manifest is not None else ()
     if coordinator is not None and manifest is not None:
@@ -143,6 +157,8 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         return _unreviewed_home_path(raw, roots)
     if _protected(command):
         return True
+    if coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'} and _unsafe_redirect(command):
+        return True
     # 2026-10-10 (replay finding): an unbalanced quote (a comment saying
     # "job's") makes the WHOLE command unparseable — the old early bail-out
     # skipped the entire floor. Now a failed whole-command parse still runs the
@@ -154,14 +170,21 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         words = None
     if readonly_proven is None:
         readonly_proven = bool(manifest is not None and _ssh_readonly_proven(event, manifest))
+    if manifest is not None and _for_readonly(floor_event, manifest):
+        return False
     if (not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}
             and _split_approval_compound(tool_input['command']) is None):
-        return True
+        substitutions = _shell_substitutions(command)
+        if (not substitutions or not _substitution_data_only(command, substitutions)
+                or _substitution_floor(floor_event, manifest, coordinator)):
+            return True
     if _unreviewed_home_path(raw, roots) and not readonly_proven:
         return True
     # The floor sees every shell stage, including wrappers and redirects without
     # whitespace. A failed parser never reaches a probabilistic veto.
     if _inert_local_command(command, event.get('cwd', '/')):
+        return False
+    if manifest is not None and _for_readonly(floor_event, manifest):
         return False
     if not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}:
         if _dynamic_shell(command):
@@ -256,6 +279,11 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         return True
     if any(word in SERVICE or word in {"pkill", "killall"} for word in lowered):
         return True
+    # A successfully segmented compound has already had every stage checked
+    # above. Do not feed its shell separators to the standalone word floor:
+    # read-only pipelines and semicolon chains are evaluated stage by stage.
+    if _split_approval_compound(command) is not None:
+        return False
     return _floor_verb(lowered, coordinator)
 
 
@@ -268,6 +296,8 @@ def _floor_verb(lowered, coordinator=None):
     lowered = [word if word in {'-C', '-F'} else word.casefold() for word in lowered]
     if lowered:
         lowered[0] = lowered[0].rsplit('/', 1)[-1]
+    if lowered and lowered[0] in WRITE_COMMANDS:
+        return True
     if any(word == '--force' or word.startswith('--force=') or word.startswith('--force-') for word in lowered):
         return True
     if lowered and lowered[0] in {'cp', 'mv', 'ln', 'install'} and '-f' in lowered[1:]:
@@ -278,8 +308,12 @@ def _floor_verb(lowered, coordinator=None):
         return True
     if lowered[:1] == ['approval-queue'] and lowered[1:2] in (['claim'], ['approve']):
         return True
+    if lowered and lowered[0] == 'mailcortex' and lowered[1:2] not in (['inbox'], ['read']) and coordinator not in {'coordinator_mail_send', 'coordinator_remote_mail_send'}:
+        return True
     if lowered[:1] in (['eval'], ['source'], ['.'], ['xargs']):
         return True  # opaque execution cannot erase the floor
+    if lowered and lowered[0] in OPAQUE_COMMANDS:
+        return True
     # 2026-10-10 (replay finding): a bare 'kill PID' is still process control —
     # any kill form floors (flag forms AND plain PID forms).
     if lowered[:2] == ["printf", "-v"]:
@@ -297,6 +331,8 @@ def _floor_verb(lowered, coordinator=None):
         word == "-i" or word.startswith("-i") or word == "--in-place"
         for word in lowered[1:]
     ):
+        return True
+    if verb == "awk" and len(lowered) > 1 and any(token in " ".join(lowered[1:]) for token in ("system(", "getline", ">", "|")):
         return True
     # Remote and service control also floor per segment ('cd X && ssh y'):
     if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
@@ -387,7 +423,8 @@ def _protected_write_target(value):
     path = str(value).replace('\\', '/')
     parts = Path(path).parts
     name = Path(path).name.casefold()
-    return (_protected(path) or '.git' in parts
+    lowered_parts = {part.casefold() for part in parts}
+    return (_protected(path) or 'palmcortex' in lowered_parts or '.git' in parts
         or name.startswith(('agents-approval', 'claude-approval', 'claude_approval', 'claude-hook-approval', 'claude-hook-admiral-presence', 'approval-presence', 'approval-queue', 'approval-morning-queue', 'approval-telegram', 'admiral-last-seen', 'approval-away'))
         or name == 'agents-hooks.org'
         or name in {'settings.json', 'settings.local.json', 'settings.shared.json', 'access.json'} and any(x in parts for x in ('.claude', '.config')))
@@ -478,7 +515,13 @@ def _dynamic_shell(command):
             if char == "'":
                 quote = None
             continue
-        if char in {'$', '`', chr(92)}:
+        if char in {'$', '`'}:
+            return True
+        if char == chr(92):
+            # Backslash escapes inside double-quoted output data (for example
+            # the ``\\n`` format in the replay) do not create a shell effect.
+            if quote == '"':
+                continue
             return True
         if quote == '"':
             if char == '"':
@@ -620,7 +663,7 @@ def _substitution_data_only(command, substitutions):
                 continue
             if words[index - 1] in {'>', '>>', '<', '>&', '<&', '&>', '&>>'}:
                 return False
-            if (verb not in {'echo', 'printf'} and not (verb in {'grep', 'rg'} and index == pattern)
+            if (verb not in {'echo', 'printf', 'date', 'pgrep', 'ps', 'ss', 'wc'} and not (verb in {'grep', 'rg'} and index == pattern)
                     and not (verb == 'readlink' and words[1:2] == ['-f'] and len(words) == 3
                              and len(substitutions) == 1 and re.fullmatch(r'command -v [A-Za-z0-9_.+-]+', substitutions[0][2]))):
                 return False
@@ -898,6 +941,12 @@ def _path(raw, cwd, roots, exists=True):
     return resolved
 
 
+def _read_roots(manifest):
+    """Roots reviewed for observation; these additions never authorize writes."""
+    return tuple(dict.fromkeys(tuple(manifest.get('roots') or ()) + tuple(manifest.get('scratch_roots') or ()) +
+                              (str(Path.home() / '.local/state'), '/tmp/claude-1000')))
+
+
 def _scratch(raw, cwd, roots):
     lexical = _lexical(raw, cwd)
     if lexical is None:
@@ -944,7 +993,7 @@ def _load_manifest(data=None):
 
 
 def _targets(values, cwd, manifest, directories=None):
-    paths = tuple(_path(value, cwd, manifest["roots"]) for value in values)
+    paths = tuple(_path(value, cwd, _read_roots(manifest)) for value in values)
     if not paths or any(path is None for path in paths):
         return None
     if directories is True and any(not os.path.isdir(path) for path in paths):
@@ -967,7 +1016,7 @@ def _non_secret_targets(values, cwd):
 
 def _system_read_match(verb, args):
     """Recognize process, host, filesystem, and tmux observation verbs."""
-    if verb in {"uptime", "free"}:
+    if verb in {"uptime", "free", "date", "ss"}:
         return all(not any(char in arg for char in "><;&`$\\") for arg in args)
     if verb in {"ps", "pgrep"}:
         return all(not any(char in arg for char in "><;&`$\\") for arg in args)
@@ -1048,15 +1097,26 @@ def _local_match(event, manifest, words=None):
     name, tool_input, cwd = event.get("tool_name"), event.get("tool_input"), event.get("cwd")
     if not isinstance(tool_input, dict) or not isinstance(cwd, str):
         return False
-    cwd = _path(cwd, cwd, manifest["roots"])
+    read_roots = _read_roots(manifest)
+    cwd = _path(cwd, cwd, read_roots)
     if cwd is None:
         return False
     if name == "Read":
-        return bool(_targets([tool_input.get("file_path", tool_input.get("path"))], cwd, manifest, False))
+        old_roots = manifest["roots"]
+        manifest["roots"] = read_roots
+        try:
+            return bool(_targets([tool_input.get("file_path", tool_input.get("path"))], cwd, manifest, False))
+        finally:
+            manifest["roots"] = old_roots
     if name in {"Glob", "Grep"}:
         base = tool_input.get("path") or cwd
         pattern = tool_input.get("pattern")
-        return bool(_targets([base], cwd, manifest, True) and isinstance(pattern, str) and pattern and ".." not in pattern.split("/"))
+        old_roots = manifest["roots"]
+        manifest["roots"] = read_roots
+        try:
+            return bool(_targets([base], cwd, manifest, True) and isinstance(pattern, str) and pattern and ".." not in pattern.split("/"))
+        finally:
+            manifest["roots"] = old_roots
     if name != "Bash" or not set(tool_input) <= TOOL_INPUT_KEYS or not isinstance(tool_input.get("command"), str):
         return False
     if words is None:
@@ -1068,11 +1128,17 @@ def _local_match(event, manifest, words=None):
             words = shlex.split(tool_input["command"], posix=True)
         except ValueError:
             return False
-    if not words or words[0].rsplit("/", 1)[-1] not in entry["bash_verbs"]:
+    reviewed_verbs = set(entry.get("bash_verbs") or ()) | FILTERS | SYSTEM_READERS | {
+        "cat", "find", "ls", "stat", "mailcortex", "awk", "jq"
+    }
+    if not words or words[0].rsplit("/", 1)[-1] not in reviewed_verbs:
         return False
     verb, args = words[0].rsplit("/", 1)[-1], words[1:]
     if verb in SYSTEM_READERS:
         return _system_read_match(verb, args)
+    if verb == "mailcortex":
+        return len(args) >= 1 and args[0] in {"inbox", "read"} and all(
+            not any(char in arg for char in "><;&`$\\") for arg in args[1:])
     if verb == "tmux":
         return bool(args) and (args[0].startswith("list-") or args[0] == "capture-pane")
     if verb in PYTHON_READERS:
@@ -1084,7 +1150,27 @@ def _local_match(event, manifest, words=None):
     if verb == "sed":
         if len(args) < 3 or args[0] != "-n" or not SED_PRINT.match(args[1]) or any(arg.startswith("-") for arg in args[2:]):
             return False
-        return bool(_targets(args[2:], cwd, manifest, False))
+        old_roots = manifest["roots"]
+        manifest["roots"] = read_roots
+        try:
+            return bool(_targets(args[2:], cwd, manifest, False))
+        finally:
+            manifest["roots"] = old_roots
+    if verb == "awk":
+        if not args or any(token in " ".join(args) for token in ("system(", "getline", ">", "|", "-i")):
+            return False
+        program_index = next((i for i, arg in enumerate(args) if not arg.startswith("-")), None)
+        if program_index is None or program_index + 1 >= len(args):
+            return False
+        operands = [arg for arg in args[program_index + 1:] if not arg.startswith("-")]
+        return bool(operands and _targets(operands, cwd, manifest))
+    if verb == "jq":
+        if not args:
+            return False
+        operands = [arg for arg in args[1:] if not arg.startswith("-")]
+        if any(arg in {"-f", "--from-file", "--argfile", "--slurpfile"} for arg in args):
+            return False
+        return bool(operands) and _targets(operands, cwd, manifest) is not None
     if verb in {"grep", "rg"}:
         # Read-only flags may sit before or after the pattern (agents write grep -n PAT f);
         # the first non-flag word is the pattern, every later one is a file to check.
@@ -1096,7 +1182,12 @@ def _local_match(event, manifest, words=None):
             return False
         operands = words_only[1:]
         if verb == "rg":
-            return bool(_targets(operands, cwd, manifest, False))
+            old_roots = manifest["roots"]
+            manifest["roots"] = read_roots
+            try:
+                return bool(_targets(operands, cwd, manifest, False))
+            finally:
+                manifest["roots"] = old_roots
     elif verb == "find":
         split = next((index for index, arg in enumerate(args) if arg.startswith("-")), len(args))
         operands, expression = args[:split], args[split:]
@@ -1113,7 +1204,62 @@ def _local_match(event, manifest, words=None):
         operands = [arg for arg in args if not arg.startswith("-")]
         if not operands or any(arg.startswith("-") and arg not in READ_OPTIONS for arg in args):
             return False
-    return bool(_targets(operands, cwd, manifest))
+    old_roots = manifest["roots"]
+    manifest["roots"] = read_roots
+    try:
+        return bool(_targets(operands, cwd, manifest))
+    finally:
+        manifest["roots"] = old_roots
+
+
+def _for_readonly(event, manifest):
+    """Prove a small literal-list for loop whose body is a read command."""
+    if not isinstance(event, dict):
+        return False
+    payload, cwd = event.get('tool_input'), event.get('cwd')
+    if event.get('tool_name') != 'Bash' or not isinstance(payload, dict) or not isinstance(payload.get('command'), str) or not isinstance(cwd, str):
+        return False
+    match = re.fullmatch(r'for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;]+);\s*do\s+(.+);\s*done', payload['command'], re.S)
+    if not match:
+        return False
+    variable, literal, body = match.groups()
+    try:
+        items = shlex.split(literal, posix=True)
+    except ValueError:
+        return False
+    if not items or any(not item or PATH_META.search(item) or '$' in item for item in items):
+        return False
+    roots = _read_roots(manifest)
+    if any(_path(item, cwd, roots) is None for item in items):
+        return False
+    for item in items:
+        replacement = shlex.quote(item)
+        expanded = re.sub(r'\$\{' + re.escape(variable) + r'\}|\$' + re.escape(variable) + r'\b', replacement, body)
+        if '$' + variable in expanded or '${' + variable + '}' in expanded:
+            return False
+        stage = {**event, 'tool_input': {**payload, 'command': expanded}}
+        if _routes_compound(expanded):
+            ok, _reason = _compound(stage, manifest)
+        else:
+            ok = _local_match(stage, manifest)
+        if not ok:
+            return False
+    return bool(manifest['entries'].get('local_read', {}).get('enabled'))
+
+
+def _approval_queue_safe(event):
+    payload = event.get('tool_input')
+    if event.get('tool_name') != 'Bash' or not isinstance(payload, dict) or not isinstance(payload.get('command'), str):
+        return False
+    try:
+        words = shlex.split(payload['command'], posix=True)
+    except ValueError:
+        return False
+    if len(words) < 3 or words[0].rsplit('/', 1)[-1] != 'approval-queue' or words[1] not in {'intent', 'resolve'}:
+        return False
+    if any(any(char in word for char in ';&|<>`$\\') for word in words):
+        return False
+    return bool(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', words[2])) and all(len(word) <= 2048 for word in words[3:])
 
 
 def _git_match(event, manifest):
@@ -1403,6 +1549,11 @@ def _filter_ok(words):
     if verb in {"grep", "rg"}:
         operands = [arg for arg in args if not arg.startswith("-")]
         return len(operands) == 1 and all(arg in READ_OPTIONS or GREP_FLAGS.match(arg) for arg in args if arg.startswith("-"))
+    if verb == "awk":
+        if not args or any(token in " ".join(args) for token in ("system(", "getline", ">", "|", "-i")):
+            return False
+        program = next((index for index, arg in enumerate(args) if not arg.startswith("-")), None)
+        return program is not None and program == len(args) - 1
     with_value = {"cut": {"-c", "-d", "-f", "-b"}, "sort": {"-k", "-t"}}[verb]
     flags = {"cut": {"-s"}, "sort": {"-n", "-r", "-u", "-h", "-V", "-f"}}[verb]
     index = 0
@@ -1571,6 +1722,25 @@ def _away_status(manifest, now=None):
         return away, 'quiet_hours' if away else 'present'
     except (ValueError, TypeError, OSError, KeyError):
         return True, 'invalid_unattended'
+
+
+def _clear_away_flag(manifest, receipt='human_allow'):
+    """Disarm the away latch once the Admiral has actually allowed a request."""
+    raw = _unattended(manifest).get('away_flag', '~/.config/dotcortex/approval-away')
+    path = Path(raw).expanduser()
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            return False
+        path.unlink()
+        receipt_path = Path(os.environ.get('SO_APPROVAL_AWAY_RECEIPT') or Path.home() / '.local/state/dotcortex/approval-away-receipts.jsonl')
+        receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(receipt_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'a') as stream:
+            stream.write(json.dumps({'ts': _utc(), 'action': 'away_auto_cleared', 'reason': receipt}, separators=(',', ':')) + '\n')
+        return True
+    except (FileNotFoundError, OSError):
+        return False
 
 
 def _presence_stamp(manifest):
@@ -1869,6 +2039,8 @@ def _queue_live_allow(event, manifest):
                 item.update(status='resolved', resolution='approved live at ' + now, resolved_at=now)
                 _queue_append(file, item)
                 resolved.append(item['id'])
+    if resolved:
+        _clear_away_flag(manifest, 'human_allow_live')
     return resolved
 
 
@@ -2015,7 +2187,14 @@ def _finish_hold(item_id, nonce, outcome):
             item.update(status='open', away_reason='hold_timeout' if outcome == 'timeout' else 'human_denied' if outcome == 'deny' else 'away_flag' if outcome == 'away_flag' else 'hold_unavailable')
         item.pop('hold_nonce', None)
         item.pop('hold_answer', None)
-    return _queue_update(item_id, update)
+    accepted = _queue_update(item_id, update)
+    if accepted and outcome == 'allow':
+        try:
+            manifest = _runtime_manifest()
+            _clear_away_flag(manifest, 'human_allow_hold')
+        except Exception:
+            pass
+    return accepted
 
 
 def _notify_hold(event, reason, item_id, nonce, manifest):
@@ -2079,7 +2258,7 @@ def observe_main():
     try:
         event = json.loads(sys.stdin.read(1024*1024+1))
         manifest = _runtime_manifest()
-        if event.get('hook_event_name') != 'PostToolUse' or _away_status(manifest)[0] or not _morning_queue_path().exists():
+        if event.get('hook_event_name') != 'PostToolUse' or not _morning_queue_path().exists():
             return 0
         resolved = _queue_live_allow(event, manifest)
         if resolved:
@@ -2247,7 +2426,7 @@ UNITTEST_RE = re.compile(r"^/usr/bin/python3(?:\.\d+)?\s+-m\s+unittest\s+[\w.]+$
 REMOTE_REALPATH_TIMEOUT_SECONDS = 2.5
 GIT_READERS = {"status", "log", "diff", "show", "branch", "ls-files", "remote", "tag"}
 GIT_UNSAFE_READ_OPTIONS = {"-C", "--output", "--exec", "--ext-diff", "--textconv", "--paginate", "--exec-path"}
-READERS = {"cat", "head", "tail", "grep", "rg", "find", "ls", "stat", "wc", "pgrep", "ps", "date", "mailcortex", "tmux"}
+READERS = {"cat", "head", "tail", "grep", "rg", "find", "ls", "stat", "wc", "pgrep", "ps", "date", "mailcortex", "tmux", "awk", "sed", "jq", "sort", "uniq", "cut", "tr", "ss"}
 FIND_WRITE_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 REMOTE_EXCLUDED_COMPONENTS = {"private", "secrets", ".secrets", "keys", "credentials", ".git", ".ssh", ".env"}
 
@@ -2724,7 +2903,7 @@ def _coordinator_config(manifest):
     config = manifest.get('coordinator_ops')
     if not isinstance(config, dict):
         return None
-    if set(config) - {'peer_host'} != {'classes', 'seat_account', 'repo_roots', 'worktree_roots', 'scratch_roots',
+    if set(config) - {'peer_host', 'fleet_domains'} != {'classes', 'seat_account', 'repo_roots', 'worktree_roots', 'scratch_roots',
                        'build_host', 'remote_scratch_roots', 'remote_scratch_prefixes'}:
         return None
     flags = config.get('classes')
@@ -2749,7 +2928,16 @@ def _coordinator_config(manifest):
         return None
     if 'peer_host' in config and (not isinstance(config['peer_host'], str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', config['peer_host'])):
         return None
+    if 'fleet_domains' in config and (not isinstance(config['fleet_domains'], list) or any(not isinstance(domain, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+\.helm', domain) for domain in config['fleet_domains'])):
+        return None
     return config
+
+
+def _mail_recipient_allowed(address, config):
+    if not isinstance(address, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', address):
+        return False
+    domains = set(config.get('fleet_domains') or ()) | {'kikin.helm', config['seat_account'].split('@', 1)[1]}
+    return address.rsplit('@', 1)[1] in domains
 
 
 def _coordinator_path(raw, roots, *, regular=False, exists=True):
@@ -2772,8 +2960,10 @@ def _coordinator_path(raw, roots, *, regular=False, exists=True):
     return path
 
 
-def _coordinator_regular_input(raw, config, manifest):
+def _coordinator_regular_input(raw, config, manifest, *, allow_policy=False):
     if _coordinator_path(raw, config['scratch_roots'], regular=True):
+        return True
+    if allow_policy and _coordinator_path(raw, _policy_roots(manifest), regular=True):
         return True
     # Only the internal compound walker supplies this proof. _load_manifest
     # rejects the key in external policy files; request data cannot grant it.
@@ -2945,7 +3135,7 @@ def _peer_coordinator_match(command, words, config, manifest):
     if remote[:2] == ['mailcortex','send'] and config['classes']['mail_send']:
         if (SHELL_META.search(remote_text) or _dynamic_shell(remote_text) or len(remote) != 10
                 or remote[2::2] != ['--from','--to','--subject','--body-file']
-                or remote[3] != config['seat_account'] or not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', remote[5])
+                or remote[3] != config['seat_account'] or not _mail_recipient_allowed(remote[5], config)
                 or not remote[7] or not _coordinator_remote_path(remote[9], config)):
             return None
         planned = (peer,remote[9]) in manifest.get('_compound_remote_created_files',())
@@ -2990,8 +3180,8 @@ def _coordinator_match(event, manifest):
         return remote_grant
     if words[:2] == ['mailcortex', 'send'] and flags['mail_send'] and not SHELL_META.search(command):
         if (len(words) == 10 and words[2::2] == ['--from', '--to', '--subject', '--body-file']
-                and words[3] == config['seat_account'] and re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\.helm', words[5])
-                and words[7] and _coordinator_regular_input(words[9], config, manifest)):
+                and words[3] == config['seat_account'] and _mail_recipient_allowed(words[5], config)
+                and words[7] and _coordinator_regular_input(words[9], config, manifest, allow_policy=True)):
             return 'coordinator_mail_send'
         return None
     dispatch = DISPATCH_RE.fullmatch(command)
@@ -3083,6 +3273,10 @@ def _inversion_enabled(manifest):
 
 def _policy_roots(manifest):
     roots = tuple(manifest.get('roots') or ()) + tuple(manifest.get('scratch_roots') or ())
+    # Read-only replay and diagnostics are reviewed beneath the state and
+    # Claude scratch roots. They are observation roots only; write verbs still
+    # hit the absolute floor in the local engine.
+    roots += (str(Path.home() / '.local/state'), '/tmp/claude-1000')
     config = _coordinator_config(manifest)
     if config is not None and _inversion_enabled(manifest):
         roots += tuple(config['repo_roots'] + config['worktree_roots'] + config['scratch_roots'])
@@ -3167,6 +3361,10 @@ def _classify_single(event, manifest):
     command = payload.get('command') if isinstance(payload, dict) else None
     if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and _inert_local_command(command, event.get('cwd','/')):
         return (True, 'local_read') if manifest['entries']['local_read']['enabled'] else (False, 'no_match_decider')
+    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and _for_readonly(event, manifest):
+        return True, 'local_read'
+    if _approval_queue_safe(event):
+        return True, 'approval_queue'
     if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS:
         try:
             cd_words = shlex.split(command)
@@ -3199,6 +3397,12 @@ def _classify_single(event, manifest):
             return False, f"{name}_disabled"
     if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str) and _coordinator_candidate(tool_input["command"]):
         return False, "coordinator_refused"
+    if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
+        substitutions = _shell_substitutions(tool_input["command"])
+        if (substitutions and _substitution_data_only(tool_input["command"], substitutions)
+                and not _substitution_floor(event, manifest)
+                and manifest["entries"]["local_read"]["enabled"]):
+            return True, "local_read"
     if _syntax_refusal(event):
         return False, "syntax"
     return False, "no_match_decider"
@@ -3319,6 +3523,8 @@ def _substitutions_approval(event, manifest, judge):
 def classify(event, manifest):
     if not isinstance(event, dict) or event.get('hook_event_name') != 'PermissionRequest':
         return False, 'not_permission_request'
+    if _for_readonly(event, manifest):
+        return True, 'local_read'
     compound = _compound_approval(event, manifest)
     if compound is not None:
         return compound
@@ -3333,6 +3539,8 @@ _approval_deadline = None
 
 def _decide_request(event, manifest):
     """Apply the complete gate recursively; main owns the single final ledger."""
+    if _for_readonly(event, manifest):
+        return True, 'local_read'
     compound = _compound_approval(event, manifest, judge=_decide_request)
     if compound is not None:
         return compound

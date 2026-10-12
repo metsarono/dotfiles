@@ -30,6 +30,9 @@
        "hooks": [{"type": "command", "command": "honey-claude-voice-reply", "timeout": 10}]},
       {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
     ],
+    "PermissionRequest": [
+      {"hooks": [{"type": "command", "command": "SO_APPROVAL_KIKIN_MANIFEST=$HOME/.config/dotcortex/claude-approval-bunta.honey.local.json claude-hook-permission-request-kikin", "timeout": 5}]}
+    ],
     "Stop": [
       {"hooks": [{"type": "command", "command": "claude-hook-telegram-delivery-guard", "timeout": 10},
                  {"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}

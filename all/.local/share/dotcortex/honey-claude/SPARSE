@@ -24,3 +24,8 @@
 /all/.local/bin/codex-warm
 /all/.local/bin/codex-warmctl
 /all/.local/bin/codex-hook-idle-event
+/all/.local/bin/approval-queue
+/all/.local/bin/approval-presence
+/all/.local/bin/claude-hook-permission-request-kikin
+/all/.local/lib/dotcortex/claude_approval_kikin.py
+/all/.local/lib/dotcortex/claude_approval_runtime.py
