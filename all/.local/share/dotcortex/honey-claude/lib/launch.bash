@@ -92,8 +92,11 @@ honey_claude_launch() {
         # opt-in set; it execs claude-warm unchanged unless the wake is enabled.
         local warm=claude-warm wake=0
         case " ${HONEY_CLAUDE_MAIL_WAKE_BOTS-opus} " in *" $bot "*) warm=mailcortex-claude-warm wake=1 ;; esac
+        local wake_reply_env="$HOME/.config/mailcortex/wake-reply-$bot.env"
+        [[ ! -f "$wake_reply_env" ]] || source "$wake_reply_env"
         # acceptEdits (auto) mode: plan mode blocks unattended bot work (as on kikin).
         exec env CLAUDE_WARM_HERDR_AGENT="$agent" TELEGRAM_STATE_DIR="$state_dir" MAILCORTEX_CLAUDE_WAKE="$wake" \
+            MAILCORTEX_WAKE_REPLY_CHAT="${MAILCORTEX_WAKE_REPLY_CHAT:-YOUR_TELEGRAM_CHAT_ID}" \
             "$warm" --model "$model" --permission-mode acceptEdits \
             --allowedTools=mcp__plugin_telegram_telegram \
             ${LIB_DIR:+--settings="$LIB_DIR/../claude-settings.json"} \

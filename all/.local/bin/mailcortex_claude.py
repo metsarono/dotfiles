@@ -211,7 +211,7 @@ def scan_batch(api, seat, record, adapter, now):
     receipts("injecting", pane_id=owner, attempt_id=uuid.uuid4().hex,
              attempt_pid=os.getpid(), attempt_start_time=process_start_time(os.getpid()),
              attempt_started_at=now)
-    prompt = (f"MailCortex: new mail is waiting in {record['mailbox']} on {record['host']}. "
+    prompt = (f"[mailcortex-wake] MailCortex: new mail is waiting in {record['mailbox']} on {record['host']}. "
               "Open /inbox, read all pending mail, and handle it with your harness tools.")
     try:
         adapter.deliver(record, owner, prompt)

@@ -82,9 +82,10 @@ for i, d in enumerate(recs):
 if last_user < 0:
     print("pass"); sys.exit(0)
 
-# Only guard prompts that arrived FROM Telegram; a plain TUI prompt needs no
-# Telegram reply because the terminal is what the user sees there.
-if not re.search(r"<channel\b[^>]*telegram", last_text, re.I):
+# Mail wakes use a leading marker because they have no inbound channel tag.
+# A mention of the marker inside a plain TUI prompt must not bind that turn.
+mail_wake = bool(re.match(r"^\[mailcortex-wake\](?:\s|$)", last_text))
+if not mail_wake and not re.search(r"<channel\b[^>]*telegram", last_text, re.I):
     print("pass"); sys.exit(0)
 
 deliver = re.compile(r"telegram.*(reply|edit_message)", re.I)
@@ -100,15 +101,26 @@ for d in recs[last_user+1:]:
         elif b.get("type") == "tool_use" and deliver.search(str(b.get("name",""))):
             delivered = True
 
-print("block" if (spoke and not delivered) else "pass")
+print(("block-mail" if mail_wake else "block") if (spoke and not delivered) else "pass")
 ' "$TP" 2>/dev/null) || VERDICT="pass"
 
-if [ "$VERDICT" = "block" ]; then
+if [ "$VERDICT" = "block" ] || [ "$VERDICT" = "block-mail" ]; then
   log "decision=block spoke-without-telegram-delivery"
-  python3 -c 'import json,sys; sys.stdout.write(json.dumps({"decision":"block","reason":(
+  python3 -c '
+import json, os, sys
+target = "Deliver your message now via the reply tool (chat_id from the inbound <channel> tag), turn-final, then stop."
+if sys.argv[1] == "block-mail":
+    chat = os.environ.get("MAILCORTEX_WAKE_REPLY_CHAT", "").strip()
+    if not chat:
+        target = "MAILCORTEX_WAKE_REPLY_CHAT is unset; no reply chat is configured for this mail wake. Have the coordinator provision the seat reply chat; do not invent a chat_id."
+    elif chat.startswith("YOUR_"):
+        target = "MAILCORTEX_WAKE_REPLY_CHAT is still a placeholder (" + chat + "); have the coordinator provision the real seat reply chat before delivery."
+    else:
+        target = "Deliver your message now via the reply tool (chat_id=" + chat + ", from MAILCORTEX_WAKE_REPLY_CHAT), turn-final, then stop."
+sys.stdout.write(json.dumps({"decision":"block","reason":(
 "TELEGRAM DELIVERY GUARD: this turn produced a response but never called the Telegram reply tool. "
 "Your transcript text is INVISIBLE to Mètsàtron -- only mcp__plugin_telegram_telegram__reply reaches his chat. "
-"Deliver your message now via the reply tool (chat_id from the inbound <channel> tag), turn-final, then stop.")}))'
++ target)}))' "$VERDICT"
   exit 0
 fi
 exit 0

@@ -51,6 +51,7 @@ class Home:
                 "import json, os, sys\n"
                 f"json.dump({{'argv': sys.argv[1:], 'cwd': os.getcwd(), 'pid': os.getpid(),"
                 " 'warm': os.path.basename(sys.argv[0]), 'wake': os.environ.get('MAILCORTEX_CLAUDE_WAKE'),"
+                " 'wake_reply_chat': os.environ.get('MAILCORTEX_WAKE_REPLY_CHAT'),"
                 " 'agent': os.environ.get('CLAUDE_WARM_HERDR_AGENT'),"
                 " 'state': os.environ.get('TELEGRAM_STATE_DIR'), 'path': os.environ['PATH'],"
                 " 'guard': {k: v for k, v in os.environ.items() if k.startswith('CLAUDE_WARM_PRESERVATION_')}},"
@@ -69,9 +70,10 @@ class Home:
         path.write_text(shebang + body)
         path.chmod(0o755)
 
-    def run(self, bot, *args):
+    def run(self, bot, *args, extra_env=None):
         env = {"HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin",
                "XDG_RUNTIME_DIR": str(self.xdg)}
+        env.update(extra_env or {})
         if not self.plugin_enabled or not self.idle_hooks:
             env["CLAUDE_SETTINGS_FILE"] = str(self.settings)
         return subprocess.run([str(BIN / f"honey-{bot}"), *args], capture_output=True,
@@ -100,6 +102,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(rec["cwd"], str(box.home / "honey-work" / bot))
                 self.assertEqual(rec["state"], str(box.home / f".claude/channels/telegram-{bot}"))
                 self.assertEqual(rec["agent"], f"honey-{bot}-bot")
+                self.assertEqual(rec["wake_reply_chat"], "YOUR_TELEGRAM_CHAT_ID")
                 # Only Bunta's seat (opus) launches through the mail-wake launcher, opted in.
                 self.assertEqual((rec["warm"], rec["wake"]),
                                  ("mailcortex-claude-warm", "1") if bot == "opus" else ("claude-warm", "0"))
@@ -110,6 +113,29 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(pidfile.read_text().strip(), str(rec["pid"]))
                 agents.add(rec["agent"])
             self.assertNotIn("honey-opus", agents, "collides with Honey's existing warm consort")
+        finally:
+            box.close()
+
+    def test_wake_reply_chat_is_inherited_from_launch_environment(self):
+        box = Home()
+        try:
+            result = box.run("opus", "--telegram", extra_env={"MAILCORTEX_WAKE_REPLY_CHAT": "YOUR_ENV_REPLY_CHAT"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(box.recorded()["wake_reply_chat"], "YOUR_ENV_REPLY_CHAT")
+        finally:
+            box.close()
+
+    def test_wake_reply_chat_is_loaded_from_private_seat_file(self):
+        box = Home()
+        try:
+            for bot in BOTS:
+                config = box.home / f".config/mailcortex/wake-reply-{bot}.env"
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.write_text("export MAILCORTEX_WAKE_REPLY_CHAT=YOUR_PRIVATE_REPLY_CHAT\n")
+                config.chmod(0o600)
+                result = box.run(bot, "--telegram")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(box.recorded()["wake_reply_chat"], "YOUR_PRIVATE_REPLY_CHAT")
         finally:
             box.close()
 

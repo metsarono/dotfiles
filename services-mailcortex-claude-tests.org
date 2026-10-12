@@ -259,6 +259,10 @@ class ClaudeWakeTests(unittest.TestCase):
         self.assertEqual(a.runner.call_count, 0)
         self.assertEqual(self.w.locked_scan(self.registry, a, now=12), 1)
         self.assertEqual(a.runner.call_count, 2)
+        wake = json.loads(a.runner.call_args.kwargs["input"])["text"]
+        self.assertEqual(wake.encode("ascii"),
+                         b"[mailcortex-wake] MailCortex: new mail is waiting in consorts/worker on fixture-host. "
+                         b"Open /inbox, read all pending mail, and handle it with your harness tools.")
         self.assertTrue(all(self.receipt(n)["wake_state"] == "injected" for n in range(3)))
         self.assertEqual(self.w.locked_scan(self.registry, self.adapter(), now=200), 0)
 
@@ -416,6 +420,15 @@ class ClaudeWakeTests(unittest.TestCase):
             result = self.c.owner_control(o, request, w)
         self.assertEqual(result["status"], "accepted")
         self.assertEqual([c.args[1] for c in w.write_all.call_args_list], [CAPTURED_WAKE_TEXT.encode(), b"\r"])
+
+    def test_marked_wake_exact_bytes_and_separate_cr(self):
+        o = self.fake_owner(); w = self.fake_warm()
+        text = "[mailcortex-wake] " + CAPTURED_WAKE_TEXT
+        with mock.patch.object(self.c, "owner_matches", return_value=True), \
+             mock.patch.object(self.c, "pending_terminal", return_value=False):
+            result = self.c.owner_control(o, dict(self.request(), text=text), w)
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual([call.args[1] for call in w.write_all.call_args_list], [text.encode("ascii"), b"\r"])
 
     def test_captured_uncleared_box_is_unknown_without_retyping(self):
         o = self.fake_owner(); w = self.fake_warm()

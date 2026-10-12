@@ -71,6 +71,15 @@ modified in this branch.
 
 ** Deployment contract
 
+The Claude SSH wake starts with the stable =[mailcortex-wake]= marker; keep it when changing the wake prose. The Telegram Stop delivery guard treats that leading marker as a channel turn and obtains its reply target from =MAILCORTEX_WAKE_REPLY_CHAT=, since this wake has no inbound Telegram tag. An unset binding is reported plainly and a =YOUR_*= placeholder is reported as unprovisioned. The guard never invents a chat or reads channel credentials.
+
+Copy the following public template into the seat user's private machine-local =$HOME/.config/mailcortex/wake-reply-<seat>.env= with mode 0600 and replace the placeholder outside the repository. Honey's shared launcher loads =opus=, =sonnet= or =haiku= itself. Kikin's canonical launchers are owned by HelmCortex at =FORGE/bin/claude-<seat>=; wire the same private file and export into their Telegram branch there, including any separate local mail-wake wrapper. A supervisor already running must be relaunched at an operator-approved idle session boundary to inherit a new binding.
+
+#+BEGIN_SRC sh :tangle all/.config/mailcortex/wake-reply.env.template
+# Copy to the private per-seat wake-reply-<seat>.env; never commit its real value.
+export MAILCORTEX_WAKE_REPLY_CHAT=YOUR_TELEGRAM_CHAT_ID
+#+END_SRC
+
 Review the branch and run the fixtures in its own worktree. Integrate the
 canonical sources and tangle =services-mailcortex-claude.org= and
 =services-mailcortex-watcher.org= in the approved checkout. Deploy the three
@@ -316,7 +325,7 @@ def scan_batch(api, seat, record, adapter, now):
     receipts("injecting", pane_id=owner, attempt_id=uuid.uuid4().hex,
              attempt_pid=os.getpid(), attempt_start_time=process_start_time(os.getpid()),
              attempt_started_at=now)
-    prompt = (f"MailCortex: new mail is waiting in {record['mailbox']} on {record['host']}. "
+    prompt = (f"[mailcortex-wake] MailCortex: new mail is waiting in {record['mailbox']} on {record['host']}. "
               "Open /inbox, read all pending mail, and handle it with your harness tools.")
     try:
         adapter.deliver(record, owner, prompt)

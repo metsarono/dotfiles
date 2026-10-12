@@ -2130,7 +2130,7 @@ echo "$COUNT" > "$COUNTFILE"
 
 In a Telegram-bridged session the assistant's transcript text never reaches Mètsàtron — only a Telegram reply tool call does. This Stop hook lives in the SHARED baseline so it deploys to =~/.claude/settings.json= at USER scope: it therefore protects every warm bot (Fable/Auryn/Haiku/Opus) regardless of working directory, unlike the old HelmCortex-root-only wiring that most bots never loaded (Claude Code loads the cwd's own =.claude/settings.json= plus user scope, not ancestor project dirs).
 
-At turn end, if the LAST user prompt actually arrived FROM Telegram (carries a =<channel source="...telegram...">= tag) and the turn produced spoken assistant text but made no Telegram delivery call (=reply=/=edit_message=), it blocks the stop and tells the model to deliver. A plain TUI prompt is never blocked (the terminal is what the user sees there). Gated to channel-bound sessions; fail-OPEN on any error (never wedge a session); never loops (honors =stop_hook_active=). The transcript read retries once to survive a flush race, and logs the distinct failure shapes (missing path / present-but-unreadable / no transcript_path) so a real fault is diagnosable rather than silent.
+At turn end, if the LAST user prompt arrived from Telegram (carries a =<channel source="...telegram...">= tag) or starts with the stable =[mailcortex-wake]= marker and the turn produced spoken assistant text but made no Telegram delivery call (=reply=/=edit_message=), it blocks the stop and tells the model to deliver. A mail wake has no inbound channel tag: the reason names =MAILCORTEX_WAKE_REPLY_CHAT= from the launch environment, or states plainly that it is unset or still a placeholder. Provision the real value in the private seat launch configuration, never public source. A plain TUI prompt is never blocked (the terminal is what the user sees there). Gated to channel-bound sessions; fail-OPEN on any error (never wedge a session); never loops (honors =stop_hook_active=). The transcript read retries once to survive a flush race, and logs the distinct failure shapes (missing path / present-but-unreadable / no transcript_path) so a real fault is diagnosable rather than silent.
 
 #+BEGIN_SRC bash :tangle all/.local/bin/claude-hook-telegram-delivery-guard :shebang "#!/usr/bin/env bash" :comments no
 # ~/DotCortex/all/.local/bin/claude-hook-telegram-delivery-guard
@@ -2216,9 +2216,10 @@ for i, d in enumerate(recs):
 if last_user < 0:
     print("pass"); sys.exit(0)
 
-# Only guard prompts that arrived FROM Telegram; a plain TUI prompt needs no
-# Telegram reply because the terminal is what the user sees there.
-if not re.search(r"<channel\b[^>]*telegram", last_text, re.I):
+# Mail wakes use a leading marker because they have no inbound channel tag.
+# A mention of the marker inside a plain TUI prompt must not bind that turn.
+mail_wake = bool(re.match(r"^\[mailcortex-wake\](?:\s|$)", last_text))
+if not mail_wake and not re.search(r"<channel\b[^>]*telegram", last_text, re.I):
     print("pass"); sys.exit(0)
 
 deliver = re.compile(r"telegram.*(reply|edit_message)", re.I)
@@ -2234,15 +2235,26 @@ for d in recs[last_user+1:]:
         elif b.get("type") == "tool_use" and deliver.search(str(b.get("name",""))):
             delivered = True
 
-print("block" if (spoke and not delivered) else "pass")
+print(("block-mail" if mail_wake else "block") if (spoke and not delivered) else "pass")
 ' "$TP" 2>/dev/null) || VERDICT="pass"
 
-if [ "$VERDICT" = "block" ]; then
+if [ "$VERDICT" = "block" ] || [ "$VERDICT" = "block-mail" ]; then
   log "decision=block spoke-without-telegram-delivery"
-  python3 -c 'import json,sys; sys.stdout.write(json.dumps({"decision":"block","reason":(
+  python3 -c '
+import json, os, sys
+target = "Deliver your message now via the reply tool (chat_id from the inbound <channel> tag), turn-final, then stop."
+if sys.argv[1] == "block-mail":
+    chat = os.environ.get("MAILCORTEX_WAKE_REPLY_CHAT", "").strip()
+    if not chat:
+        target = "MAILCORTEX_WAKE_REPLY_CHAT is unset; no reply chat is configured for this mail wake. Have the coordinator provision the seat reply chat; do not invent a chat_id."
+    elif chat.startswith("YOUR_"):
+        target = "MAILCORTEX_WAKE_REPLY_CHAT is still a placeholder (" + chat + "); have the coordinator provision the real seat reply chat before delivery."
+    else:
+        target = "Deliver your message now via the reply tool (chat_id=" + chat + ", from MAILCORTEX_WAKE_REPLY_CHAT), turn-final, then stop."
+sys.stdout.write(json.dumps({"decision":"block","reason":(
 "TELEGRAM DELIVERY GUARD: this turn produced a response but never called the Telegram reply tool. "
 "Your transcript text is INVISIBLE to Mètsàtron -- only mcp__plugin_telegram_telegram__reply reaches his chat. "
-"Deliver your message now via the reply tool (chat_id from the inbound <channel> tag), turn-final, then stop.")}))'
++ target)}))' "$VERDICT"
   exit 0
 fi
 exit 0
