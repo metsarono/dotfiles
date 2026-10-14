@@ -869,7 +869,7 @@ def _policy_roots(manifest):
     # Read-only replay and diagnostics are reviewed beneath the state and
     # Claude scratch roots. They are observation roots only; write verbs still
     # hit the absolute floor in the local engine.
-    roots += (str(Path.home() / '.local/state'), '/tmp/claude-1000')
+    roots += (str(Path.home() / '.local/state'), '/tmp/claude-1000', '/tmp/claude-2002')
     config = _coordinator_config(manifest)
     if config is not None and _inversion_enabled(manifest):
         roots += tuple(config['repo_roots'] + config['worktree_roots'] + config['scratch_roots'])
@@ -904,6 +904,8 @@ def _inversion_scope(event, manifest):
     command = payload.get('command')
     if not isinstance(command, str) or not command.strip() or not set(payload) <= TOOL_INPUT_KEYS:
         return False
+    if _fleet_environment_export(command):
+        return True
     command = _strip_heredoc_bodies(command)
     if command is None:
         return False
@@ -912,6 +914,8 @@ def _inversion_scope(event, manifest):
         return False
     for stage in stages:
         words = _without_heredoc_markers(_unwrap_words(stage))
+        if _fleet_environment_export(' '.join(words)):
+            continue
         for index, word in enumerate(words):
             if index == 0:
                 continue  # executable paths do not expand the data scope
@@ -1118,6 +1122,10 @@ def classify(event, manifest):
         return False, 'not_permission_request'
     if _for_readonly(event, manifest):
         return True, 'local_read'
+    if _for_loop_body_floor(event, manifest):
+        return False, 'true_floor'
+    if _for_loop_candidate(event) is not None:
+        return False, 'true_floor'
     compound = _compound_approval(event, manifest)
     if compound is not None:
         return compound
@@ -1134,6 +1142,10 @@ def _decide_request(event, manifest):
     """Apply the complete gate recursively; main owns the single final ledger."""
     if _for_readonly(event, manifest):
         return True, 'local_read'
+    if _for_loop_body_floor(event, manifest):
+        return False, 'true_floor'
+    if _for_loop_candidate(event) is not None:
+        return False, 'true_floor'
     compound = _compound_approval(event, manifest, judge=_decide_request)
     if compound is not None:
         return compound
@@ -1615,6 +1627,64 @@ def _decider_decide(event, config):
     return verdict == "allow", status, latency_ms, verdict
 
 
+def _floor_rule_for_record(event, manifest, reason):
+    """Name the first durable floor rule without recording request contents."""
+    if 'true_floor' not in str(reason):
+        return None
+    payload = event.get('tool_input') if isinstance(event, dict) else None
+    if not isinstance(payload, dict):
+        return 'invalid-input'
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).casefold()
+    if _credential_content(payload):
+        return 'credential'
+    if _protected(raw) or 'logs/telegram/personal' in raw:
+        if re.search(r'(?<!\S)(?:-i|--identity-file)(?:=|\s+)[^;&|]*\.ssh(?:/|\s|$)', raw):
+            return 'ssh-identity'
+        return 'protected'
+    command = payload.get('command')
+    if not isinstance(command, str):
+        return 'protected'
+    candidate = command
+    match = re.search(r'compound_refused:segment_(\d+)', str(reason))
+    if match:
+        segments = _split_approval_compound(command)
+        index = int(match.group(1)) - 1
+        if segments is not None and 0 <= index < len(segments):
+            candidate = segments[index][1]
+    try:
+        candidate_words = shlex.split(candidate, posix=True)
+    except ValueError:
+        candidate_words = []
+    if any(_protected(word) for word in candidate_words
+           if '/' in word or word.startswith('~') or '.' in word):
+        return 'protected'
+    if 'substitution_refused' in str(reason) or '$(' in candidate or '`' in candidate:
+        return 'substitution'
+    if '<<' in candidate:
+        return 'heredoc'
+    candidate_split = _split_approval_compound(candidate)
+    if _unsafe_redirect(candidate, manifest, event.get('cwd'), segmented=candidate_split is not None):
+        return 'redirect'
+    try:
+        words = [word if word in {'-C', '-F'} else word.casefold()
+                 for word in shlex.split(candidate, posix=True)]
+    except ValueError:
+        return 'syntax'
+    lowered = _unwrap_words(words)
+    if 'kill' in lowered or 'pkill' in lowered or 'killall' in lowered:
+        return 'kill'
+    if any(word in REMOTE for word in lowered) and any(
+            word in {'-i', '--identity-file'} or word.startswith('--identity-file=') for word in lowered):
+        return 'ssh-identity'
+    if any(word in SERVICE for word in lowered):
+        return 'service'
+    if lowered and lowered[0] in PACKAGE:
+        return 'package'
+    if lowered and lowered[0] in INTERPRETER_WORDS:
+        return 'interpreter'
+    return 'true-floor'
+
+
 def _log_decision(event, allow, reason):
     # Decision ledger (2026-10-09): one JSON line per prompt, so prompts saved and
     # misfires can be measured. It never records tool_input itself (commands and
@@ -1746,6 +1816,10 @@ def main():
         message = 'deferred: ' + note + '; ' + DEFERRED_ACTION
         sys.stdout.write(json.dumps(_deny_output(message), separators=(',', ':')) + '\n')
         _log_decision.extras.update(decision='deny', away_reason=away_reason, morning_queued=queued, queue_id=item_id, hold_status=hold_status, notification_status=notification)
+    if not allow:
+        floor_rule = _floor_rule_for_record(event, manifest, reason)
+        if floor_rule is not None:
+            _log_decision.extras['floor_rule'] = floor_rule
     _log_decision(event, allow, reason)
     return 0
 

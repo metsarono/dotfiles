@@ -101,16 +101,111 @@ def _unreviewed_home_path(value, roots=()):
     return False
 
 
-def _unsafe_redirect(command):
+REDIRECTS = {'<', '>', '<<', '<<-', '<<<', '>>', '&>', '&>>', '>&', '<&'}
+
+
+def _scratch_roots(manifest):
+    """Return reviewed scratch roots, including the two Claude session lanes."""
+    policy = tuple(manifest.get('roots') or ()) if isinstance(manifest, dict) else ()
+    policy = {os.path.realpath(root) for root in policy if isinstance(root, str)}
+    configured = tuple(manifest.get('scratch_roots') or ()) if isinstance(manifest, dict) else ()
+    # A synthetic manifest sometimes repeats its repository root as a scratch
+    # root to widen read fixtures. Treating that broad root as a redirect sink
+    # would silently turn ordinary repository writes inert, so only dedicated
+    # scratch roots qualify here.
+    roots = tuple(root for root in configured if isinstance(root, str)
+                  and os.path.realpath(root) not in policy)
+    roots += ('/tmp/claude-1000', '/tmp/claude-2002')
+    kept = []
+    for root in roots:
+        if isinstance(root, str) and root.startswith('/') and root != '/':
+            kept.extend((posixpath.normpath(root), os.path.realpath(root)))
+    return tuple(dict.fromkeys(kept))
+
+
+def _redirect_targets(command):
+    """Return shell redirect targets, or None when the redirect syntax is unclear."""
+    stripped = _strip_heredoc_bodies(command)
+    if stripped is None:
+        return None
+    stages = _shell_stages(stripped)
+    if stages is None:
+        return None
+    targets = []
+    for words in stages:
+        index = 0
+        while index < len(words):
+            if words[index] not in REDIRECTS:
+                index += 1
+                continue
+            if index + 1 >= len(words):
+                return None
+            targets.append((words[index], words[index + 1]))
+            index += 2
+    return targets
+
+
+def _scratch_redirect_target(raw, cwd, manifest):
+    if raw in {'', '-', '/dev/null', '&1', '&2', '1', '2'}:
+        return True
+    lexical = _lexical(raw, cwd)
+    if lexical is None:
+        return False
+    resolved = os.path.realpath(lexical)
+    return any(_inside(resolved, root) for root in _scratch_roots(manifest))
+
+
+def _unsafe_redirect(command, manifest=None, cwd=None, segmented=False):
     """Return true for a redirect that can write or feed a command.
 
     The only inert redirects in the reviewed read lane are stderr merged into
     stdout and stdout/stderr discarded. Everything else remains fail-closed.
     """
-    scrubbed = re.sub(r"(?<!\S)2\s*>\s*(?:/dev/null|&1)(?=\s|$|[;&|])", "", command)
-    scrubbed = re.sub(r"(?<!\S)>\s*/dev/null(?=\s|$|[;&|])", "", scrubbed)
-    scrubbed = re.sub(r"(?<!\S)2\s*>\s*/dev/null(?=\s|$|[;&|])", "", scrubbed)
-    return bool(re.search(r"(?<![<>=])[<>]", scrubbed))
+    targets = _redirect_targets(command)
+    if targets is None:
+        return True
+    for operator, target in targets:
+        # A heredoc supplies request data, and fd duplication never names a
+        # filesystem target. Both remain inert in the proven segment lane.
+        if operator in {'<<', '<<-', '<<<', '>&', '<&'} and target in {'&1', '&2', '1', '2'}:
+            continue
+        if segmented and manifest is not None and isinstance(cwd, str) and _scratch_redirect_target(target, cwd, manifest):
+            continue
+        return True
+    return False
+
+
+def _fleet_path_component(value):
+    """Recognize only the reviewed fleet tool directories in an export value."""
+    if value in {
+        '~/.npm-global/bin', '~/.local/bin', '~/HelmCortex/FORGE/bin',
+        '$HOME/.npm-global/bin', '$HOME/.local/bin', '$HOME/HelmCortex/FORGE/bin',
+        'HelmCortex/FORGE/bin', '$PATH', '${PATH}',
+    }:
+        return True
+    return bool(re.fullmatch(r'(?:~|\$HOME)/\.guix-extra-profiles/[^/:]+/[^/:]+/bin', value))
+
+
+def _fleet_environment_export(command):
+    """Return true only for an export made entirely from reviewed tool dirs."""
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if len(words) < 2 or words[0] != 'export':
+        return False
+    assignments = []
+    for word in words[1:]:
+        if '=' not in word:
+            return False
+        name, value = word.split('=', 1)
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) or not value:
+            return False
+        components = value.split(':')
+        if not components or any(not _fleet_path_component(component) for component in components):
+            return False
+        assignments.append(name)
+    return bool(assignments)
 
 
 # 2026-10-09 (Fable/SO-APPROVAL-C1 decider-in-the-loop): the old hard floor mixed
@@ -124,15 +219,15 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
     tool_input = event.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     floor_event = event
+    try:
+        raw = json.dumps(event.get("tool_input", {}), ensure_ascii=False, sort_keys=True).casefold()
+    except (TypeError, ValueError):
+        return True
     if isinstance(command, str):
         command = _strip_heredoc_bodies(command)
         if command is None:
             return True
         floor_event = {**event, "tool_input": {**tool_input, "command": command}}
-    try:
-        raw = json.dumps(floor_event.get("tool_input", {}), ensure_ascii=False, sort_keys=True).casefold()
-    except (TypeError, ValueError):
-        return True
     if event.get('tool_name') in {'Write', 'Edit', 'MultiEdit', 'NotebookEdit'} and not isinstance(command, str):
         # Report prose is data, not a filesystem operand. Credential assignment
         # evidence stays on the floor; merely naming an environment variable is
@@ -141,6 +236,11 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
             return True
         raw = json.dumps({key: tool_input[key] for key in ('file_path', 'notebook_path', 'path') if key in tool_input}).casefold()
     if _protected(raw) or "logs/telegram/personal" in raw:
+        return True
+    # Credential assignments are a full-request veto too. This deliberately
+    # runs before segment routing, so a secret hidden in an otherwise harmless
+    # compound or scratch redirect cannot reach the Decider.
+    if isinstance(tool_input, dict) and _credential_content(tool_input):
         return True
     roots = _policy_roots(manifest) if manifest is not None and _inversion_enabled(manifest) else (tuple(manifest.get("roots") or ()) + tuple(manifest.get("scratch_roots") or ())) if manifest is not None else ()
     if coordinator is not None and manifest is not None:
@@ -157,8 +257,15 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         return _unreviewed_home_path(raw, roots)
     if _protected(command):
         return True
-    if coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'} and _unsafe_redirect(command):
+    if manifest is not None and _for_loop_body_floor(floor_event, manifest):
         return True
+    split = _split_approval_compound(command)
+    if coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}:
+        if split is None:
+            if _unsafe_redirect(command):
+                return True
+        elif _unsafe_redirect(command, manifest, floor_event.get('cwd'), segmented=True):
+            return True
     # 2026-10-10 (replay finding): an unbalanced quote (a comment saying
     # "job's") makes the WHOLE command unparseable — the old early bail-out
     # skipped the entire floor. Now a failed whole-command parse still runs the
@@ -178,8 +285,13 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         if (not substitutions or not _substitution_data_only(command, substitutions)
                 or _substitution_floor(floor_event, manifest, coordinator)):
             return True
-    if _unreviewed_home_path(raw, roots) and not readonly_proven:
-        return True
+    if not readonly_proven:
+        if split is None:
+            if _unreviewed_home_path(raw, roots):
+                return True
+        elif any(not _fleet_environment_export(text) and _unreviewed_home_path(text, roots)
+                  for _separator, text in split):
+            return True
     # The floor sees every shell stage, including wrappers and redirects without
     # whitespace. A failed parser never reaches a probabilistic veto.
     if _inert_local_command(command, event.get('cwd', '/')):
@@ -187,7 +299,23 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
     if manifest is not None and _for_readonly(floor_event, manifest):
         return False
     if not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}:
-        if _dynamic_shell(command):
+        residual = command
+        if split is not None:
+            # A proven split gets one shell-effect decision per segment. The
+            # trusted fleet export is data; all other unresolved expansion
+            # remains conservative, including substitutions and variables.
+            for _separator, text in split:
+                if _fleet_environment_export(text):
+                    continue
+                if _dynamic_shell(text):
+                    substitutions = _shell_substitutions(text)
+                    if (substitutions is None or not _substitution_data_only(text, substitutions)
+                            or _substitution_floor({**floor_event, 'tool_input': {**tool_input, 'command': text}}, manifest, coordinator)):
+                        return True
+                    residual = _remove_shell_substitutions(text, substitutions)
+                    if _dynamic_shell(residual):
+                        return True
+        elif _dynamic_shell(command):
             substitutions = _shell_substitutions(command)
             residual = _remove_shell_substitutions(command, substitutions) if substitutions is not None else None
             if (substitutions is None or not _substitution_data_only(command, substitutions)
@@ -455,6 +583,8 @@ def _inert_local_command(command, cwd='/'):
         return False
     if not words:
         return False
+    if _fleet_environment_export(command):
+        return True
     if re.fullmatch(r'command -v [A-Za-z0-9_.+-]+', command):
         return True
     if re.fullmatch(r'(?:type|which) [A-Za-z0-9_.+-]+', command):
@@ -857,7 +987,10 @@ def _write_outside_roots(event, manifest):
                 if index + 1 >= len(words):
                     return True
                 redirects.append(words[index + 1])
-        if any(path not in harmless and _write_target_outside(path, current, roots, protect_gate=True) for path in redirects):
+        if any(path not in harmless
+               and not _scratch_redirect_target(path, current, manifest)
+               and _write_target_outside(path, current, roots, protect_gate=True)
+               for path in redirects):
             return True
         operands, cursor = [], 1
         while cursor < len(words):
@@ -944,7 +1077,7 @@ def _path(raw, cwd, roots, exists=True):
 def _read_roots(manifest):
     """Roots reviewed for observation; these additions never authorize writes."""
     return tuple(dict.fromkeys(tuple(manifest.get('roots') or ()) + tuple(manifest.get('scratch_roots') or ()) +
-                              (str(Path.home() / '.local/state'), '/tmp/claude-1000')))
+                              (str(Path.home() / '.local/state'), '/tmp/claude-1000', '/tmp/claude-2002')))
 
 
 def _scratch(raw, cwd, roots):
@@ -1213,7 +1346,7 @@ def _local_match(event, manifest, words=None):
 
 
 def _for_readonly(event, manifest):
-    """Prove a small literal-list for loop whose body is a read command."""
+    """Prove a literal-list loop whose every body segment is a read shape."""
     if not isinstance(event, dict):
         return False
     payload, cwd = event.get('tool_input'), event.get('cwd')
@@ -1232,6 +1365,7 @@ def _for_readonly(event, manifest):
     roots = _read_roots(manifest)
     if any(_path(item, cwd, roots) is None for item in items):
         return False
+    used = set()
     for item in items:
         replacement = shlex.quote(item)
         expanded = re.sub(r'\$\{' + re.escape(variable) + r'\}|\$' + re.escape(variable) + r'\b', replacement, body)
@@ -1239,12 +1373,58 @@ def _for_readonly(event, manifest):
             return False
         stage = {**event, 'tool_input': {**payload, 'command': expanded}}
         if _routes_compound(expanded):
-            ok, _reason = _compound(stage, manifest)
+            ok, reason = _compound(stage, manifest)
+            if ok:
+                used.update(reason.partition(':')[2].split('+'))
         else:
-            ok = _local_match(stage, manifest)
+            ok, reason = False, 'no_match'
+            if _local_match(stage, manifest) and manifest['entries']['local_read']['enabled']:
+                ok, reason = True, 'local_read'
+                used.add(reason)
+            elif _git_match(stage, manifest) and manifest['entries']['git_observe']['enabled']:
+                ok, reason = True, 'git_observe'
+                used.add(reason)
         if not ok:
             return False
-    return bool(manifest['entries'].get('local_read', {}).get('enabled'))
+    return bool(used)
+
+
+def _for_loop_body_floor(event, manifest):
+    """Apply the ordinary floor recursively to every expanded loop body."""
+    if not isinstance(event, dict):
+        return False
+    payload, cwd = event.get('tool_input'), event.get('cwd')
+    if event.get('tool_name') != 'Bash' or not isinstance(payload, dict) or not isinstance(payload.get('command'), str) or not isinstance(cwd, str):
+        return False
+    match = re.fullmatch(r'for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;]+);\s*do\s+(.+);\s*done', payload['command'], re.S)
+    if not match:
+        return False
+    variable, literal, body = match.groups()
+    try:
+        items = shlex.split(literal, posix=True)
+    except ValueError:
+        return True
+    if not items or any(not item or PATH_META.search(item) for item in items):
+        return True
+    for item in items:
+        replacement = shlex.quote(item)
+        expanded = re.sub(r'\$\{' + re.escape(variable) + r'\}|\$' + re.escape(variable) + r'\b', replacement, body)
+        if '$' + variable in expanded or '${' + variable + '}' in expanded:
+            return True
+        nested = {**event, 'tool_input': {**payload, 'command': expanded}}
+        if _true_floor(nested, manifest):
+            return True
+    return False
+
+
+def _for_loop_candidate(event):
+    """Return loop groups for the narrow read-only loop grammar, if present."""
+    if not isinstance(event, dict):
+        return None
+    payload, cwd = event.get('tool_input'), event.get('cwd')
+    if event.get('tool_name') != 'Bash' or not isinstance(payload, dict) or not isinstance(payload.get('command'), str) or not isinstance(cwd, str):
+        return None
+    return re.fullmatch(r'for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;]+);\s*do\s+(.+);\s*done', payload['command'], re.S)
 
 
 def _approval_queue_safe(event):
@@ -3276,7 +3456,7 @@ def _policy_roots(manifest):
     # Read-only replay and diagnostics are reviewed beneath the state and
     # Claude scratch roots. They are observation roots only; write verbs still
     # hit the absolute floor in the local engine.
-    roots += (str(Path.home() / '.local/state'), '/tmp/claude-1000')
+    roots += (str(Path.home() / '.local/state'), '/tmp/claude-1000', '/tmp/claude-2002')
     config = _coordinator_config(manifest)
     if config is not None and _inversion_enabled(manifest):
         roots += tuple(config['repo_roots'] + config['worktree_roots'] + config['scratch_roots'])
@@ -3311,6 +3491,8 @@ def _inversion_scope(event, manifest):
     command = payload.get('command')
     if not isinstance(command, str) or not command.strip() or not set(payload) <= TOOL_INPUT_KEYS:
         return False
+    if _fleet_environment_export(command):
+        return True
     command = _strip_heredoc_bodies(command)
     if command is None:
         return False
@@ -3319,6 +3501,8 @@ def _inversion_scope(event, manifest):
         return False
     for stage in stages:
         words = _without_heredoc_markers(_unwrap_words(stage))
+        if _fleet_environment_export(' '.join(words)):
+            continue
         for index, word in enumerate(words):
             if index == 0:
                 continue  # executable paths do not expand the data scope
@@ -3525,6 +3709,10 @@ def classify(event, manifest):
         return False, 'not_permission_request'
     if _for_readonly(event, manifest):
         return True, 'local_read'
+    if _for_loop_body_floor(event, manifest):
+        return False, 'true_floor'
+    if _for_loop_candidate(event) is not None:
+        return False, 'true_floor'
     compound = _compound_approval(event, manifest)
     if compound is not None:
         return compound
@@ -3541,6 +3729,10 @@ def _decide_request(event, manifest):
     """Apply the complete gate recursively; main owns the single final ledger."""
     if _for_readonly(event, manifest):
         return True, 'local_read'
+    if _for_loop_body_floor(event, manifest):
+        return False, 'true_floor'
+    if _for_loop_candidate(event) is not None:
+        return False, 'true_floor'
     compound = _compound_approval(event, manifest, judge=_decide_request)
     if compound is not None:
         return compound
@@ -4022,6 +4214,64 @@ def _decider_decide(event, config):
     return verdict == "allow", status, latency_ms, verdict
 
 
+def _floor_rule_for_record(event, manifest, reason):
+    """Name the first durable floor rule without recording request contents."""
+    if 'true_floor' not in str(reason):
+        return None
+    payload = event.get('tool_input') if isinstance(event, dict) else None
+    if not isinstance(payload, dict):
+        return 'invalid-input'
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).casefold()
+    if _credential_content(payload):
+        return 'credential'
+    if _protected(raw) or 'logs/telegram/personal' in raw:
+        if re.search(r'(?<!\S)(?:-i|--identity-file)(?:=|\s+)[^;&|]*\.ssh(?:/|\s|$)', raw):
+            return 'ssh-identity'
+        return 'protected'
+    command = payload.get('command')
+    if not isinstance(command, str):
+        return 'protected'
+    candidate = command
+    match = re.search(r'compound_refused:segment_(\d+)', str(reason))
+    if match:
+        segments = _split_approval_compound(command)
+        index = int(match.group(1)) - 1
+        if segments is not None and 0 <= index < len(segments):
+            candidate = segments[index][1]
+    try:
+        candidate_words = shlex.split(candidate, posix=True)
+    except ValueError:
+        candidate_words = []
+    if any(_protected(word) for word in candidate_words
+           if '/' in word or word.startswith('~') or '.' in word):
+        return 'protected'
+    if 'substitution_refused' in str(reason) or '$(' in candidate or '`' in candidate:
+        return 'substitution'
+    if '<<' in candidate:
+        return 'heredoc'
+    candidate_split = _split_approval_compound(candidate)
+    if _unsafe_redirect(candidate, manifest, event.get('cwd'), segmented=candidate_split is not None):
+        return 'redirect'
+    try:
+        words = [word if word in {'-C', '-F'} else word.casefold()
+                 for word in shlex.split(candidate, posix=True)]
+    except ValueError:
+        return 'syntax'
+    lowered = _unwrap_words(words)
+    if 'kill' in lowered or 'pkill' in lowered or 'killall' in lowered:
+        return 'kill'
+    if any(word in REMOTE for word in lowered) and any(
+            word in {'-i', '--identity-file'} or word.startswith('--identity-file=') for word in lowered):
+        return 'ssh-identity'
+    if any(word in SERVICE for word in lowered):
+        return 'service'
+    if lowered and lowered[0] in PACKAGE:
+        return 'package'
+    if lowered and lowered[0] in INTERPRETER_WORDS:
+        return 'interpreter'
+    return 'true-floor'
+
+
 def _log_decision(event, allow, reason):
     # Decision ledger (2026-10-09): one JSON line per prompt, so prompts saved and
     # misfires can be measured. It never records tool_input itself (commands and
@@ -4153,6 +4403,10 @@ def main():
         message = 'deferred: ' + note + '; ' + DEFERRED_ACTION
         sys.stdout.write(json.dumps(_deny_output(message), separators=(',', ':')) + '\n')
         _log_decision.extras.update(decision='deny', away_reason=away_reason, morning_queued=queued, queue_id=item_id, hold_status=hold_status, notification_status=notification)
+    if not allow:
+        floor_rule = _floor_rule_for_record(event, manifest, reason)
+        if floor_rule is not None:
+            _log_decision.extras['floor_rule'] = floor_rule
     _log_decision(event, allow, reason)
     return 0
 

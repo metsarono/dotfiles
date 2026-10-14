@@ -166,7 +166,9 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
         self.assertEqual(self.in_process(command, tool_input=payload['tool_input'])[0]['behavior'], 'deny')
 
     def test_compound_cd_must_control_the_following_command(self):
-        self.assertEqual(self.run_hook(f'cd {self.scratch} && echo hi > relative.txt')['behavior'], 'deny')
+        # A proven scratch redirect is inert; the && still proves the cwd for
+        # the following segment. Other separators leave cd fallible.
+        self.assertEqual(self.run_hook(f'cd {self.scratch} && echo hi > relative.txt')['behavior'], 'allow')
         # A fallible cd followed by ; or a newline cannot prove a later relative target.
         for separator in ('; ', '\n', ' || '):
             command = f'cd {self.scratch}' + separator + 'echo hi > relative.txt'
