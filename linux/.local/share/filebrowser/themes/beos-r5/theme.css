@@ -28,11 +28,7 @@
   --iconBackground: #d8d8d8;
   --borderColor: #888888;          /* R5 frame border */
   --divider: #989898;
-  --primaryColor: #000000;         /* R5 accent is black; yellow is reserved
-                                      for the title tab alone */
-  --beos-tab: #ffcb00;              /* active title tab (Tverdov/XFWM agree) */
-  --beos-tab-hi: #f1ff3f;           /* 1px top highlight of the tab */
-  --beos-tab-sh: #af7b00;           /* tab bottom-right shadow */
+  --primaryColor: #000000;         /* R5 accent is black */
   --beos-face: #d8d8d8;
   --beos-light: #f8f8f8;            /* bevel light edge (titleIB) */
   --beos-dark: #888888;             /* bevel dark edge */
@@ -270,9 +266,6 @@ a:hover { color: #000; text-decoration: underline; }
 .material-symbols, .material-symbols-outlined { color: #000 !important; }
 .floating-action-button { border-radius: 0 !important; }
 
-/* Caddy XFWM tab pixels; original size, no invented caption controls. */
-:root { --beos-tab-strip: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAXBAMAAADw2NLqAAAAD1BMVEWYmJjx/z/8ywDY2NiIiIhCZjKoAAAAAXRSTlMge4j4rgAAABpJREFUeJxjYIACRkEogwXGYGIYpAxMF8JFAC9oAHbckAWPAAAAAElFTkSuQmCC"); --beos-tab-end: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAXBAMAAADw2NLqAAAAG1BMVEWYmJjx/z///1BgYGD8ywCvewDY2Nj///+IiIjIMcdrAAAAAXRSTlMge4j4rgAAACRJREFUeJxjYIACRkEILcRiDGHwM8GkBhuDRQlCC8JE3sNEGABtMgHbDY+YIAAAAABJRU5ErkJggg=="); }
-
 /* No title tab inside the app frame: the modal window supplies its own, and a
    second one only wastes vertical space. The header is its plain 64px bar. */
 #layout > header, #app header { padding-top: 0 !important; height: 64px !important; }
@@ -296,14 +289,6 @@ a:hover { color: #000; text-decoration: underline; }
 #app .listing-item .download-icon i { font-size: 24px !important; background: none; }
 #login { background: #d8d8d8 !important; color: #000; }
 #login .login-card { position: relative; overflow: visible; width: min(350px, calc(100vw - 40px)); padding: 24px; }
-#login .login-card::before {
-  content: "FileBrowser"; position: absolute; top: -23px; left: -1px;
-  height: 23px; padding: 3px 24px 4px 8px; box-sizing: border-box;
-  background: var(--beos-tab-end) right top / 16px 23px no-repeat,
-              var(--beos-tab-strip) left top / 16px 23px repeat-x;
-  border-left: 1px solid #989898; color: #000;
-  font: bold 13px/16px Swiss721, sans-serif; pointer-events: none;
-}
 #login .login-icon { width: 64px; height: 64px; object-fit: contain; image-rendering: pixelated; }
 #login .brand-text h3 { color: #000 !important; }
 #login .halloween-background, #login .halloween-decorations { display: none; }
