@@ -5,6 +5,12 @@
 # ~/DotCortex/all/.local/bin/app-apply
 set -euo pipefail
 
+# Theme-only lane: never reinstall the stock binary over a Milkdown build.
+if [ "${1:-}" = "--filebrowser-theme" ]; then
+  shift
+  exec "${FILEBROWSER_THEME_APPLY:-$HOME/.local/bin/filebrowser-theme-apply}" "$@"
+fi
+
 MAN="$HOME/DotCortex/all/.app/manifest/apps.ssv"
 APP_ONLY="${APP_ONLY:-}"
 
