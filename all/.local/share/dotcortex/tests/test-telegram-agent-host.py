@@ -968,6 +968,71 @@ class TelegramAgentHostColdStartTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("refusing credential egress", result.stderr)
 
+    def prepare_deepseek_web_trust(self) -> tuple[Path, Path, str]:
+        self.prepare_deepseek_harness([123])
+        template = self.agents / "templates/deepseek-harness-cordis.patch.yml"
+        canonical = HERE.parents[4] / ".bots/templates/deepseek-harness-cordis.patch.yml"
+        template.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8")
+        profile = self.home / ".local/share/deepseek-harness-telegram/dsh-home/profiles/helmcortex-telegram/cordis.patch.yml"
+        env_file = self.home / ".config/deepseek-harness-telegram/env"
+        env_text = env_file.read_text(encoding="utf-8") + "DSH_RECALL_MCP_URL=http://recall.invalid:3004/mcp\n"
+        return profile, env_file, env_text
+
+    def test_deepseek_harness_sync_renders_private_web_authority(self) -> None:
+        profile, env_file, env_text = self.prepare_deepseek_web_trust()
+        authority = ".".join(("browser", "example", "invalid")) + ":3080"
+        env_file.write_text(env_text + f'export DSH_WEB_TRUSTED_HOST="{authority}"\n', encoding="utf-8")
+        called = self.root / "tailscale-called"
+        self.write_executable("tailscale", f"#!/bin/sh\ntouch {str(called)!r}\nexit 1\n")
+
+        result = self.run_manager("sync", "deepseek-harness", timeout=2)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = profile.read_text(encoding="utf-8")
+        self.assertIn(f"- id: connection\n  config:\n    trustedHosts: ['{authority}']", rendered)
+        self.assertIn("url: http://recall.invalid:3004/mcp", rendered)
+        self.assertNotIn("@DSH_", rendered)
+        self.assertEqual(profile.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(called.exists(), "an explicit authority must bypass tailnet discovery")
+
+    def test_deepseek_harness_sync_derives_web_authority_from_tailnet_suffix(self) -> None:
+        profile, env_file, env_text = self.prepare_deepseek_web_trust()
+        env_file.write_text(env_text + "DSH_WEB_TRUSTED_HOST=\n", encoding="utf-8")
+        suffix = ".".join(("example", "invalid"))
+        self.write_executable("hostname", "#!/bin/sh\n[ \"$1\" = -s ] || exit 1\nprintf '%s\\n' seat\n")
+        for terminal_dot in ("", "."):
+            with self.subTest(terminal_dot=terminal_dot):
+                payload = json.dumps({"Self": {"DNSName": f"different-name.{suffix}{terminal_dot}"}})
+                self.write_executable("tailscale", f"#!/bin/sh\n[ \"$1 $2\" = 'status --json' ] || exit 1\nprintf '%s\\n' '{payload}'\n")
+                result = self.run_manager("sync", "deepseek-harness", timeout=2)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"trustedHosts: ['seat.{suffix}:3080']", profile.read_text(encoding="utf-8"))
+
+    def test_deepseek_harness_sync_preserves_patch_when_web_trust_fails(self) -> None:
+        profile, env_file, env_text = self.prepare_deepseek_web_trust()
+        original = profile.read_bytes()
+        authority = ".".join(("browser", "example", "invalid")) + ":3080"
+        cases = (
+            ("", "exit 1", "cannot resolve the web trusted host"),
+            ("", "printf '%s' not-json", "cannot resolve the web trusted host"),
+            ("", "printf '%s' '{}'", "cannot resolve the web trusted host"),
+            ("", "printf '%s' '{\"Self\":{\"DNSName\":\"\"}}'", "cannot resolve the web trusted host"),
+            (f"https://{authority}", "exit 1", "must be a bare DNS"),
+            (f"{authority}/path", "exit 1", "must be a bare DNS"),
+            (authority.replace(":3080", ":03080"), "exit 1", "must be a bare DNS"),
+            (authority.replace(":3080", ":65536"), "exit 1", "must be a bare DNS"),
+            (authority + "'injected", "exit 1", "must be a bare DNS"),
+        )
+        for value, status_body, message in cases:
+            with self.subTest(value=value, status_body=status_body):
+                env_file.write_text(env_text + f"DSH_WEB_TRUSTED_HOST={value}\n", encoding="utf-8")
+                self.write_executable("tailscale", "#!/bin/sh\n" + status_body + "\n")
+                result = self.run_manager("sync", "deepseek-harness", timeout=2)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(profile.read_bytes(), original)
+                self.assertFalse(list(profile.parent.glob(".cordis.patch.yml.*")))
+
     def test_deepseek_harness_run_as_missing_user_refuses(self) -> None:
         self.agents.joinpath("hosts.conf").write_text(f"{HOST}|deepseek-harness\n", encoding="utf-8")
         run_as = self.home / ".config/deepseek-harness-telegram/run-as"
