@@ -1,0 +1,107 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          hermes-dashboard
+# Required-Start:    $remote_fs $network
+# Required-Stop:     $remote_fs $network
+# Should-Start:      autofs tailscaled
+# Should-Stop:       autofs tailscaled
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Hermes dashboard (loopback :9119)
+### END INIT INFO
+# Source: DotCortex services-hermes-dashboard.org. Install as /etc/init.d/hermes-dashboard.
+# Verbs: start stop restart status watch.  `watch` is the cron health probe.
+set -eu
+
+PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin"
+
+HERMES_DASHBOARD_USER=metsatron
+HERMES_DASHBOARD_PORT=9119
+[ -r /etc/default/hermes-dashboard ] && . /etc/default/hermes-dashboard
+
+RUN_AS="$HERMES_DASHBOARD_USER"
+PORT="$HERMES_DASHBOARD_PORT"
+HOME_DIR="${HERMES_DASHBOARD_HOME:-$(getent passwd "$RUN_AS" | cut -d: -f6)}"
+[ -n "$HOME_DIR" ] || { echo "hermes-dashboard: no home for $RUN_AS" >&2; exit 1; }
+
+WORKDIR="$HOME_DIR/DotCortex"
+HERMES="$HOME_DIR/.local/bin/hermes"
+STATEDIR="$HOME_DIR/.local/state/hermes-dashboard"
+PIDFILE="$STATEDIR/hermes-dashboard.pid"
+LOGFILE="$STATEDIR/hermes-dashboard.log"
+STOPPED="$STATEDIR/stopped"
+LOG_MAX_BYTES=5242880
+
+log() { printf '%s %s\n' "$(date -Iseconds)" "$*" >> "$LOGFILE"; }
+
+ours() { start-stop-daemon --status --quiet --pidfile "$PIDFILE" --user "$RUN_AS"; }
+port_busy() { ss -H -tln "sport = :${PORT}" 2>/dev/null | grep -q .; }
+
+prepare_state() {
+    [ -d "$STATEDIR" ] || install -d -m 700 -o "$RUN_AS" -g "$RUN_AS" "$STATEDIR"
+    if [ -f "$LOGFILE" ] && [ "$(wc -c < "$LOGFILE")" -gt "$LOG_MAX_BYTES" ]; then
+        mv -f "$LOGFILE" "$LOGFILE.1"
+    fi
+}
+
+do_start() {
+    prepare_state
+    rm -f "$STOPPED"
+    if ours; then
+        echo "hermes-dashboard: already running"
+        return 0
+    fi
+    if port_busy; then
+        log "REFUSED start: :${PORT} already answering and not our process"
+        echo "hermes-dashboard: :${PORT} is already in use by another process (stop the terminal copy first)" >&2
+        return 1
+    fi
+    if [ ! -x "$HERMES" ]; then
+        log "SKIP: $HERMES not executable (NFS not mounted yet?)"
+        echo "hermes-dashboard: $HERMES not executable" >&2
+        return 1
+    fi
+    log "START hermes dashboard on 127.0.0.1:${PORT}"
+    # env: HOME and PATH set explicitly so `hermes` resolves, whatever start-stop-daemon passes.
+    start-stop-daemon --start --quiet --background --make-pidfile \
+        --pidfile "$PIDFILE" --chuid "$RUN_AS" --chdir "$WORKDIR" --output "$LOGFILE" \
+        --startas /usr/bin/env -- \
+        HOME="$HOME_DIR" PATH="$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+        "$HERMES" dashboard --no-open
+}
+
+do_stop() {
+    prepare_state
+    : > "$STOPPED"
+    start-stop-daemon --stop --quiet --retry=TERM/30/KILL/5 \
+        --pidfile "$PIDFILE" --user "$RUN_AS" || true
+    rm -f "$PIDFILE"
+    log "STOP"
+}
+
+do_status() {
+    if ours; then
+        echo "hermes-dashboard: running"
+    else
+        echo "hermes-dashboard: not running"
+        return 3
+    fi
+}
+
+# Cron health probe: cheap when healthy, starts the daemon only when nothing serves the port.
+do_watch() {
+    [ -d "$STATEDIR" ] || return 0
+    [ ! -e "$STOPPED" ] || return 0
+    ours && return 0
+    port_busy && return 0
+    do_start || true
+}
+
+case "${1:-}" in
+    start) do_start ;;
+    stop) do_stop ;;
+    restart|force-reload) do_stop; do_start ;;
+    status) do_status ;;
+    watch) do_watch ;;
+    *) echo "Usage: $0 {start|stop|restart|status|watch}" >&2; exit 2 ;;
+esac
