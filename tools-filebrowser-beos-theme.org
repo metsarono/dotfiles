@@ -94,9 +94,9 @@ body, #app {
 /* raised: light top/left, dark bottom/right — from frameAB.xpm (#f8f8f8 ->
    #d8d8d8 -> #888888 -> #606060 reading outward on the bottom edge). */
 
-/* ---------- top header = the yellow tab --------------------------------- */
-/* The app header is BeOS's title bar: full-width grey chrome with the
-   window title sitting in a yellow tab at the TOP-LEFT, per Tracker. */
+/* ---------- top header ---------------------------------------------------- */
+/* The app header is full-width grey chrome. It carries no title tab (the modal
+   window has its own). */
 header {
   background: var(--beos-face) !important;
   background-color: var(--beos-face) !important;
@@ -112,11 +112,8 @@ header .action, header button { color: #000 !important; }
 }
 #search-bar-input { color: #000 !important; background: transparent !important; }
 
-/* The yellow tab itself: the listing header — the row that holds Name/Size/
-   Modified — is Tracker's column header; the yellow R5 tab rides the top of
-   the whole window (built on #main's first child via ::before so no markup
-   change is needed). Meanwhile the listing header strip becomes the
-   grey bevelled Tracker column bar. */
+/* The listing header strip (Name/Size/Modified) becomes the grey bevelled
+   Tracker column bar. */
 .listing-item-header, #main .card.desktop-view {
   background: var(--beos-face) !important;
   border: 1px solid var(--beos-dark) !important;
@@ -305,20 +302,12 @@ a:hover { color: #000; text-decoration: underline; }
 /* Caddy XFWM tab pixels; original size, no invented caption controls. */
 :root { --beos-tab-strip: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAXBAMAAADw2NLqAAAAD1BMVEWYmJjx/z/8ywDY2NiIiIhCZjKoAAAAAXRSTlMge4j4rgAAABpJREFUeJxjYIACRkEogwXGYGIYpAxMF8JFAC9oAHbckAWPAAAAAElFTkSuQmCC"); --beos-tab-end: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAXBAMAAADw2NLqAAAAG1BMVEWYmJjx/z///1BgYGD8ywCvewDY2Nj///+IiIjIMcdrAAAAAXRSTlMge4j4rgAAACRJREFUeJxjYIACRkEILcRiDGHwM8GkBhuDRQlCC8JE3sNEGABtMgHbDY+YIAAAAABJRU5ErkJggg=="); }
 
-/* A tab belongs above the header, outside the action hit targets. */
-#layout > header, #app header { padding-top: 27px !important; height: 91px !important; }
-#app header::before {
-  content: "FileBrowser";
-  position: absolute; top: 0; left: 8px; height: 23px;
-  min-width: 118px; box-sizing: border-box; padding: 3px 22px 4px 8px;
-  background: var(--beos-tab-end) right top / 16px 23px no-repeat,
-              var(--beos-tab-strip) left top / 16px 23px repeat-x;
-  color: #000; font: bold 13px/16px Swiss721, sans-serif;
-  border-left: 1px solid #989898; pointer-events: none;
-}
+/* No title tab inside the app frame: the modal window supplies its own, and a
+   second one only wastes vertical space. The header is its plain 64px bar. */
+#layout > header, #app header { padding-top: 0 !important; height: 64px !important; }
 #app header { overflow: visible !important; }
-#app #sidebar { top: 91px !important; height: calc(100% - 91px) !important; }
-#app #main { padding-top: 91px !important; }
+#app #sidebar { top: 64px !important; height: calc(100% - 64px) !important; }
+#app #main { padding-top: 64px !important; }
 #app #search { background: transparent !important; border-radius: 0 !important; }
 #app #search-bar-input { border: 1px solid #606060 !important; padding: 4px 6px !important; }
 #app .image-preview { background: transparent; border-radius: 0; }
@@ -380,7 +369,6 @@ button, input, textarea, select { font-family: Swiss721, sans-serif; }
 #app .onlyOfficeEditor { background: #d8d8d8; }
 #app .onlyOfficeEditor iframe { border: 0; }
 @media (max-width: 600px) {
-  #app header::before { min-width: 110px; }
   #app #main { padding-left: 8px; padding-right: 8px; }
   #app #sidebar { max-width: calc(100vw - 44px); }
   #app .card { max-width: 100%; box-sizing: border-box; }
@@ -456,6 +444,10 @@ with tempfile.TemporaryDirectory(prefix='fb-beos-transitions-') as tmp:
  run('beos-r5');enabled=yaml.safe_load(config.read_text());receipt=(Path(tmp)/'.beos-r5-theme.json').read_bytes()
  d=copy.deepcopy(enabled);d['frontend']['styling']['customCSS']='old.css';assert d==seed
  css=Path(enabled['frontend']['styling']['customCSS']).read_text();assert len(css.encode())<=128*1024
+ # The app frame has no title tab and reserves no space for one; only the login card keeps its tab.
+ assert '#app header::before' not in css and '91px' not in css and '27px' not in css
+ assert css.count('content: "FileBrowser"')==1 and '#login .login-card::before' in css
+ checks+=1
  fonts=(assets/'fonts.css').read_text()
  for t,w in zip(re.findall(r'data:font/ttf;base64,([A-Za-z0-9+/=]+)',fonts),re.findall(r'data:font/woff;base64,([A-Za-z0-9+/=]+)',css)):
   raw=base64.b64decode(t);packed=base64.b64decode(w);n=struct.unpack_from('>H',packed,12)[0]
