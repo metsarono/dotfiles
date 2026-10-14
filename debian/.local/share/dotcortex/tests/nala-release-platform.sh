@@ -75,6 +75,16 @@ grep -q apt-called "$tmp/install.log"
 grep -q dpkg-called "$tmp/install.log"
 grep -q apt-get-f-called "$tmp/install.log"
 
+# Nala must never apply its configured autoremove during a release install.
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > "$NALA_TEST_ARGV_LOG"' 'exit 1' > "$stubbin/nala"
+chmod +x "$stubbin/nala"
+NALA_INSTALL_PROBE=1 NALA_TEST_APT_BIN=nala NALA_TEST_BUNDLE="$tmp/fake.deb" \
+  NALA_TEST_LOG="$tmp/nala-install.log" NALA_TEST_ARGV_LOG="$tmp/nala-argv.log" \
+  NALA_TEST_STATE="$tmp/nala-install.state" NALA_TEST_REPAIR=1 \
+  NALA_RELEASES_SSV="$ROOT/debian/.nala/manifest/releases.ssv" \
+  HOME="$tmp/home" PATH="$stubbin:$PATH" "$HELPER" >/dev/null
+grep -qx -- '--no-autoremove' "$tmp/nala-argv.log"
+
 printf 'half-installed\t1\n' > "$tmp/install.state"
 if NALA_INSTALL_PROBE=1 NALA_TEST_APT_BIN="$stubbin/fake-apt" NALA_TEST_BUNDLE="$tmp/fake.deb" \
   NALA_TEST_LOG="$tmp/install-fail.log" NALA_TEST_STATE="$tmp/install.state" NALA_TEST_REPAIR=0 \

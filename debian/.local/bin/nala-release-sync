@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Release-backed .deb sync
+# Shared release sync implementation
 
-# [[file:../../../package-nala.org::*Release-backed .deb sync][Release-backed .deb sync:1]]
+# [[file:../../../package-nala.org::*Shared release sync implementation][Shared release sync implementation:1]]
 set -euo pipefail
 
 MAN="${NALA_RELEASES_SSV:-$HOME/.nala/manifest/releases.ssv}"
@@ -119,6 +119,12 @@ write_cache_meta() {
 install_local_deb() {
   local apt_bin="$1" bundle="$2"
   local pkg_name pkg_version installed_status installed_version
+  local install_options=(-y)
+  if [ "$apt_bin" = nala ]; then
+    install_options+=(--no-autoremove)
+  else
+    install_options+=(--no-remove -o APT::Get::AutomaticRemove=false)
+  fi
   if ! pkg_name="$(dpkg-deb --field "$bundle" Package 2>/dev/null)" || [ -z "$pkg_name" ]; then
     echo "  ! cannot extract package name from $(basename "$bundle")" >&2
     return 1
@@ -134,7 +140,7 @@ install_local_deb() {
     [ "$installed_status" = "install ok installed" ] && [ "$installed_version" = "$pkg_version" ]
   }
   echo "  -> installing $(basename "$bundle") with $apt_bin"
-  if ! sudo DEBIAN_FRONTEND=noninteractive "$apt_bin" install -y "$bundle"; then
+  if ! sudo DEBIAN_FRONTEND=noninteractive "$apt_bin" install "${install_options[@]}" "$bundle"; then
     echo "  -> $apt_bin install failed; retrying with dpkg + apt-get -f" >&2
   fi
   # Nala sometimes returns 0 but silently skips — verify the package is installed
@@ -145,7 +151,7 @@ install_local_deb() {
   if ! sudo DEBIAN_FRONTEND=noninteractive dpkg -i "$bundle"; then
     echo "  -> dpkg dependency setup incomplete; running apt-get -f" >&2
   fi
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y --no-remove -o APT::Get::AutomaticRemove=false
   if package_is_exactly_installed; then
     return 0
   fi
@@ -364,4 +370,4 @@ if [ "$failures" -ne 0 ]; then
   echo "nala-release-sync: $failures manifest row(s) failed" >&2
   exit 1
 fi
-# Release-backed .deb sync:1 ends here
+# Shared release sync implementation:1 ends here
