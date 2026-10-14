@@ -1,0 +1,479 @@
+#+TITLE: FileBrowser BeOS R5 CSS
+#+PROPERTY: header-args :mkdirp yes :comments no
+
+* Continuation of Nano's 2026-10-10 prototype
+app.org owns the opt-in apply entry point and rollback. This asset companion
+retains beos-r5-base.css and adds selectors for the current Milkdown build.
+Window strip and endcap PNGs are lossless conversions of the Caddy XFWM XPMs.
+File icons and the login logo are embedded at original resolution. No runtime
+submodule, branding web server, third-party font server or frontend patch.
+The byte-identical font payload lives in tools-filebrowser-beos-font.org.
+
+* Asset provenance
+- =linux/.themes/BeOS-r5-XFWM/xfwm4/title-3-active.xpm= SHA256 =fde7a10a89295c0b740c15c540a69e48e4be1c5298c1676af49d4508e42605cb=
+- =linux/.themes/BeOS-r5-XFWM/xfwm4/title-4-active.xpm= SHA256 =5fb2602b25912b014c648555a3cd3f07f333ef0d2a53ed1eb7aee9c64c5adcfe=
+- =preserved-wip/Be-64.png= SHA256 =02f9f12dfae3624206a7cb2074ab02285912bb0ee5cfffd999f00792b9184142=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/unknown.png= SHA256 =dbebc1250a9ee493b180d801a2c5e6cabf02f4a53f9e960c9c74e239dc08956e=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/txt.png= SHA256 =b6f59117a1f5287e9699a7a0e1a25750bfa44cba4f95c6efbaa82da0a741fb37=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/image-x-generic.png= SHA256 =d5ac9eaa9ba784f8bafd52bd50dbe8f0ff2c45c0088ad91fd5ad2f8fec76b7d3=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/audio-x-generic.png= SHA256 =f105c2782fc1243799c6fd28f3c30124d64fb4d9f4643cc2509753b19621a3fe=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/video-x-generic.png= SHA256 =cce825155a0836cd89e3d5b89384edd13ec59805fa716f1e1cc4af11eacfbd19=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/application-pdf.png= SHA256 =841919ab69ac3644107a7a95cda6fdf1443ca7d8ba3990aa4b56e1d74cc4d072=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/zip.png= SHA256 =aeeecf19d27941e02ad3466f1b5505de811dbbdedbe4e9dbdea46ab61b197aca=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/x-office-document.png= SHA256 =f1b9e58a3f219880cf0f159bf6053d6d97a068ab7da737cbd92cdc8e152dba47=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/x-office-spreadsheet.png= SHA256 =bb13c150337f1f37655cbfbc7145dc59f7aba264ef36381a9bae1dd0224c30cc=
+- =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/x-office-presentation.png= SHA256 =0fd1fa3ae75f6c03607eb2a2714c444fdc515d07e126f7691729da319d5e19e2=
+- =linux/.local/share/icons/BeOS-r5-Icons/places/32/folder.png= SHA256 =4c84ac71471b38f4e16d4991bae9a99911cc957635ea0fd3f261a7ac99c0b349=
+
+* Stylesheet
+#+BEGIN_SRC css :tangle linux/.local/share/filebrowser/themes/beos-r5/theme.css
+/* ==========================================================================
+   BeOS R5 for FileBrowser Quantum v1.5.6 (Kikin)
+   Sources — the authentic R5 corpus, not Bluecurve-BeOS:
+     - linux/.icewm/themes/BeOS-r5 (Tverdov): face #d8d8d8, title #ffcb00
+       with #ffff50 top edge, frame #888888, menus #d8d8d8 / active #b0b0b0,
+       Swis721 BT fonts.
+     - linux/.themes/BeOS-r5-XFWM (Metsatron's recreation): tab geometry —
+       1px #989898 edge, 1px #f1ff3f highlight, #fccb00 body, #af7b00
+       bottom-right shadow, black text, left-aligned, ~23px.
+     - linux/.themes/BeOS-r5-GTK: selected #989898/black, base #ffffff,
+       tooltips #fffcdb; button pixmap = black ring, #606060 frame, #e8e8e8
+       face, white top-left / #989898 bottom-right bevel; pressed inverts.
+       Scrollbar: #989898 trough border, #b8->#d8 gradient, #d8d8d8 thumb
+       with a white top edge; stepper buttons grey with bevel.
+   Fonts ride separately (fonts.css, data-URI inlined); this file stays
+   well under the 128KB cap together with it.
+   ========================================================================== */
+
+/* ---------- palette ---------- */
+:root {
+  --background: #d8d8d8;          /* BeOS window face */
+  --alt-background: #c8c8c8;
+  --surfacePrimary: #d8d8d8;       /* panels: the R5 chrome grey */
+  --surfaceSecondary: #e8e8e8;     /* raised surfaces (button face) */
+  --surfaceTertiary: #c0c0c0;
+  --textPrimary: #000000;          /* R5 chrome is black-on-grey, always */
+  --textSecondary: #505050;
+  --iconBackground: #d8d8d8;
+  --borderColor: #888888;          /* R5 frame border */
+  --divider: #989898;
+  --primaryColor: #000000;         /* R5 accent is black; yellow is reserved
+                                      for the title tab alone */
+  --beos-tab: #ffcb00;              /* active title tab (Tverdov/XFWM agree) */
+  --beos-tab-hi: #f1ff3f;           /* 1px top highlight of the tab */
+  --beos-tab-sh: #af7b00;           /* tab bottom-right shadow */
+  --beos-face: #d8d8d8;
+  --beos-light: #f8f8f8;            /* bevel light edge (titleIB) */
+  --beos-dark: #888888;             /* bevel dark edge */
+  --beos-shadow: #606060;          /* button frame under the black ring */
+  --beos-sel: #989898;              /* selection (GTK selected_bg) */
+  --beos-tooltip: #fffcdb;
+}
+
+/* dark-mode gets the same chrome: BeOS R5 had no dark face. The stock
+   .dark-mode variables are overridden so the theme holds in both modes. */
+.dark-mode {
+  --background: #d8d8d8;
+  --alt-background: #c8c8c8;
+  --surfacePrimary: #d8d8d8;
+  --surfaceSecondary: #e8e8e8;
+  --surfaceTertiary: #c0c0c0;
+  --textPrimary: #000000;
+  --textSecondary: #505050;
+  --iconBackground: #d8d8d8;
+  --divider: #989898;
+}
+
+body, #app {
+  background: var(--beos-face) !important;
+  color: #000;
+  font-family: 'Swiss721', 'Swis721 BT', 'Swiss 721', sans-serif !important;
+}
+
+/* ---------- 3D bevel helpers (the R5 look: flat grey, sculpted edges) ----- */
+/* raised: light top/left, dark bottom/right — from frameAB.xpm (#f8f8f8 ->
+   #d8d8d8 -> #888888 -> #606060 reading outward on the bottom edge). */
+
+/* ---------- top header = the yellow tab --------------------------------- */
+/* The app header is BeOS's title bar: full-width grey chrome with the
+   window title sitting in a yellow tab at the TOP-LEFT, per Tracker. */
+header {
+  background: var(--beos-face) !important;
+  background-color: var(--beos-face) !important;
+  backdrop-filter: none !important;
+  border-bottom: 1px solid var(--beos-dark) !important;
+  color: #000 !important;
+}
+header .action, header button { color: #000 !important; }
+.dark-mode header {
+  background: var(--beos-face) !important;
+  background-color: var(--beos-face) !important;
+  backdrop-filter: none !important;
+}
+#search-bar-input { color: #000 !important; background: transparent !important; }
+
+/* The yellow tab itself: the listing header — the row that holds Name/Size/
+   Modified — is Tracker's column header; the yellow R5 tab rides the top of
+   the whole window (built on #main's first child via ::before so no markup
+   change is needed). Meanwhile the listing header strip becomes the
+   grey bevelled Tracker column bar. */
+.listing-item-header, #main .card.desktop-view {
+  background: var(--beos-face) !important;
+  border: 1px solid var(--beos-dark) !important;
+  border-radius: 0 !important;
+  box-shadow: inset 1px 1px 0 var(--beos-light), inset -1px -1px 0 #a8a8a8 !important;
+}
+.listing-item-header p { color: #000 !important; }
+.listing-item-header p.active span { color: #000 !important; font-weight: 700; }
+
+/* ---------- sidebar: bevelled grey panel -------------------------------- */
+#sidebar {
+  background: var(--beos-face) !important;
+  backdrop-filter: none !important;
+  border-right: 1px solid var(--beos-dark);
+  box-shadow: inset 1px 1px 0 var(--beos-light), inset -1px -1px 0 #a8a8a8;
+}
+#sidebar .card { background: transparent; }
+.sidebar-link-button {
+  border-radius: 0 !important;
+  color: #000 !important;
+}
+.sidebar-link-button:hover, .sidebar-link-button.active {
+  background: var(--beos-sel) !important;
+  color: #000 !important;
+}
+.sidebar-divider-text { color: #505050 !important; }
+
+/* ---------- cards / prompts / dialogs: 3D bevelled grey panels ---------- */
+.card {
+  background: var(--beos-face) !important;
+  border: 1px solid #000 !important;
+  border-radius: 0 !important;
+  box-shadow:
+    inset 1px 1px 0 var(--beos-light),
+    inset -1px -1px 0 var(--beos-dark),
+    2px 2px 0 rgba(0,0,0,.35) !important;
+  color: #000 !important;
+}
+.card .card-title, .prompt h3, .card-title { color: #000 !important; }
+
+/* ---------- buttons: the R5 pixmap as CSS bevels ------------------------- */
+/* button.png reading: 0,0 black ring; #606060 frame; #e8e8e8 shoulders;
+   white top-left; #989898 bottom-right; face #d8d8d8. */
+button, .button {
+  background: var(--beos-face) !important;
+  color: #000 !important;
+  border: 1px solid #000 !important;
+  border-radius: 0 !important;
+  box-shadow:
+    inset 1px 1px 0 #ffffff,
+    inset 2px 2px 0 #e8e8e8,
+    inset -1px -1px 0 #989898,
+    inset -2px -2px 0 #888888 !important;
+  text-shadow: none !important;
+}
+button:hover, .button:hover { background: #e0e0e0 !important; }
+button:active, .button:active {
+  background: #a8a8a8 !important;
+  box-shadow:
+    inset 1px 1px 0 #888888,
+    inset 2px 2px 0 #989898,
+    inset -1px -1px 0 #e8e8e8,
+    inset -2px -2px 0 #ffffff !important;
+}
+button.button--red { background: var(--beos-face) !important; color: #8b1414 !important; }
+button.button--blue, button.button--grey { background: var(--beos-face) !important; color: #000 !important; }
+
+/* ---------- inputs: white base, black ring (GTK entry) ------------------ */
+.input, input[type="text"], input[type="password"], input[type="search"],
+textarea, select.input {
+  background: #ffffff !important;
+  color: #000 !important;
+  border: 1px solid #000 !important;
+  border-radius: 0 !important;
+  box-shadow: inset 1px 1px 0 #b0b0b0 !important;
+}
+.input:focus, input:focus, textarea:focus, select:focus {
+  outline: 1px solid #000 !important;
+  outline-offset: 0;
+}
+
+/* ---------- listing: Tracker look — flat rows, grey selection ------------- */
+#listingView { background: #ffffff; }
+#listingView .header { color: #000; border-bottom: 1px solid #989898; }
+#listingView .header span { color: #000 !important; }
+.listing-item {
+  border-radius: 0 !important;
+  color: #000 !important;
+}
+.listing-item:hover {
+  background: #e4e4e4 !important;
+}
+.listing-item.activebutton, .listing-item[aria-selected="true"],
+.listing-item.selected, .item.selected,
+.listing-item[data-selected="true"], .item[data-selected="true"] {
+  background: var(--beos-sel) !important;
+  color: #000 !important;
+}
+.listing-item .name, .item .name { color: #000 !important; }
+.listing-item .modified, .item .modified,
+.listing-item .size, .item .size { color: #505050 !important; }
+#listingView.list .listing-item { border-bottom: 1px solid #e0e0e0; }
+
+/* ---------- context menus / dropdowns ----------------------------------- */
+#context-menu, .dropdown, .prompt {
+  background: var(--beos-face) !important;
+  border: 1px solid #000 !important;
+  border-radius: 0 !important;
+  box-shadow: inset 1px 1px 0 var(--beos-light), inset -1px -1px 0 var(--beos-dark),
+              2px 2px 0 rgba(0,0,0,.35) !important;
+}
+.dropdown-item:hover, #context-menu button:hover, #context-menu li:hover {
+  background: var(--beos-sel) !important;
+  color: #000 !important;
+}
+
+/* ---------- tooltips (GTK tooltip_bg #fffcdb) ---------------------------- */
+#tooltip, .tooltip, [role="tooltip"] {
+  background: var(--beos-tooltip) !important;
+  color: #000 !important;
+  border: 1px solid #888 !important;
+  border-radius: 0 !important;
+}
+
+/* ---------- BeOS scrollbars ---------------------------------------------- */
+/* From the GTK theme pixmaps: trough = #989898 border, #b8..#d8 gradient
+   body; thumb = #d8d8d8 with a white top edge, #888 right edge; steppers
+   grey with matching bevel. Drawn with solid bands (R5 scrollbars were
+   hard-edged, not glossy). */
+,* { scrollbar-width: auto; scrollbar-color: #d8d8d8 #c8c8c8; }
+::-webkit-scrollbar { width: 17px; height: 17px; }
+::-webkit-scrollbar-track {
+  background: #b8b8b8;
+  border-left: 1px solid #989898;
+}
+::-webkit-scrollbar-thumb {
+  background: #d8d8d8;
+  border-top: 1px solid #ffffff;
+  border-left: 1px solid #e8e8e8;
+  border-right: 1px solid #888888;
+  border-bottom: 1px solid #888888;
+  min-height: 24px;
+}
+::-webkit-scrollbar-thumb:hover { background: #e0e0e0; }
+::-webkit-scrollbar-corner { background: #b8b8b8; }
+::-webkit-scrollbar-button:single-button {
+  background: #d8d8d8;
+  border: 1px solid #888888;
+  border-top-color: #ffffff;
+  border-left-color: #e8e8e8;
+  height: 17px; width: 17px;
+}
+::-webkit-scrollbar-button:single-button:vertical:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='5'%3E%3Cpath d='M4.5 0 L9 5 L0 5 Z' fill='black'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+::-webkit-scrollbar-button:single-button:vertical:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='5'%3E%3Cpath d='M4.5 5 L0 0 L9 0 Z' fill='black'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+::-webkit-scrollbar-button:single-button:horizontal:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='5' height='9'%3E%3Cpath d='M0 4.5 L5 0 L5 9 Z' fill='black'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+::-webkit-scrollbar-button:single-button:horizontal:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='5' height='9'%3E%3Cpath d='M5 4.5 L0 0 L0 9 Z' fill='black'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+/* ---------- misc chrome --------------------------------------------------- */
+#search-bar-input, #search input {
+  background: #ffffff !important;
+  color: #000 !important;
+}
+#status-bar { background: var(--beos-face) !important; border-top: 1px solid var(--beos-light); color: #000 !important; }
+.message, .banner { border-radius: 0 !important; }
+a { color: #000; }
+a:hover { color: #000; text-decoration: underline; }
+.material-symbols, .material-symbols-outlined { color: #000 !important; }
+.floating-action-button { border-radius: 0 !important; }
+
+/* Caddy XFWM tab pixels; original size, no invented caption controls. */
+:root { --beos-tab-strip: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAXBAMAAADw2NLqAAAAD1BMVEWYmJjx/z/8ywDY2NiIiIhCZjKoAAAAAXRSTlMge4j4rgAAABpJREFUeJxjYIACRkEogwXGYGIYpAxMF8JFAC9oAHbckAWPAAAAAElFTkSuQmCC"); --beos-tab-end: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAXBAMAAADw2NLqAAAAG1BMVEWYmJjx/z///1BgYGD8ywCvewDY2Nj///+IiIjIMcdrAAAAAXRSTlMge4j4rgAAACRJREFUeJxjYIACRkEILcRiDGHwM8GkBhuDRQlCC8JE3sNEGABtMgHbDY+YIAAAAABJRU5ErkJggg=="); }
+
+/* A tab belongs above the header, outside the action hit targets. */
+#layout > header, #app header { padding-top: 27px !important; height: 91px !important; }
+#app header::before {
+  content: "FileBrowser";
+  position: absolute; top: 0; left: 8px; height: 23px;
+  min-width: 118px; box-sizing: border-box; padding: 3px 22px 4px 8px;
+  background: var(--beos-tab-end) right top / 16px 23px no-repeat,
+              var(--beos-tab-strip) left top / 16px 23px repeat-x;
+  color: #000; font: bold 13px/16px Swiss721, sans-serif;
+  border-left: 1px solid #989898; pointer-events: none;
+}
+#app header { overflow: visible !important; }
+#app #sidebar { top: 91px !important; height: calc(100% - 91px) !important; }
+#app #main { padding-top: 91px !important; }
+#app #search { background: transparent !important; border-radius: 0 !important; }
+#app #search-bar-input { border: 1px solid #606060 !important; padding: 4px 6px !important; }
+#app .image-preview { background: transparent; border-radius: 0; }
+#app .listing-item { box-shadow: none; border-bottom: 1px solid #e0e0e0; }
+#app .listing-item.activebutton { box-shadow: inset 0 0 0 1px #606060; }
+#app .listing-item.activebutton .size, #app .listing-item.activebutton .modified { color: #202020 !important; }
+#app .listing-item .name { text-align: left; }
+#app .listing-item .name span { overflow: hidden; text-overflow: ellipsis; }
+#app .listing-item .image-preview i:not(.overlay-icon) {
+  font-size: 0 !important; width: 32px; height: 32px; padding: 0;
+  background: var(--beos-file-icon) center / 32px 32px no-repeat;
+  image-rendering: pixelated;
+}
+/* Only fallback glyphs change. Actual thumbnails and quick-download controls survive. */
+#app .listing-item .download-icon i { font-size: 24px !important; background: none; }
+#login { background: #d8d8d8 !important; color: #000; }
+#login .login-card { position: relative; overflow: visible; width: min(350px, calc(100vw - 40px)); padding: 24px; }
+#login .login-card::before {
+  content: "FileBrowser"; position: absolute; top: -23px; left: -1px;
+  height: 23px; padding: 3px 24px 4px 8px; box-sizing: border-box;
+  background: var(--beos-tab-end) right top / 16px 23px no-repeat,
+              var(--beos-tab-strip) left top / 16px 23px repeat-x;
+  border-left: 1px solid #989898; color: #000;
+  font: bold 13px/16px Swiss721, sans-serif; pointer-events: none;
+}
+#login .login-icon { width: 64px; height: 64px; object-fit: contain; image-rendering: pixelated; }
+#login .brand-text h3 { color: #000 !important; }
+#login .halloween-background, #login .halloween-decorations { display: none; }
+#login .tombstone { transform: none; animation: none; }
+:focus-visible { outline: 2px solid #000 !important; outline-offset: 2px; }
+button:disabled, .button:disabled { opacity: .55; cursor: default; }
+button, input, textarea, select { font-family: Swiss721, sans-serif; }
+#app button .material-symbols, #app button .material-symbols-outlined { font-family: "Material Symbols Outlined" !important; }
+#app .settings .card, #app .settings, #app .settings input { max-width: 100%; }
+#app .toggle-switch { color: #000; }
+#app input[type="checkbox"], #app input[type="radio"], #app input[type="range"] { accent-color: #606060; }
+#markdown-editor-container { color: #000; background: #d8d8d8; min-width: 0; }
+#markdown-editor-container .md-editor-toolbar { background: #d8d8d8; border-bottom: 1px solid #888; gap: 6px; }
+#markdown-editor-container .md-editor-filename { color: #000; min-width: 0; }
+#markdown-editor-container .md-editor-dirty { color: #8b1414; }
+#markdown-editor-container .md-editor-surface-wrap { background: #c8c8c8; }
+#markdown-editor-container .milkdown {
+  --crepe-color-background: #fff; --crepe-color-on-background: #000;
+  --crepe-color-surface: #d8d8d8; --crepe-color-on-surface: #000;
+  --crepe-color-primary: #343434; --crepe-color-on-primary: #fff;
+  --crepe-color-secondary: #e8e8e8; --crepe-color-on-secondary: #000;
+  --crepe-color-outline: #888; --crepe-color-hover: #c8c8c8;
+  --crepe-color-selected: #b0b0b0;
+  --crepe-font-default: Swiss721, sans-serif;
+  --crepe-font-title: Swiss721, sans-serif;
+  color: #000; background: #fff; border: 1px solid #888; border-radius: 0;
+}
+#markdown-editor-container .milkdown .ProseMirror { color: #000; background: #fff; overflow-wrap: anywhere; }
+#markdown-editor-container .milkdown .ProseMirror a { color: #153c79; text-decoration: underline; }
+#markdown-editor-container .milkdown pre { color: #000; background: #f0f0f0; overflow: auto; }
+#markdown-editor-container .milkdown .milkdown-toolbar,
+#markdown-editor-container .milkdown .milkdown-slash-menu { border: 1px solid #888; border-radius: 0; }
+/* The Office document runs in its own origin. Theme only its FileBrowser chrome. */
+#app .onlyOfficeEditor { background: #d8d8d8; }
+#app .onlyOfficeEditor iframe { border: 0; }
+@media (max-width: 600px) {
+  #app header::before { min-width: 110px; }
+  #app #main { padding-left: 8px; padding-right: 8px; }
+  #app #sidebar { max-width: calc(100vw - 44px); }
+  #app .card { max-width: 100%; box-sizing: border-box; }
+  #app .listing-item .text { min-width: 0; }
+  #login .login-card { padding: 20px; }
+  #login .input, #login input[type="submit"] { min-height: 44px; font-size: 16px; }
+  #markdown-editor-container .md-editor-toolbar { flex-wrap: wrap; padding: 8px; }
+  #markdown-editor-container .md-editor-filename { flex-basis: calc(100% - 24px); }
+  #markdown-editor-container .md-editor-spacer { display: none; }
+  #markdown-editor-container .md-editor-btn { min-height: 44px; padding: 6px 9px; }
+  #markdown-editor-container .milkdown .ProseMirror { padding: 20px 16px 64px !important; }
+  #app .settings .input, #app .settings select { min-width: 0; width: 100%; }
+}
+#login img { content: var(--beos-login-logo) !important; }
+.listing-item { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABGdBTUEAALGPC/xhBQAAAAZiS0dEAM4AywD/H5576QAAAAlwSFlzAAALEgAACxIB0t1+/AAAAAd0SU1FB9IMHQonK49PuzQAAAFRSURBVHic7ZbNbYQwEIXflmF3wSo5bAuAtglCGatoRRcb0kQU0kIORKaLUMbkNJYBsxnztxeehAYZife9sfwD7NoVKKUUKaXoYeamJjI10VIghxDz6uN3MJ6cNQCgbVvxv4LFyYlotK42NRJzty4K4pqHajZIaHJfnQwyJ/nsjqxhLgZZ25you2oWn3Npfbh5lpf2sXv7VuYugO1Alpf249rJy5ux74BzFmR5SV+fFwvl2/enKjlrxGmB0/MRAHB5TQAAcVp0DyOGiNMCDDMFJHoCmp+huWvMGpxgLgSADohpGhyjSFSzPILWuhOG//n+9nIYBXAhimuF79p0QIprJeoCpx0zvgvQhwAQBNJvtc/4XwAXgtvvA3Hnk8clxiKAPgSAuyCh5mLxPsH3QVOTXc+8pr0bjEBiSrcTfA/stx9YOLkPYixpaPJZEJsY7dpKf35HU+zLZ2jdAAAAAElFTkSuQmCC"); }
+.listing-item[data-type^="text"], .listing-item[data-name$=".md" i] { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABGdBTUEAALGPC/xhBQAAAAZiS0dEAM4AywD/H5576QAAAAlwSFlzAAALEgAACxIB0t1+/AAAAAd0SU1FB9IMHQooEc7bfkkAAAGESURBVHic7ZTrbYMwFEa/SF3ieoySNcgWNWNYbBHoFngMh4zhjkF/ED8w5mFCiCr1kyyMwDrnXoOBvxYiAhG9D/42kSnYISJB5R0RdYeJhHCTQ0Sm4C7qdSLTcBW97iqyXPlUduhIauW7diSlcqWuT3dkc+WcZ091ZDe464J6zJdlRh3x92QJfr1ye9/Pt3ZEjbclpfJ+vrUjs3AVHQ4ynLuODOf+O+Egoo7zzA57tk8tWCMyNR8O9yFauAnnWbe3SKzyflu4lQCAky8hpbZSWovw1x2lKL5RVV8AgKq6oyg+o+8xVqJpBM7n++NeAgDynDkBX0KIHGUpN4nMwX2wySlc4EsA8ETyRZExXKJpBC6XcgCu69ZyRwK+RNMItO09EGGxJRG4284YeFYglAAQEfmZgdMieFHAl9A6x+32uUqEMVoFNvmYe1jX7YnzrGNMQtuO9iJCGKATSYUDCx0w8Tvhx/+qpdTJ8NUCoUTsdzJJgSfHnJijo/Tx7GXgt4D+c1R+AfDhKMMe1scJAAAAAElFTkSuQmCC"); }
+.listing-item[data-type^="image"] { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABGdBTUEAALGPC/xhBQAAAAZiS0dEAP8A/wD/oL2nkwAAAAlwSFlzAAALEgAACxIB0t1+/AAAAAd0SU1FB9IMHgwFFmatYlkAAAHpSURBVHic7ZbNccMgEEY/zaQBH/HRLZA2aAPaoA1tG2pDKsE5RkeXsDnYi1aAbcjPZCaTvaCREO+xu8IG/uM/OsMYw8YY/jX4PDPPM/N3iQw98Gl6L+47dwQArOvavFZ3yM6Z+e74Y6VpgevxW0U0vDe+LNK789r4aZGv7Lw3I0XnSrdbu91bhus0y/v3l0CFvB19eiefDwDH4/6r2Qm0whOYwn51P5YigdI1ACwLYO1VZF3XIQlouEwSOGZWMFuHAzgAuGgR7/frZfCUgRqcQoAlSguBynQXcJUBUIBlThnQcOdimvYijZGbSrwBONXgGuY9LqTK4kfAj2kdDddBFK459n7kabpa6UzgVbWIlzpuDaJ3lsawZS1Pu3MR1lrE6CQLWw9oCRHpicPhDZfLqfrMuQ0OADG62/2IlxscRGEQCedi+pFpFRF4LqLhGlyEv9XU+5GNMez9yHItB9M4zs3j+Xxm4LRbQ9bUzCGXIAqpHDFOWG6dJOWJcWrKiOxW75goSM+lZ8VJWJMA0CWSpzoHkzpDqn8icolpek8CuUheT+mhZ+CHAvcktEBNJIc/Aj8VeCQhAjrVGi7rPgI3CdyTkE+0+jl1wJsEahJ3asy98GaBXKL2OUn0wLtDHVYFvCbzoxJ/Jj4AZEO1hHhWnrMAAAAASUVORK5CYII="); }
+.listing-item[data-type^="audio"] { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADAFBMVEUAAAD/AAAA/wD//wAAAP//AP8A///////b29u2traSkpJtbW1JSUkkJCTbAAC2AACSAABtAABJAAAkAAAA2wAAtgAAkgAAbQAASQAAJADb2wC2tgCSkgBtbQBJSQAkJAAAANsAALYAAJIAAG0AAEkAACTbANu2ALaSAJJtAG1JAEkkACQA29sAtrYAkpIAbW0ASUkAJCT/29vbtra2kpKSbW1tSUlJJCT/trbbkpK2bW2SSUltJCT/kpLbbW22SUmSJCT/bW3bSUm2JCT/SUnbJCT/JCTb/9u227aStpJtkm1JbUkkSSS2/7aS25Jttm1JkkkkbSSS/5Jt221JtkkkkiRt/21J20kktiRJ/0kk2yQk/yTb2/+2ttuSkrZtbZJJSW0kJEm2tv+SktttbbZJSZIkJG2Skv9tbdtJSbYkJJJtbf9JSdskJLZJSf8kJNskJP///9vb27a2tpKSkm1tbUlJSST//7bb25K2tm2SkkltbST//5Lb2222tkmSkiT//23b20m2tiT//0nb2yT//yT/2//bttu2kraSbZJtSW1JJEn/tv/bktu2bbaSSZJtJG3/kv/bbdu2SbaSJJL/bf/bSdu2JLb/Sf/bJNv/JP/b//+229uStrZtkpJJbW0kSUm2//+S29tttrZJkpIkbW2S//9t29tJtrYkkpJt//9J29sktrZJ//8k29sk////27bbtpK2km2SbUltSSRJJAD/tpLbkm22bUmSSSRtJAD/ttvbkra2bZKSSW1tJElJACT/krbbbZK2SW2SJEltACTbtv+2ktuSbbZtSZJJJG0kAEm2kv+SbdttSbZJJJIkAG222/+SttttkrZJbZIkSW0AJEmStv9tkttJbbYkSZIAJG22/9uS27ZttpJJkm0kbUkASSSS/7Zt25JJtm0kkkkAbSTb/7a225KStm1tkklJbSQkSQC2/5KS221ttklJkiQkbQD/tgDbkgC2bQCSSQD/ALbbAJK2AG2SAEkAtv8AktsAbbYASZIAAAAAAADPKgIEAAABjklEQVRYw+1WO5KFIBBsLAKOZPACjkVg0IGBxyIw4EgEVrnBE8R9ip9Fd4OdKgO1tJuZnp4R2AiSIwoFSbH1TuY+NI35MXjXdgAwAlglUeGBIBlI/A4BrfUmiUcI1K96k8QjBHIk5BPgSqq1xyMAUR39gZIKrnenwU1j4Ae/uKy1x0ugpIofaK2LZ6faA/fDrGKSoa9zPX8qRObd6Aega7k4vbUWWmvUr/oD+Khxud6F/wmZAwc8yHcWXG9RvzSs5WXgI1Y8AkAAB9TE+A3uegvARvASVl0tTx0UGsB9TH8gkbrbDSIMilfxPq17IFQy5LpI0pTrpG8VAEZSaT9f1YJcthEn21ymnGSiiy6WIO2EEhkQ8xJCmGbOwFKUvNWIxEQEXctEdEtRhhKUiKwRTZMr1tf1LhHkTOJs7VMjqnJbTCBAcnUQmcbANAZd212y4d1x7AcPJRVIfpx6Tf1XzGl3Hwgkjo7eohlISXwvQYkWPLWSlQK8lIE7STy2lP4T+LME5J5l3h3ZWfBAAsQX6SfWhOl0MOcAAAAASUVORK5CYII="); }
+.listing-item[data-type^="video"] { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADAFBMVEUAAAD/AAAA/wD//wAAAP//AP8A///////b29u2traSkpJtbW1JSUkkJCTbAAC2AACSAABtAABJAAAkAAAA2wAAtgAAkgAAbQAASQAAJADb2wC2tgCSkgBtbQBJSQAkJAAAANsAALYAAJIAAG0AAEkAACTbANu2ALaSAJJtAG1JAEkkACQA29sAtrYAkpIAbW0ASUkAJCT/29vbtra2kpKSbW1tSUlJJCT/trbbkpK2bW2SSUltJCT/kpLbbW22SUmSJCT/bW3bSUm2JCT/SUnbJCT/JCTb/9u227aStpJtkm1JbUkkSSS2/7aS25Jttm1JkkkkbSSS/5Jt221JtkkkkiRt/21J20kktiRJ/0kk2yQk/yTb2/+2ttuSkrZtbZJJSW0kJEm2tv+SktttbbZJSZIkJG2Skv9tbdtJSbYkJJJtbf9JSdskJLZJSf8kJNskJP///9vb27a2tpKSkm1tbUlJSST//7bb25K2tm2SkkltbST//5Lb2222tkmSkiT//23b20m2tiT//0nb2yT//yT/2//bttu2kraSbZJtSW1JJEn/tv/bktu2bbaSSZJtJG3/kv/bbdu2SbaSJJL/bf/bSdu2JLb/Sf/bJNv/JP/b//+229uStrZtkpJJbW0kSUm2//+S29tttrZJkpIkbW2S//9t29tJtrYkkpJt//9J29sktrZJ//8k29sk////27bbtpK2km2SbUltSSRJJAD/tpLbkm22bUmSSSRtJAD/ttvbkra2bZKSSW1tJElJACT/krbbbZK2SW2SJEltACTbtv+2ktuSbbZtSZJJJG0kAEm2kv+SbdttSbZJJJIkAG222/+SttttkrZJbZIkSW0AJEmStv9tkttJbbYkSZIAJG22/9uS27ZttpJJkm0kbUkASSSS/7Zt25JJtm0kkkkAbSTb/7a225KStm1tkklJbSQkSQC2/5KS221ttklJkiQkbQD/tgDbkgC2bQCSSQD/ALbbAJK2AG2SAEkAtv8AktsAbbYASZIAAAAAAADPKgIEAAABXElEQVRYw+2WPY7DIBCFHxGFj0ThgmNRuJhiixzrFSl8JApLs4WNZTuGkGTjbOGRkNDwM5+fhwGDjImI4o9MRExuzJYWhi68Hfz6cwUABbALccEBJiIJ4jsA3vssxCEArnVZiEMAShD2iOCNbfbcCsB8XIHQBcQhrhrJ439Bzk6AyydK76YKFs1u67+ImART2qBUpvtbv0q02nKpcYgKQOMQV42kAlCSSlInQI1D1Al6npf6ccDKv7ffnQLpvPa3vlri0AU0toH3HiQnZRr0NwLgw73s5sIwANR7fzdxT9LQhTkASYzrxuCu9SDlqRwwCWQPIFfhJvBZAWAMnhR46Ri6HYAEtYQjOQMsIcbgdWZefQmJSDbTl/4E7Fq3OiWT39jM4+Hpmy7lwjJQzVG0OVVERGtzYRt42f9qKXatewhja7/qXZDzNjwBToB/C1CsA7XvgnfMFMb0AAHML82Y5xr3vpFzAAAAAElFTkSuQmCC"); }
+.listing-item[data-name$=".pdf" i] { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADAFBMVEUAAAD/AAAA/wD//wAAAP//AP8A///////b29u2traSkpJtbW1JSUkkJCTbAAC2AACSAABtAABJAAAkAAAA2wAAtgAAkgAAbQAASQAAJADb2wC2tgCSkgBtbQBJSQAkJAAAANsAALYAAJIAAG0AAEkAACTbANu2ALaSAJJtAG1JAEkkACQA29sAtrYAkpIAbW0ASUkAJCT/29vbtra2kpKSbW1tSUlJJCT/trbbkpK2bW2SSUltJCT/kpLbbW22SUmSJCT/bW3bSUm2JCT/SUnbJCT/JCTb/9u227aStpJtkm1JbUkkSSS2/7aS25Jttm1JkkkkbSSS/5Jt221JtkkkkiRt/21J20kktiRJ/0kk2yQk/yTb2/+2ttuSkrZtbZJJSW0kJEm2tv+SktttbbZJSZIkJG2Skv9tbdtJSbYkJJJtbf9JSdskJLZJSf8kJNskJP///9vb27a2tpKSkm1tbUlJSST//7bb25K2tm2SkkltbST//5Lb2222tkmSkiT//23b20m2tiT//0nb2yT//yT/2//bttu2kraSbZJtSW1JJEn/tv/bktu2bbaSSZJtJG3/kv/bbdu2SbaSJJL/bf/bSdu2JLb/Sf/bJNv/JP/b//+229uStrZtkpJJbW0kSUm2//+S29tttrZJkpIkbW2S//9t29tJtrYkkpJt//9J29sktrZJ//8k29sk////27bbtpK2km2SbUltSSRJJAD/tpLbkm22bUmSSSRtJAD/ttvbkra2bZKSSW1tJElJACT/krbbbZK2SW2SJEltACTbtv+2ktuSbbZtSZJJJG0kAEm2kv+SbdttSbZJJJIkAG222/+SttttkrZJbZIkSW0AJEmStv9tkttJbbYkSZIAJG22/9uS27ZttpJJkm0kbUkASSSS/7Zt25JJtm0kkkkAbSTb/7a225KStm1tkklJbSQkSQC2/5KS221ttklJkiQkbQD/tgDbkgC2bQCSSQD/ALbbAJK2AG2SAEkAtv8AktsAbbYASZIAAAAAAADPKgIEAAABBklEQVRYw+2WwXGDMBBF3zpwYjJpwq4DdcEhxbB0A11AH24iOXEgbA62MwRjmLEl7AP/tlqN/pO0q5EwkKoaHqWqcitndrKKxok8z72YF0UBYIDMzdsRUKp6gXgOgHNuESIoQJqmixBBASYgvgGyLPvLRyHNkyQhjmPatrWu6wDega+qqj7KsgRAfLbeUgc1TYNzDkD+teHn6Xge0uHOFr66gv2Z7CgyGw/HHtFkER5FrozGsQ/zmwB7s1mDIUywE5gD8rX7yRoYL74UewE48CJSVQupuq7t8iSbGWYW/im+qwg3gBX09myAn60GNoANYAN4GYBo6uu8psbfG1vFVGTX970B/ALD4cDu1MZbsQAAAABJRU5ErkJggg=="); }
+.listing-item[data-name$=".zip" i], .listing-item[data-name$=".gz" i], .listing-item[data-name$=".tar" i], .listing-item[data-name$=".7z" i] { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABGdBTUEAALGPC/xhBQAAAAZiS0dEAP8A3QDDtBtJmgAAAAlwSFlzAAALEgAACxIB0t1+/AAAAAd0SU1FB9MBARUyDCOJ8zUAAAMgSURBVHic7ZdPSJNhHMc/2mYomEIQPS8EBl7aFubxDSGvCe4y9KqQHmXHyMNcHuw8PbrCXRUvi7SLoBGMoJKBE4xAg9jboSRlKU2xDu+et2fb827v9FCHfjD2Pn+/n9/v+f2evYP/9pet6SKLhRC/KrqiQFZp9wAJ3VrLspoAfBcBAMinLTJbLeR2fcTmO6rEpscPCN48xQwVnT4jLJznCwMAmKEiZqjI2OBRw2sbBhBC3MMObZmpXuXTFkZYON9gR0IH6BlAEdaeaT5tkXzeRmarRTtmhMX5AUri6wDT0VGC3V0ARCbizpwHTzoxQ0WePvpetd4IC6bHD7R71wWQ4lLY7A1o561mWlnNtBKb7yCftsrGKtueAYQQI8DC8lzcVdhNRLZridcEKHleV1xNMrXclNJsHECG3ZPnrxdtkL7hmvMoXVKWZW3UBFATLjIRp97ZAySXVgA7QceGBsrGMpvb5D7uEUssJEr7Ry3LmtUCqJ4DcqFWVM5JLq0QSyxoxQHM3gBmb4Bgd5cDIoRAQji/BW5hz2xuE5mIO6FWRaWppSlF3UzuB0Qty5ptqiUuzegbLgPQQajmFg0H4tULIpMpgH6fWudu5Mtz8bIkm46OOuKVYNJDV4D9HP6f+7LV46N0r9ciNnsDjpB65mBHR/W4ZtXs53j77n1Zlw9ILM+MwOEu+K9A61XX9ZUJJ8VjiYWqnPAiLgFsOz2yPyeHWhC3bB8bGmBsaEAtNwfGKd8K8a29r/IxW30RaUDqlRpoyw2AfHqqSnwylQG7CjaanAqYGcEMdVXv7GvDGHhYN7N1lkw9Izb/kvTUoE58FqC5dDX2RyZTGOHHZLb2qiMCBI3LcPzNu/p+jjuG32nqxAGaASQEEHUDMW9dh+MvdrLWA9GcuU4clCQsQWwIIbJAT2QylQBYnhkp37xOsuqy3U0c4FJlR6FQ+FQoFN60t7evA5uLa9n7AHdvd3HjWuefiWcncFqAkx9wdgb+Nq3na9nPruLg4X9B5buga7KC57A3BOAV5DziDQHUAgHY2fkAOOftSfxcAG4gimnffP5Z+w1LXuIn6m63kwAAAABJRU5ErkJggg=="); }
+.listing-item[data-name$=".docx" i], .listing-item[data-name$=".odt" i], .listing-item[data-name$=".doc" i] { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADAFBMVEUAAAD/AAAA/wD//wAAAP//AP8A///////b29u2traSkpJtbW1JSUkkJCTbAAC2AACSAABtAABJAAAkAAAA2wAAtgAAkgAAbQAASQAAJADb2wC2tgCSkgBtbQBJSQAkJAAAANsAALYAAJIAAG0AAEkAACTbANu2ALaSAJJtAG1JAEkkACQA29sAtrYAkpIAbW0ASUkAJCT/29vbtra2kpKSbW1tSUlJJCT/trbbkpK2bW2SSUltJCT/kpLbbW22SUmSJCT/bW3bSUm2JCT/SUnbJCT/JCTb/9u227aStpJtkm1JbUkkSSS2/7aS25Jttm1JkkkkbSSS/5Jt221JtkkkkiRt/21J20kktiRJ/0kk2yQk/yTb2/+2ttuSkrZtbZJJSW0kJEm2tv+SktttbbZJSZIkJG2Skv9tbdtJSbYkJJJtbf9JSdskJLZJSf8kJNskJP///9vb27a2tpKSkm1tbUlJSST//7bb25K2tm2SkkltbST//5Lb2222tkmSkiT//23b20m2tiT//0nb2yT//yT/2//bttu2kraSbZJtSW1JJEn/tv/bktu2bbaSSZJtJG3/kv/bbdu2SbaSJJL/bf/bSdu2JLb/Sf/bJNv/JP/b//+229uStrZtkpJJbW0kSUm2//+S29tttrZJkpIkbW2S//9t29tJtrYkkpJt//9J29sktrZJ//8k29sk////27bbtpK2km2SbUltSSRJJAD/tpLbkm22bUmSSSRtJAD/ttvbkra2bZKSSW1tJElJACT/krbbbZK2SW2SJEltACTbtv+2ktuSbbZtSZJJJG0kAEm2kv+SbdttSbZJJJIkAG222/+SttttkrZJbZIkSW0AJEmStv9tkttJbbYkSZIAJG22/9uS27ZttpJJkm0kbUkASSSS/7Zt25JJtm0kkkkAbSTb/7a225KStm1tkklJbSQkSQC2/5KS221ttklJkiQkbQD/tgDbkgC2bQCSSQD/ALbbAJK2AG2SAEkAtv8AktsAbbYASZIAAAAAAADPKgIEAAABFUlEQVRYw+2XMW6EMBBF/xCoUJLzTGVXXIHjeHwbOAYV50kqChan8maFMOtlTaKV/Dtjy/9r3gwCcs7By1r7u0ggEaHQnvct1xvGmCTm1loAcABo71yBEyUiPkRQZQqjcRw3n2utISIQkWAlkleAmcHMAACl1DVEqBJFavO1ViG+AaBt27QIQuZ1XaOqKkzT5OZ5BoB3AF993392XXc/wDAMu6ZKqc0+YGYYY9A0jV+Tv09r/RHdhLcGR6rAzMEGTY7AVyHGNDrAIwjujeShALEIthowVqe+CU9HEKu9SiadgowgI3glBG8ALv+J4JKnIE9Bku+BWESHETxz8csgyAHKs2Y/VnT7e05E7k9MiYplWRwA/ABlXGsRlfGcJwAAAABJRU5ErkJggg=="); }
+.listing-item[data-name$=".xlsx" i], .listing-item[data-name$=".ods" i] { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADAFBMVEUAAAD/AAAA/wD//wAAAP//AP8A///////b29u2traSkpJtbW1JSUkkJCTbAAC2AACSAABtAABJAAAkAAAA2wAAtgAAkgAAbQAASQAAJADb2wC2tgCSkgBtbQBJSQAkJAAAANsAALYAAJIAAG0AAEkAACTbANu2ALaSAJJtAG1JAEkkACQA29sAtrYAkpIAbW0ASUkAJCT/29vbtra2kpKSbW1tSUlJJCT/trbbkpK2bW2SSUltJCT/kpLbbW22SUmSJCT/bW3bSUm2JCT/SUnbJCT/JCTb/9u227aStpJtkm1JbUkkSSS2/7aS25Jttm1JkkkkbSSS/5Jt221JtkkkkiRt/21J20kktiRJ/0kk2yQk/yTb2/+2ttuSkrZtbZJJSW0kJEm2tv+SktttbbZJSZIkJG2Skv9tbdtJSbYkJJJtbf9JSdskJLZJSf8kJNskJP///9vb27a2tpKSkm1tbUlJSST//7bb25K2tm2SkkltbST//5Lb2222tkmSkiT//23b20m2tiT//0nb2yT//yT/2//bttu2kraSbZJtSW1JJEn/tv/bktu2bbaSSZJtJG3/kv/bbdu2SbaSJJL/bf/bSdu2JLb/Sf/bJNv/JP/b//+229uStrZtkpJJbW0kSUm2//+S29tttrZJkpIkbW2S//9t29tJtrYkkpJt//9J29sktrZJ//8k29sk////27bbtpK2km2SbUltSSRJJAD/tpLbkm22bUmSSSRtJAD/ttvbkra2bZKSSW1tJElJACT/krbbbZK2SW2SJEltACTbtv+2ktuSbbZtSZJJJG0kAEm2kv+SbdttSbZJJJIkAG222/+SttttkrZJbZIkSW0AJEmStv9tkttJbbYkSZIAJG22/9uS27ZttpJJkm0kbUkASSSS/7Zt25JJtm0kkkkAbSTb/7a225KStm1tkklJbSQkSQC2/5KS221ttklJkiQkbQD/tgDbkgC2bQCSSQD/ALbbAJK2AG2SAEkAtv8AktsAbbYASZIAAAAAAADPKgIEAAABHUlEQVRYw+2XUa6DIBBFL9XExB+XBLtwOQ47gyW1/2X608njNUKlYE0ab2IMoM7J3BkDipkhstb+DRqIiFRqTeL2rwvLsjQJbq0FAAagcs9dsKOISCCOATDGvIXYFUBr/RbiYwDvffaegLgBwDzP/6tRLiLiViIiHseRp2niYRhC13XhmYVrHHc3gDU551iskJi71sAW9Tl/WxfkZoC1F7z3VXOHtOHHFqSoa+aKAU4LTgtOC7aktkIdgHsWoEZxBhLQ9yYWyMfXAmqt4b2HtTa7z2xmQRzQGLM5W827oCR4MwtiOeeKII7qgh/5EUnhxWuS/tdxEUBJqrXWcgxLyjmXbMUmP6Ka82T/jQ1pTio+niul+CtBlbqEEBgAHiUDiFXleLkSAAAAAElFTkSuQmCC"); }
+.listing-item[data-name$=".pptx" i], .listing-item[data-name$=".odp" i] { --beos-file-icon: url("data:image/png;base64,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"); }
+.listing-item[data-dir="true"] { --beos-file-icon: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABGdBTUEAALGPC/xhBQAAAAZiS0dEAP8A/wD/oL2nkwAAAAlwSFlzAAALEQAACxEBf2RfkQAAAAd0SU1FB9IMHwwlCyiTTUcAAAG5SURBVHic1ZZdcoIwFEYPjnvohFUUO25CnD64Bt5cQ8dxXAMbcbSbKJauItFV0AcMBgmUYHCm3xvhmhy/+0PgP0gIUQghijH2nvQNlPvFKCBT26I+RCkV6LU8PyH3CwDC98/Ge68AAFJKwjCs/ds8P5XvPIJYfyiEKKSU1XMYhgDslooZEcxLrih60yDcg5ip6gJsdcCUhilBzuwoQXLsjphr5roNpBeAKwjc0mUDNEF6paBNbalpk5kyDTHVB+ogl4Jqc6QNxHRFq0qBsZlzn7uCWAGKLCFobHZ7HgukAqh8zxLLZh5A5q/W2AmUede9XClLIEuQUuqhVMG4ggB8f/1YY/5uQw+OmIo3l1qh958DnkEaANc0FOYweQaI0yQcA2Q4QAeIC0TtQmLtBheQK4xNM6JGATYAfEjuF07tagXI85N1bo+hRg0opYJ4QwFw3JYQ+iv2FAANATAURKehTzF2dsGjIKbiw3n4jcgnyCCAISB9u2HQIPLpyEOT0BVkvV4XAGmadl9Kh0rfLY/bl2ot3lzYLRUfB8FqtarFp2kaPP4tMNR0pASxHa7l1YF7aUfMw037AX4Bo+k+H1TyTy4AAAAASUVORK5CYII="); }
+
+/* Explicit chrome colours win over upstream inline translucent backgrounds. */
+#app header, #app #sidebar, #app #status-bar { background: #d8d8d8 !important; }
+#app header { backdrop-filter: none !important; }
+#app #main { background: #d8d8d8 !important; }
+#app header .search-bar-container { background: #c8c8c8 !important; border-radius: 0 !important; }
+#login .login-brand img, #login .login-icon { content: var(--beos-login-logo) !important; }
+/* Keep Office's full-height layout; its toolbar is owned by the document frame. */
+#app #main.remove-padding-top { padding-top: 0 !important; }
+#app .floating-close.button { min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
+/* Native toggle semantics, R5 square bevels; expose keyboard focus. */
+#app .toggle-container .slider.round { background: #b0b0b0; border: 1px solid #606060; border-radius: 0 !important; }
+#app .toggle-container .slider.round::before { background: #f0f0f0; border-radius: 0 !important; box-shadow: inset 1px 1px #fff, inset -1px -1px #888; }
+#app .toggle-container input:checked + .slider { background: #606060 !important; }
+#app .toggle-container input:focus-visible + .slider { outline: 2px solid #000; outline-offset: 2px; }
+/* Crepe's code editor may inherit its dark syntax palette. Keep it readable. */
+#markdown-editor-container .cm-editor, #markdown-editor-container .cm-content,
+#markdown-editor-container .cm-gutters { background: #f0f0f0 !important; color: #202020 !important; }
+#markdown-editor-container .cm-line, #markdown-editor-container .cm-line span,
+#markdown-editor-container .cm-gutterElement { color: #202020 !important; }
+#markdown-editor-container .cm-activeLine { background: #e0e0e0 !important; }
+
+:root { --beos-login-logo: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABuElEQVR4nO2ZQU7DMBBFJ4gDsELqruoRaiquwKaIS9TyRbhDZBZcoWo33KFxJS7QbQUrbhAWSWwju6WmaYw0/61G4zi2Rn8mY4cIAAAAAAAAABhSpDwsZVkTEWn9dtaiUj5YW2uVtIe+ucq5+H+AfQD+JD8hZN3Zxnx6I8uj74ulUO50YK8A9gG4HnKxyeQr8BmzHXILAVDAkIvtdjettfe8t0fnbKQruHutg/GRlNaeaZ1cRNkrgH0ALp4C3befyBW88fiDnC+U7UaIqOwf277lUFp0/pRUYK8A9gHouRU+jUPtb91KeB2R/SFi6fDbHB/2Cui5CJ56GHq1Pl9NlTHBnBVRHTg9Yr1BCuwVwD4Ag7bC06loLZcCxry7BwQFzMvS2oXq/76AvQLYB2DQFFBq1kr43qvsI2vdieZkuI58DS4FFDDkYmW5qYmIlHq2PiHcfUDRHmL8b3/1oux4XTZ9hF8MOx8RUbVtDls4DCXAPgBZfo35sl8sFtZ2RdLx424gUhxHwjUPM2NwJZYK+wAA7iQWjaejZ/NzWdGyl/fgRigBBCD3BnKDAOTeAAAAAAAAAACADHwD0E+E0u0CcXcAAAAASUVORK5CYII="); }
+#+END_SRC
+
+* Isolated deployment tests
+Run from the intended repo root with =python3 linux/.local/share/filebrowser/tests/beos-theme.py=. Uses temporary fixture configs only; no server or DB access.
+
+#+BEGIN_SRC python :tangle linux/.local/share/filebrowser/tests/beos-theme.py
+from pathlib import Path
+import copy,json,subprocess,tempfile,yaml,base64,re,struct,zlib
+import os
+repo=Path(os.environ.get('DOTCORTEX_REPO', Path.cwd()))
+helper=repo/'linux/.local/bin/filebrowser-theme-apply';assets=repo/'linux/.local/share/filebrowser/themes/beos-r5'
+checks=0
+with tempfile.TemporaryDirectory(prefix='fb-beos-transitions-') as tmp:
+ config=Path(tmp)/'config.yaml'
+ seed={'server':{'database':'fixture-only.db','sources':[{'name':'fixture','path':'fixture-only'}]},'frontend':{'name':'Keep Me','styling':{'customCSS':'old.css','darkBackground':'#111111'}},'auth':{'tokenExpirationHours':720},'integrations':{'office':{'url':'fixture-url'}},'userDefaults':{'fileViewer':{'preferEditorForMarkdown':True}}}
+ def run(theme,apply=True,ok=True):
+  global checks
+  args=['python3',str(helper),theme,'--config',str(config),'--assets',str(assets)]+(['--apply'] if apply else [])
+  r=subprocess.run(args,capture_output=True,text=True)
+  assert (r.returncode==0)==ok,(r.stdout,r.stderr)
+  checks+=1
+  return r
+ config.write_text(yaml.safe_dump(seed));original=config.read_bytes()
+ run('beos-r5',False);assert config.read_bytes()==original;assert len(list(Path(tmp).iterdir()))==1
+ run('beos-r5');enabled=yaml.safe_load(config.read_text());receipt=(Path(tmp)/'.beos-r5-theme.json').read_bytes()
+ d=copy.deepcopy(enabled);d['frontend']['styling']['customCSS']='old.css';assert d==seed
+ css=Path(enabled['frontend']['styling']['customCSS']).read_text();assert len(css.encode())<=128*1024
+ fonts=(assets/'fonts.css').read_text()
+ for t,w in zip(re.findall(r'data:font/ttf;base64,([A-Za-z0-9+/=]+)',fonts),re.findall(r'data:font/woff;base64,([A-Za-z0-9+/=]+)',css)):
+  raw=base64.b64decode(t);packed=base64.b64decode(w);n=struct.unpack_from('>H',packed,12)[0]
+  for i in range(n):
+   tag,o,c,l,sum1=struct.unpack_from('>4sIIII',packed,44+20*i)
+   body=packed[o:o+c];body=zlib.decompress(body) if c<l else body
+   tag2,sum2,start,l2=struct.unpack_from('>4sIII',raw,12+16*i)
+   assert(tag,l,sum1,body)==(tag2,l2,sum2,raw[start:start+l2])
+ checks+=1
+ before=config.read_bytes();run('beos-r5');assert config.read_bytes()==before;assert (Path(tmp)/'.beos-r5-theme.json').read_bytes()==receipt
+ d=copy.deepcopy(enabled);d['auth']['tokenExpirationHours']=1000;config.write_text(yaml.safe_dump(d))
+ run('off',False);assert yaml.safe_load(config.read_text())==d
+ run('off');seed['auth']['tokenExpirationHours']=1000;assert yaml.safe_load(config.read_text())==seed
+ run('off');run('beos-r5');d=yaml.safe_load(config.read_text());d['frontend']['styling']['customCSS']='someone-elses.css';config.write_text(yaml.safe_dump(d));before=config.read_bytes()
+ run('off',ok=False);run('beos-r5',ok=False);assert config.read_bytes()==before
+ # Missing frontend must return to absent, rather than adding empty maps.
+ (Path(tmp)/'.beos-r5-theme.json').unlink();config.write_text('server: {}\n');run('beos-r5');run('off');assert yaml.safe_load(config.read_text())=={'server':{}}
+ config.write_text('frontend: {}\nfrontend: {}\n');run('beos-r5',ok=False)
+ config.unlink();config.symlink_to(Path(tmp)/'other.yaml');(Path(tmp)/'other.yaml').write_text('server: {}\n');run('beos-r5',ok=False)
+print(f'PASS: {checks} transitions/guards, field-only rollback, unrelated settings preserved, cap and font table identity')
+#+END_SRC

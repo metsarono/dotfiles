@@ -1,0 +1,190 @@
+#!/usr/bin/python3
+"""Opt-in BeOS R5 CSS for Quantum v1.5.6; never installs or restarts FileBrowser."""
+import argparse
+import base64
+import copy
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import struct
+import tempfile
+import time
+import zlib
+import yaml
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('theme', choices=('beos-r5', 'off'))
+p.add_argument('--apply', action='store_true', help='write changes; default is dry-run')
+p.add_argument('--config', type=Path, default=Path.home() / '.config/filebrowser/config.yaml')
+p.add_argument('--assets', type=Path, default=Path.home() / '.local/share/filebrowser/themes/beos-r5')
+a = p.parse_args()
+
+# Reject ambiguous YAML instead of discarding an earlier duplicate key.
+class UniqueLoader(yaml.SafeLoader):
+    pass
+
+def mapping(loader, node, deep=False):
+    result = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in result:
+            raise ValueError('duplicate YAML key')
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+
+def private_file(path):
+    if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
+        p.error('expected an owned regular file, without symlink: ' + str(path))
+    return path.read_bytes()
+
+def atomic(path, content):
+    fd, name = tempfile.mkstemp(prefix='.beos-r5-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as out:
+            os.fchmod(out.fileno(), 0o600)
+            out.write(content)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+# WOFF1 is a lossless zlib container for the preserved SFNT tables. Two TTFs
+# plus icons would exceed Quantum's 128 KiB CSS cap. Glyphs are not subsetted.
+def woff(raw):
+    flavor, count = struct.unpack_from('>4sH', raw)
+    offset = 44 + count * 20
+    entries, payload = [], bytearray()
+    for i in range(count):
+        tag, checksum, start, length = struct.unpack_from('>4sIII', raw, 12 + i * 16)
+        table = raw[start:start + length]
+        if len(table) != length:
+            raise ValueError('invalid font table')
+        compressed = zlib.compress(table, 9)
+        data = compressed if len(compressed) < length else table
+        entries.append(struct.pack('>4sIIII', tag, offset, len(data), length, checksum))
+        padded = data + b'\0' * (-len(data) % 4)
+        payload.extend(padded)
+        offset += len(padded)
+    total_sfnt = 12 + count * 16 + sum((struct.unpack_from('>I', e, 12)[0] + 3) & ~3 for e in entries)
+    header = struct.pack('>4s4sIHHIHHIIIII', b'wOFF', flavor, offset, count, 0,
+                         total_sfnt, 1, 0, 0, 0, 0, 0, 0)
+    return header + b''.join(entries) + payload
+
+def stylesheet():
+    fonts = (a.assets / 'fonts.css').read_text()
+    def pack(match):
+        return 'data:font/woff;base64,' + base64.b64encode(woff(base64.b64decode(match[1], validate=True))).decode()
+    fonts, count = re.subn(r'data:font/ttf;base64,([A-Za-z0-9+/=]+)', pack, fonts)
+    if count != 2:
+        p.error('expected the two preserved Swiss721 faces')
+    fonts = fonts.replace("format('truetype')", "format('woff')").replace('format("truetype")', 'format("woff")')
+    css = (fonts + '\n' + (a.assets / 'theme.css').read_text()).encode()
+    if not 0 < len(css) <= 128 * 1024 or b'</style' in css.lower():
+        p.error('stylesheet exceeds the upstream cap or contains unsafe style markup')
+    return css
+
+config = a.config.absolute()
+# Config state and receipts remain machine-local. No credential value is logged.
+if not config.parent.is_dir() or config.parent.is_symlink():
+    p.error('config directory must be a real directory')
+lock = None
+if a.apply:
+    lock_path = config.with_name('.beos-r5-theme.lock')
+    if lock_path.is_symlink():
+        p.error('lock must not be a symlink')
+    lock = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+original = private_file(config)
+try:
+    data = yaml.load(original, Loader=UniqueLoader)
+except Exception:
+    p.error('invalid or ambiguous YAML config (contents withheld)')
+if not isinstance(data, dict):
+    p.error('expected a YAML mapping')
+updated = copy.deepcopy(data)
+for key in ('frontend',):
+    if key in data and not isinstance(data[key], dict):
+        p.error(key + ' must be a mapping')
+frontend = updated.setdefault('frontend', {})
+if 'styling' in frontend and not isinstance(frontend['styling'], dict):
+    p.error('frontend.styling must be a mapping')
+styling = frontend.setdefault('styling', {})
+current = {'present': 'customCSS' in styling, 'value': styling.get('customCSS')}
+receipt_path = config.with_name('.beos-r5-theme.json')
+receipt = json.loads(private_file(receipt_path)) if receipt_path.exists() or receipt_path.is_symlink() else None
+if receipt and receipt.get('config') != str(config):
+    p.error('receipt belongs to another config')
+css = None
+if a.theme == 'beos-r5':
+    css = stylesheet()
+    digest = hashlib.sha256(css).hexdigest()
+    css_dir = config.parent / 'themes/beos-r5'
+    css_path = css_dir / (digest + '.css')
+    target = {'present': True, 'value': str(css_path)}
+    if receipt:
+        previous = receipt['previous']
+        if current not in (receipt['installed'], previous):
+            p.error('customCSS changed since enable; refusing to overwrite')
+    else:
+        previous = current
+    receipt = {'config': str(config), 'previous': previous, 'installed': target,
+               'frontendExisted': receipt['frontendExisted'] if receipt else 'frontend' in data,
+               'stylingExisted': receipt['stylingExisted'] if receipt else 'styling' in data.get('frontend', {})}
+    styling['customCSS'] = str(css_path)
+    print(('Apply' if a.apply else 'Dry-run') + ': BeOS R5, ' + str(len(css)) + ' CSS bytes; frontend.styling.customCSS only')
+else:
+    if not receipt:
+        print('BeOS R5 is not managed for this config; nothing to roll back')
+        raise SystemExit(0)
+    if current != receipt['installed']:
+        p.error('customCSS changed since enable; refusing rollback across drift')
+    if receipt['previous']['present']:
+        styling['customCSS'] = receipt['previous']['value']
+    else:
+        styling.pop('customCSS', None)
+    if not styling and not receipt['stylingExisted']:
+        frontend.pop('styling', None)
+    if not frontend and not receipt['frontendExisted']:
+        updated.pop('frontend', None)
+    print(('Apply' if a.apply else 'Dry-run') + ': restore the previous customCSS field; retain all other settings')
+if not a.apply:
+    raise SystemExit(0)
+# Complete validation before any config replacement; exact original bytes kept.
+rendered = yaml.safe_dump(updated, sort_keys=False, allow_unicode=False).encode('ascii')
+assert yaml.safe_load(rendered) == updated
+if private_file(config) != original:
+    p.error('config changed during preflight; refusing write')
+if css is not None:
+    for path in (config.parent / 'themes', css_dir):
+        if path.is_symlink():
+            p.error('theme directories must not be symlinks')
+        path.mkdir(mode=0o700, exist_ok=True)
+    if css_path.exists():
+        if private_file(css_path) != css:
+            p.error('content-addressed CSS differs; refusing overwrite')
+    else:
+        atomic(css_path, css)
+if rendered != original:
+    backup = config.with_name(config.name + '.before-beos-r5-' + str(time.time_ns()))
+    with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as out:
+        out.write(original)
+    if private_file(config) != original:
+        p.error('config changed before replacement; refusing write')
+if a.theme == 'beos-r5':
+    if receipt_path.is_symlink():
+        p.error('receipt must not be a symlink')
+    atomic(receipt_path, json.dumps(receipt, indent=2).encode('ascii'))
+if private_file(config) != original:
+    p.error('config changed before replacement; refusing write')
+if rendered != original:
+    atomic(config, rendered)
+if a.theme == 'off':
+    receipt_path.unlink()
+print('Config ready. The serving coordinator must restart FileBrowser and reload clients.')
