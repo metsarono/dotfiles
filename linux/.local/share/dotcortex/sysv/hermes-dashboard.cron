@@ -1,0 +1,14 @@
+# Hermes dashboard respawn - cron health probe (sysvinit, Kikin).
+#
+# SOURCE OF TRUTH: DotCortex services-hermes-dashboard.org
+# Deploy with:
+#   sudo install -o root -g root -m 0644 \
+#     ~/DotCortex/linux/.local/share/dotcortex/sysv/hermes-dashboard.cron /etc/cron.d/hermes-dashboard
+# Edit the repo copy and redeploy - never edit /etc/cron.d in place.
+#
+# `watch` is a no-op when the dashboard answers, when it was stopped by hand
+# (`service hermes-dashboard stop` leaves a marker) or when the state dir is absent.
+SHELL=/bin/sh
+MAILTO=""
+
+*/5 * * * * root /etc/init.d/hermes-dashboard watch

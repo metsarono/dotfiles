@@ -1,0 +1,311 @@
+#+TITLE: Hermes dashboard service (Kikin)
+#+DESCRIPTION: Supervised init script for the Hermes web dashboard on Kikin (loopback :9119, tailscale serve in front)
+#+AUTHOR: Mètsàtron
+#+LANGUAGE: en
+#+PROPERTY: header-args :mkdirp yes :results silent
+#+PROPERTY: header-args:sh :comments no
+#+PROPERTY: header-args:python :comments no
+
+* Boundary
+
+The Hermes dashboard (=hermes dashboard --no-open=, loopback =127.0.0.1:9119=, fronted by =tailscale serve=, =dashboard.public_url= in =~/.hermes/config.yaml=) used to run unsupervised from a terminal. This module makes the host start it at boot and bring it back when it dies. It reads nothing under =~/.hermes=; the script carries no secret, address or token.
+
+** Kikin is sysvinit, not OpenRC
+
+The request was an OpenRC script. Kikin has no OpenRC: PID 1 is sysvinit, there is no =/sbin/openrc-run=, =rc-service=, =rc-update= or =supervise-daemon=, and its services are LSB scripts in =/etc/init.d= driven by =update-rc.d= and =start-stop-daemon= (=helmcortex-kikin-decider= is the precedent; =/etc/runlevels= does not exist). An OpenRC body could not run there. This module therefore follows the Kikin pattern:
+
+- an LSB =/etc/init.d/hermes-dashboard= using =start-stop-daemon= (start at boot, orderly stop at shutdown), and
+- respawn the way =FORGE/scripts/recall/mcp-cron.sh= does it: sysvinit has no supervisor, so a =*/5= cron entry runs =hermes-dashboard watch=, a health probe that starts the daemon only if neither our process nor anything else is on the port.
+
+Honey is OpenRC; if the dashboard ever moves there, an OpenRC body follows [[file:agents-bots-opencode-openrc.org][agents-bots-opencode-openrc.org]].
+
+** Behaviour worth knowing
+
+- =hermes= is a wrapper that execs into the X230 NFS mount (=~/mnt/x230/...=), so the script =Should-Start= after =autofs= and =$remote_fs=, and =watch= quietly retries if the mount was late.
+- =stop= leaves a marker (=stopped=) in the state directory; =watch= honours it, so an operator who stops the service by hand is not fought by cron. =start= clears it.
+- =start= refuses (exit 1, logged) if :9119 is already answering and the process is not ours, so the cutover cannot create a second dashboard. =watch= treats that case as healthy and does nothing.
+- Log: =~metsatron/.local/state/hermes-dashboard/hermes-dashboard.log=, rotated once to =.1= at start above 5 MiB.
+- Settings override through =/etc/default/hermes-dashboard= (=HERMES_DASHBOARD_USER=, =HERMES_DASHBOARD_PORT=); none are needed on Kikin.
+
+* Init script
+
+#+BEGIN_SRC sh :tangle linux/.local/share/dotcortex/sysv/hermes-dashboard :tangle-mode (identity #o755) :shebang "#!/bin/sh"
+### BEGIN INIT INFO
+# Provides:          hermes-dashboard
+# Required-Start:    $remote_fs $network
+# Required-Stop:     $remote_fs $network
+# Should-Start:      autofs tailscaled
+# Should-Stop:       autofs tailscaled
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Hermes dashboard (loopback :9119)
+### END INIT INFO
+# Source: DotCortex services-hermes-dashboard.org. Install as /etc/init.d/hermes-dashboard.
+# Verbs: start stop restart status watch.  `watch` is the cron health probe.
+set -eu
+
+PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin"
+
+HERMES_DASHBOARD_USER=metsatron
+HERMES_DASHBOARD_PORT=9119
+[ -r /etc/default/hermes-dashboard ] && . /etc/default/hermes-dashboard
+
+RUN_AS="$HERMES_DASHBOARD_USER"
+PORT="$HERMES_DASHBOARD_PORT"
+HOME_DIR="${HERMES_DASHBOARD_HOME:-$(getent passwd "$RUN_AS" | cut -d: -f6)}"
+[ -n "$HOME_DIR" ] || { echo "hermes-dashboard: no home for $RUN_AS" >&2; exit 1; }
+
+WORKDIR="$HOME_DIR/DotCortex"
+HERMES="$HOME_DIR/.local/bin/hermes"
+STATEDIR="$HOME_DIR/.local/state/hermes-dashboard"
+PIDFILE="$STATEDIR/hermes-dashboard.pid"
+LOGFILE="$STATEDIR/hermes-dashboard.log"
+STOPPED="$STATEDIR/stopped"
+LOG_MAX_BYTES=5242880
+
+log() { printf '%s %s\n' "$(date -Iseconds)" "$*" >> "$LOGFILE"; }
+
+ours() { start-stop-daemon --status --quiet --pidfile "$PIDFILE" --user "$RUN_AS"; }
+port_busy() { ss -H -tln "sport = :${PORT}" 2>/dev/null | grep -q .; }
+
+prepare_state() {
+    [ -d "$STATEDIR" ] || install -d -m 700 -o "$RUN_AS" -g "$RUN_AS" "$STATEDIR"
+    if [ -f "$LOGFILE" ] && [ "$(wc -c < "$LOGFILE")" -gt "$LOG_MAX_BYTES" ]; then
+        mv -f "$LOGFILE" "$LOGFILE.1"
+    fi
+}
+
+do_start() {
+    prepare_state
+    rm -f "$STOPPED"
+    if ours; then
+        echo "hermes-dashboard: already running"
+        return 0
+    fi
+    if port_busy; then
+        log "REFUSED start: :${PORT} already answering and not our process"
+        echo "hermes-dashboard: :${PORT} is already in use by another process (stop the terminal copy first)" >&2
+        return 1
+    fi
+    if [ ! -x "$HERMES" ]; then
+        log "SKIP: $HERMES not executable (NFS not mounted yet?)"
+        echo "hermes-dashboard: $HERMES not executable" >&2
+        return 1
+    fi
+    log "START hermes dashboard on 127.0.0.1:${PORT}"
+    # env: HOME and PATH set explicitly so `hermes` resolves, whatever start-stop-daemon passes.
+    start-stop-daemon --start --quiet --background --make-pidfile \
+        --pidfile "$PIDFILE" --chuid "$RUN_AS" --chdir "$WORKDIR" --output "$LOGFILE" \
+        --startas /usr/bin/env -- \
+        HOME="$HOME_DIR" PATH="$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+        "$HERMES" dashboard --no-open
+}
+
+do_stop() {
+    prepare_state
+    : > "$STOPPED"
+    start-stop-daemon --stop --quiet --retry=TERM/30/KILL/5 \
+        --pidfile "$PIDFILE" --user "$RUN_AS" || true
+    rm -f "$PIDFILE"
+    log "STOP"
+}
+
+do_status() {
+    if ours; then
+        echo "hermes-dashboard: running"
+    else
+        echo "hermes-dashboard: not running"
+        return 3
+    fi
+}
+
+# Cron health probe: cheap when healthy, starts the daemon only when nothing serves the port.
+do_watch() {
+    [ -d "$STATEDIR" ] || return 0
+    [ ! -e "$STOPPED" ] || return 0
+    ours && return 0
+    port_busy && return 0
+    do_start || true
+}
+
+case "${1:-}" in
+    start) do_start ;;
+    stop) do_stop ;;
+    restart|force-reload) do_stop; do_start ;;
+    status) do_status ;;
+    watch) do_watch ;;
+    *) echo "Usage: $0 {start|stop|restart|status|watch}" >&2; exit 2 ;;
+esac
+#+END_SRC
+
+* Cron respawn
+
+#+BEGIN_SRC sh :tangle linux/.local/share/dotcortex/sysv/hermes-dashboard.cron :tangle-mode (identity #o644)
+# Hermes dashboard respawn - cron health probe (sysvinit, Kikin).
+#
+# SOURCE OF TRUTH: DotCortex services-hermes-dashboard.org
+# Deploy with:
+#   sudo install -o root -g root -m 0644 \
+#     ~/DotCortex/linux/.local/share/dotcortex/sysv/hermes-dashboard.cron /etc/cron.d/hermes-dashboard
+# Edit the repo copy and redeploy - never edit /etc/cron.d in place.
+#
+# `watch` is a no-op when the dashboard answers, when it was stopped by hand
+# (`service hermes-dashboard stop` leaves a marker) or when the state dir is absent.
+SHELL=/bin/sh
+MAILTO=""
+
+*/5 * * * * root /etc/init.d/hermes-dashboard watch
+#+END_SRC
+
+* Tests
+
+Stubs stand in for =start-stop-daemon=, =ss= and =install= so nothing starts and no root is needed; the tests check the arguments the script would pass.
+
+#+BEGIN_SRC python :tangle linux/.local/share/dotcortex/tests/test-hermes-dashboard.py :tangle-mode (identity #o755) :shebang "#!/usr/bin/env python3"
+from __future__ import annotations
+
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+SCRIPT = ROOT / "linux/.local/share/dotcortex/sysv/hermes-dashboard"
+CRON = ROOT / "linux/.local/share/dotcortex/sysv/hermes-dashboard.cron"
+
+SSD = r"""#!/bin/sh
+echo "$@" >> "$STUB_LOG"
+case "$1" in
+  --status) [ -e "$STUB_RUNNING" ] ;;
+esac
+"""
+SS = r"""#!/bin/sh
+[ -e "$STUB_PORT_BUSY" ] && echo "LISTEN 0 128 127.0.0.1:9119 0.0.0.0:*"
+exit 0
+"""
+
+
+class Harness:
+    def __init__(self, tmp: Path) -> None:
+        self.tmp = tmp
+        self.home = tmp / "home"
+        (self.home / ".local/bin").mkdir(parents=True)
+        (self.home / "DotCortex").mkdir()
+        hermes = self.home / ".local/bin/hermes"
+        hermes.write_text("#!/bin/sh\n")
+        hermes.chmod(0o755)
+        self.bin = tmp / "bin"
+        self.bin.mkdir()
+        for name, body in (("start-stop-daemon", SSD), ("ss", SS)):
+            f = self.bin / name
+            f.write_text(body)
+            f.chmod(0o755)
+        self.log = tmp / "ssd.log"
+        self.running = tmp / "running"
+        self.busy = tmp / "busy"
+        self.state = self.home / ".local/state/hermes-dashboard"
+
+    def run(self, verb: str) -> subprocess.CompletedProcess[str]:
+        env = {
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "HERMES_DASHBOARD_USER": subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip(),
+            "HERMES_DASHBOARD_HOME": str(self.home),
+            "STUB_LOG": str(self.log),
+            "STUB_RUNNING": str(self.running),
+            "STUB_PORT_BUSY": str(self.busy),
+        }
+        return subprocess.run([str(SCRIPT), verb], env=env, text=True, capture_output=True, timeout=20)
+
+    def calls(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+
+class HermesDashboardInit(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.h = Harness(Path(self._tmp.name))
+
+    def test_start_passes_user_dir_env_and_command(self) -> None:
+        r = self.h.run("start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (call,) = [c for c in self.h.calls() if c.startswith("--start")]
+        self.assertIn("--background", call)
+        self.assertIn("--make-pidfile", call)
+        self.assertIn(f"--chdir {self.h.home}/DotCortex", call)
+        self.assertIn(f"HOME={self.h.home}", call)
+        self.assertIn(f"PATH={self.h.home}/.local/bin:", call)
+        self.assertTrue(call.endswith(f"{self.h.home}/.local/bin/hermes dashboard --no-open"), call)
+        self.assertIn("hermes-dashboard.log", call)
+        self.assertEqual(oct((self.h.state).stat().st_mode & 0o777), "0o700")
+
+    def test_start_refuses_when_port_already_in_use(self) -> None:
+        self.h.busy.touch()
+        r = self.h.run("start")
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse([c for c in self.h.calls() if c.startswith("--start")])
+        self.assertIn("REFUSED", (self.h.state / "hermes-dashboard.log").read_text())
+
+    def test_start_is_idempotent_when_ours_is_running(self) -> None:
+        self.h.running.touch()
+        self.h.busy.touch()
+        r = self.h.run("start")
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse([c for c in self.h.calls() if c.startswith("--start")])
+
+    def test_stop_leaves_marker_and_stops_by_pidfile(self) -> None:
+        self.assertEqual(self.h.run("stop").returncode, 0)
+        self.assertTrue((self.h.state / "stopped").exists())
+        (call,) = [c for c in self.h.calls() if c.startswith("--stop")]
+        self.assertIn("--retry=TERM/30/KILL/5", call)
+        self.assertEqual(self.h.run("start").returncode, 0)
+        self.assertFalse((self.h.state / "stopped").exists())
+
+    def test_watch_respawns_only_when_nothing_serves(self) -> None:
+        self.h.run("stop"); self.h.run("start")  # creates state dir, clears marker
+        self.h.log.unlink()
+        self.assertEqual(self.h.run("watch").returncode, 0)
+        self.assertEqual(len([c for c in self.h.calls() if c.startswith("--start")]), 1)
+        self.h.log.unlink()
+        self.h.running.touch()
+        self.h.run("watch")
+        self.assertFalse([c for c in self.h.calls() if c.startswith("--start")])
+        self.h.running.unlink()
+        self.h.busy.touch()
+        self.h.run("watch")
+        self.assertFalse([c for c in self.h.calls() if c.startswith("--start")])
+
+    def test_watch_honours_manual_stop_and_absent_state(self) -> None:
+        self.assertEqual(self.h.run("watch").returncode, 0)  # no state dir yet
+        self.assertEqual(self.h.calls(), [])
+        self.h.run("stop")
+        self.h.log.unlink()
+        self.h.run("watch")
+        self.assertEqual(self.h.calls(), [])
+
+    def test_status_exit_codes(self) -> None:
+        self.assertEqual(self.h.run("status").returncode, 3)
+        self.h.running.touch()
+        self.assertEqual(self.h.run("status").returncode, 0)
+
+    def test_bad_verb_and_lsb_header(self) -> None:
+        self.assertEqual(self.h.run("bogus").returncode, 2)
+        text = SCRIPT.read_text()
+        self.assertIn("# Provides:          hermes-dashboard", text)
+        self.assertNotIn("openrc-run", text)
+
+    def test_no_secrets_or_addresses_in_artifacts(self) -> None:
+        for path in (SCRIPT, CRON):
+            text = path.read_text()
+            self.assertNotIn(".hermes/", text)
+            for needle in ("token", "password", "100.", "secret", "api_key"):
+                self.assertNotIn(needle, text.lower(), (path, needle))
+
+    def test_cron_probe_runs_as_root_every_five_minutes(self) -> None:
+        self.assertIn("*/5 * * * * root /etc/init.d/hermes-dashboard watch", CRON.read_text())
+
+
+if __name__ == "__main__":
+    unittest.main()
+#+END_SRC
