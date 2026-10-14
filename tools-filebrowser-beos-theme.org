@@ -4,14 +4,11 @@
 * Continuation of Nano's 2026-10-10 prototype
 app.org owns the opt-in apply entry point and rollback. This asset companion
 retains beos-r5-base.css and adds selectors for the current Milkdown build.
-Window strip and endcap PNGs are lossless conversions of the Caddy XFWM XPMs.
 File icons and the login logo are embedded at original resolution. No runtime
 submodule, branding web server, third-party font server or frontend patch.
 The byte-identical font payload lives in tools-filebrowser-beos-font.org.
 
 * Asset provenance
-- =linux/.themes/BeOS-r5-XFWM/xfwm4/title-3-active.xpm= SHA256 =fde7a10a89295c0b740c15c540a69e48e4be1c5298c1676af49d4508e42605cb=
-- =linux/.themes/BeOS-r5-XFWM/xfwm4/title-4-active.xpm= SHA256 =5fb2602b25912b014c648555a3cd3f07f333ef0d2a53ed1eb7aee9c64c5adcfe=
 - =preserved-wip/Be-64.png= SHA256 =02f9f12dfae3624206a7cb2074ab02285912bb0ee5cfffd999f00792b9184142=
 - =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/unknown.png= SHA256 =dbebc1250a9ee493b180d801a2c5e6cabf02f4a53f9e960c9c74e239dc08956e=
 - =linux/.local/share/icons/BeOS-r5-Icons/mimes/32/txt.png= SHA256 =b6f59117a1f5287e9699a7a0e1a25750bfa44cba4f95c6efbaa82da0a741fb37=
@@ -57,11 +54,7 @@ The byte-identical font payload lives in tools-filebrowser-beos-font.org.
   --iconBackground: #d8d8d8;
   --borderColor: #888888;          /* R5 frame border */
   --divider: #989898;
-  --primaryColor: #000000;         /* R5 accent is black; yellow is reserved
-                                      for the title tab alone */
-  --beos-tab: #ffcb00;              /* active title tab (Tverdov/XFWM agree) */
-  --beos-tab-hi: #f1ff3f;           /* 1px top highlight of the tab */
-  --beos-tab-sh: #af7b00;           /* tab bottom-right shadow */
+  --primaryColor: #000000;         /* R5 accent is black */
   --beos-face: #d8d8d8;
   --beos-light: #f8f8f8;            /* bevel light edge (titleIB) */
   --beos-dark: #888888;             /* bevel dark edge */
@@ -299,9 +292,6 @@ a:hover { color: #000; text-decoration: underline; }
 .material-symbols, .material-symbols-outlined { color: #000 !important; }
 .floating-action-button { border-radius: 0 !important; }
 
-/* Caddy XFWM tab pixels; original size, no invented caption controls. */
-:root { --beos-tab-strip: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAXBAMAAADw2NLqAAAAD1BMVEWYmJjx/z/8ywDY2NiIiIhCZjKoAAAAAXRSTlMge4j4rgAAABpJREFUeJxjYIACRkEogwXGYGIYpAxMF8JFAC9oAHbckAWPAAAAAElFTkSuQmCC"); --beos-tab-end: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAXBAMAAADw2NLqAAAAG1BMVEWYmJjx/z///1BgYGD8ywCvewDY2Nj///+IiIjIMcdrAAAAAXRSTlMge4j4rgAAACRJREFUeJxjYIACRkEILcRiDGHwM8GkBhuDRQlCC8JE3sNEGABtMgHbDY+YIAAAAABJRU5ErkJggg=="); }
-
 /* No title tab inside the app frame: the modal window supplies its own, and a
    second one only wastes vertical space. The header is its plain 64px bar. */
 #layout > header, #app header { padding-top: 0 !important; height: 64px !important; }
@@ -325,14 +315,6 @@ a:hover { color: #000; text-decoration: underline; }
 #app .listing-item .download-icon i { font-size: 24px !important; background: none; }
 #login { background: #d8d8d8 !important; color: #000; }
 #login .login-card { position: relative; overflow: visible; width: min(350px, calc(100vw - 40px)); padding: 24px; }
-#login .login-card::before {
-  content: "FileBrowser"; position: absolute; top: -23px; left: -1px;
-  height: 23px; padding: 3px 24px 4px 8px; box-sizing: border-box;
-  background: var(--beos-tab-end) right top / 16px 23px no-repeat,
-              var(--beos-tab-strip) left top / 16px 23px repeat-x;
-  border-left: 1px solid #989898; color: #000;
-  font: bold 13px/16px Swiss721, sans-serif; pointer-events: none;
-}
 #login .login-icon { width: 64px; height: 64px; object-fit: contain; image-rendering: pixelated; }
 #login .brand-text h3 { color: #000 !important; }
 #login .halloween-background, #login .halloween-decorations { display: none; }
@@ -444,9 +426,9 @@ with tempfile.TemporaryDirectory(prefix='fb-beos-transitions-') as tmp:
  run('beos-r5');enabled=yaml.safe_load(config.read_text());receipt=(Path(tmp)/'.beos-r5-theme.json').read_bytes()
  d=copy.deepcopy(enabled);d['frontend']['styling']['customCSS']='old.css';assert d==seed
  css=Path(enabled['frontend']['styling']['customCSS']).read_text();assert len(css.encode())<=128*1024
- # The app frame has no title tab and reserves no space for one; only the login card keeps its tab.
+ # The app frame has no title tab and reserves no space for one; neither does the login card.
  assert '#app header::before' not in css and '91px' not in css and '27px' not in css
- assert css.count('content: "FileBrowser"')==1 and '#login .login-card::before' in css
+ assert 'content: "FileBrowser"' not in css and '::before{content:"FileBrowser' not in css and '--beos-tab' not in css and 'login-card::before' not in css
  checks+=1
  fonts=(assets/'fonts.css').read_text()
  for t,w in zip(re.findall(r'data:font/ttf;base64,([A-Za-z0-9+/=]+)',fonts),re.findall(r'data:font/woff;base64,([A-Za-z0-9+/=]+)',css)):
