@@ -36,6 +36,13 @@ if [ -d "$HOME/dxc-artifacts/bin" ] ; then
     PATH="$HOME/dxc-artifacts/bin:$PATH"
 fi
 
+# npm global prefix (package-npm.org): codex, claude and the other npm CLIs.
+# Agent sessions started from a plain sh login (the tmux seats) read only this
+# file, so without this line they cannot see codex on Kikin.
+if [ -d "$HOME/.npm-global/bin" ] ; then
+    PATH="$HOME/.npm-global/bin:$PATH"
+fi
+
 export aquaria_data_path=~/.config/aquaria
 export qt_qpa_platformtheme=gtk2
 export MOZ_X11_EGL=1
