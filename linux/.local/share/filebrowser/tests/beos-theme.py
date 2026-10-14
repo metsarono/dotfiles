@@ -19,6 +19,10 @@ with tempfile.TemporaryDirectory(prefix='fb-beos-transitions-') as tmp:
  run('beos-r5');enabled=yaml.safe_load(config.read_text());receipt=(Path(tmp)/'.beos-r5-theme.json').read_bytes()
  d=copy.deepcopy(enabled);d['frontend']['styling']['customCSS']='old.css';assert d==seed
  css=Path(enabled['frontend']['styling']['customCSS']).read_text();assert len(css.encode())<=128*1024
+ # The app frame has no title tab and reserves no space for one; only the login card keeps its tab.
+ assert '#app header::before' not in css and '91px' not in css and '27px' not in css
+ assert css.count('content: "FileBrowser"')==1 and '#login .login-card::before' in css
+ checks+=1
  fonts=(assets/'fonts.css').read_text()
  for t,w in zip(re.findall(r'data:font/ttf;base64,([A-Za-z0-9+/=]+)',fonts),re.findall(r'data:font/woff;base64,([A-Za-z0-9+/=]+)',css)):
   raw=base64.b64decode(t);packed=base64.b64decode(w);n=struct.unpack_from('>H',packed,12)[0]
