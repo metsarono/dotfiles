@@ -541,6 +541,10 @@ DSH_TELEGRAM_PLUGIN_ROOT=/home/metsatron/HelmCortex/NEXUS/git/dsh-telegram
 DSH_TELEGRAM_MODEL_PROVIDER=helmcortex-opencode-go
 DSH_TELEGRAM_MODEL=deepseek-v4.1-flash
 DSH_TELEGRAM_PROVIDER_BASE_URL=https://opencode.ai/zen/go/v1
+# Optional bare DNS host[:port] authority for the web UI (no scheme or path).
+# Blank derives hostname -s plus the tailnet suffix from Self.DNSName and
+# the Harness web port at sync time. Keep the real authority private.
+DSH_WEB_TRUSTED_HOST=
 #+END_SRC
 
 ** DeepSeek Harness OpenCode Go Settings Template
@@ -577,10 +581,18 @@ llm-pi-ai:
 
 =telegram-agent-host sync deepseek-harness= renders this file atomically to
 =$DSH_HOME/profiles/$DSH_TELEGRAM_PROFILE/cordis.patch.yml= under the sealed
-agent user. The result is identical except that =@DSH_RECALL_MCP_URL@= becomes
+agent user. The renderer replaces =@DSH_RECALL_MCP_URL@= with
 the Recall MCP URL. The URL comes from =DSH_RECALL_MCP_URL= in the private env
 file, or else from this host's own tailnet address (=tailscale ip -4=) on the
 Recall port. The public template never carries an address (AGENTS.md rule 21).
+It also replaces =@DSH_WEB_TRUSTED_HOST@= with the optional
+=DSH_WEB_TRUSTED_HOST= authority from that private env file. When blank, sync
+combines =hostname -s= with the tailnet suffix from =tailscale status --json=
+(=Self.DNSName=) and the Harness web port. Resolution or validation failure
+leaves the installed patch unchanged. The installed web bundle's plugin id is
+=connection= (=@deepseek-ai/dsh-web-app/cordis.patch.yml=), which loads
+=@deepseek-ai/dsh-client-connection=; its =trustedHosts= setting admits the
+declared authority to the browser-trust fence while keeping authentication.
 The dedicated profile must not retain any route that can send the HelmCortex
 OpenCode Go credential to DeepSeek's public endpoint. The native DeepSeek chat
 and search providers are disabled, as is their web tool consumer; the Harness
@@ -592,6 +604,10 @@ operation into a fixed private review inbox. It provides no caller-selected
 path, read/list/overwrite, shell, or execution surface.
 
 #+BEGIN_SRC yaml :tangle all/.bots/templates/deepseek-harness-cordis.patch.yml :comments no
+- id: connection
+  config:
+    trustedHosts: ['@DSH_WEB_TRUSTED_HOST@']
+
 - id: agent-default-model
   config:
     provider: helmcortex-opencode-go
@@ -4096,6 +4112,71 @@ class TelegramAgentHostColdStartTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("refusing credential egress", result.stderr)
 
+    def prepare_deepseek_web_trust(self) -> tuple[Path, Path, str]:
+        self.prepare_deepseek_harness([123])
+        template = self.agents / "templates/deepseek-harness-cordis.patch.yml"
+        canonical = HERE.parents[4] / ".bots/templates/deepseek-harness-cordis.patch.yml"
+        template.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8")
+        profile = self.home / ".local/share/deepseek-harness-telegram/dsh-home/profiles/helmcortex-telegram/cordis.patch.yml"
+        env_file = self.home / ".config/deepseek-harness-telegram/env"
+        env_text = env_file.read_text(encoding="utf-8") + "DSH_RECALL_MCP_URL=http://recall.invalid:3004/mcp\n"
+        return profile, env_file, env_text
+
+    def test_deepseek_harness_sync_renders_private_web_authority(self) -> None:
+        profile, env_file, env_text = self.prepare_deepseek_web_trust()
+        authority = ".".join(("browser", "example", "invalid")) + ":3080"
+        env_file.write_text(env_text + f'export DSH_WEB_TRUSTED_HOST="{authority}"\n', encoding="utf-8")
+        called = self.root / "tailscale-called"
+        self.write_executable("tailscale", f"#!/bin/sh\ntouch {str(called)!r}\nexit 1\n")
+
+        result = self.run_manager("sync", "deepseek-harness", timeout=2)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = profile.read_text(encoding="utf-8")
+        self.assertIn(f"- id: connection\n  config:\n    trustedHosts: ['{authority}']", rendered)
+        self.assertIn("url: http://recall.invalid:3004/mcp", rendered)
+        self.assertNotIn("@DSH_", rendered)
+        self.assertEqual(profile.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(called.exists(), "an explicit authority must bypass tailnet discovery")
+
+    def test_deepseek_harness_sync_derives_web_authority_from_tailnet_suffix(self) -> None:
+        profile, env_file, env_text = self.prepare_deepseek_web_trust()
+        env_file.write_text(env_text + "DSH_WEB_TRUSTED_HOST=\n", encoding="utf-8")
+        suffix = ".".join(("example", "invalid"))
+        self.write_executable("hostname", "#!/bin/sh\n[ \"$1\" = -s ] || exit 1\nprintf '%s\\n' seat\n")
+        for terminal_dot in ("", "."):
+            with self.subTest(terminal_dot=terminal_dot):
+                payload = json.dumps({"Self": {"DNSName": f"different-name.{suffix}{terminal_dot}"}})
+                self.write_executable("tailscale", f"#!/bin/sh\n[ \"$1 $2\" = 'status --json' ] || exit 1\nprintf '%s\\n' '{payload}'\n")
+                result = self.run_manager("sync", "deepseek-harness", timeout=2)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"trustedHosts: ['seat.{suffix}:3080']", profile.read_text(encoding="utf-8"))
+
+    def test_deepseek_harness_sync_preserves_patch_when_web_trust_fails(self) -> None:
+        profile, env_file, env_text = self.prepare_deepseek_web_trust()
+        original = profile.read_bytes()
+        authority = ".".join(("browser", "example", "invalid")) + ":3080"
+        cases = (
+            ("", "exit 1", "cannot resolve the web trusted host"),
+            ("", "printf '%s' not-json", "cannot resolve the web trusted host"),
+            ("", "printf '%s' '{}'", "cannot resolve the web trusted host"),
+            ("", "printf '%s' '{\"Self\":{\"DNSName\":\"\"}}'", "cannot resolve the web trusted host"),
+            (f"https://{authority}", "exit 1", "must be a bare DNS"),
+            (f"{authority}/path", "exit 1", "must be a bare DNS"),
+            (authority.replace(":3080", ":03080"), "exit 1", "must be a bare DNS"),
+            (authority.replace(":3080", ":65536"), "exit 1", "must be a bare DNS"),
+            (authority + "'injected", "exit 1", "must be a bare DNS"),
+        )
+        for value, status_body, message in cases:
+            with self.subTest(value=value, status_body=status_body):
+                env_file.write_text(env_text + f"DSH_WEB_TRUSTED_HOST={value}\n", encoding="utf-8")
+                self.write_executable("tailscale", "#!/bin/sh\n" + status_body + "\n")
+                result = self.run_manager("sync", "deepseek-harness", timeout=2)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(profile.read_bytes(), original)
+                self.assertFalse(list(profile.parent.glob(".cordis.patch.yml.*")))
+
     def test_deepseek_harness_run_as_missing_user_refuses(self) -> None:
         self.agents.joinpath("hosts.conf").write_text(f"{HOST}|deepseek-harness\n", encoding="utf-8")
         run_as = self.home / ".config/deepseek-harness-telegram/run-as"
@@ -5354,7 +5435,7 @@ deepseek_harness_load_env() {
             TELEGRAM_BOT_TOKEN_FILE|OPENCODE_GO_API_KEY_FILE|\
             DSH_HOME|DSH_TELEGRAM_PROFILE|DSH_TELEGRAM_WORKSPACE|DSH_TELEGRAM_PLUGIN_ROOT|\
             DSH_TELEGRAM_MODEL_PROVIDER|DSH_TELEGRAM_MODEL|DSH_TELEGRAM_PROVIDER_BASE_URL|\
-            DSH_RECALL_MCP_URL)
+            DSH_RECALL_MCP_URL|DSH_WEB_TRUSTED_HOST)
                 value="${value%\"}"
                 value="${value#\"}"
                 value="${value%\'}"
@@ -5377,10 +5458,47 @@ deepseek_harness_render_profile_patch() {
             echo "DeepSeek Harness cannot resolve the Recall MCP URL (set DSH_RECALL_MCP_URL in the private env file, or bring the tailnet up)" >&2
             return 1
         fi
-        sed "s|@DSH_RECALL_MCP_URL@|$recall_url|g" "$DSH_TELEGRAM_PROFILE_PATCH_TEMPLATE" > "$output"
-    else
-        cp "$DSH_TELEGRAM_PROFILE_PATCH_TEMPLATE" "$output"
     fi
+    DSH_RENDER_RECALL_URL="${recall_url:-}" python3 - "$DSH_TELEGRAM_PROFILE_PATCH_TEMPLATE" "$output" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+template = Path(sys.argv[1]).read_text(encoding="utf-8")
+if "@DSH_WEB_TRUSTED_HOST@" in template:
+    authority = os.environ.get("DSH_WEB_TRUSTED_HOST", "")
+    # Only bare DNS authorities can enter the quoted YAML scalar. Reject URLs,
+    # wildcards, whitespace and non-canonical ports before publishing anything.
+    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    dns_host = rf"{label}(?:\.{label})*"
+    if not authority:
+        try:
+            status = subprocess.run(
+                ["tailscale", "status", "--json"], check=True,
+                capture_output=True, text=True, timeout=5,
+            )
+            dns_name = json.loads(status.stdout)["Self"]["DNSName"].removesuffix(".").lower()
+            if not re.fullmatch(dns_host, dns_name) or "." not in dns_name:
+                raise ValueError("missing tailnet suffix")
+            short_host = subprocess.run(
+                ["hostname", "-s"], check=True,
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip().lower()
+            if not re.fullmatch(label, short_host):
+                raise ValueError("invalid short hostname")
+            authority = f"{short_host}.{dns_name.split('.', 1)[1]}:3080"
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
+            sys.exit("DeepSeek Harness cannot resolve the web trusted host (set DSH_WEB_TRUSTED_HOST in the private env file, or bring the tailnet up)")
+    match = re.fullmatch(rf"({dns_host})(?::([1-9][0-9]{{0,4}}))?", authority.lower())
+    if not match or len(match[1]) > 253 or (match[2] and int(match[2]) > 65535):
+        sys.exit("DeepSeek Harness DSH_WEB_TRUSTED_HOST must be a bare DNS host[:port] authority")
+    template = template.replace("@DSH_WEB_TRUSTED_HOST@", authority.lower())
+template = template.replace("@DSH_RECALL_MCP_URL@", os.environ["DSH_RENDER_RECALL_URL"])
+Path(sys.argv[2]).write_text(template, encoding="utf-8")
+PY
 }
 
 deepseek_harness_sync_profile_patch() {

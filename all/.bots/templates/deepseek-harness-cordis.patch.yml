@@ -1,3 +1,7 @@
+- id: connection
+  config:
+    trustedHosts: ['@DSH_WEB_TRUSTED_HOST@']
+
 - id: agent-default-model
   config:
     provider: helmcortex-opencode-go
