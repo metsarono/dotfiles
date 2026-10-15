@@ -29,6 +29,9 @@ PID_FILES = {
     "codex": "codex-helmastra-telegram.pid",
 }
 
+WARM_PREFIX = "warm-"
+WARM_REVIVE_GRACE = 30
+
 # Enabled-agent name -> the status line that reports its liveness.
 STATUS_LABELS = {
     "opencode": r"opencode:",
@@ -63,6 +66,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-attempts", type=int, default=3, help="relaunch attempts per down episode")
     parser.add_argument("--backoff", type=int, default=120, help="base seconds between attempts; doubles each attempt")
     parser.add_argument("--start-timeout", type=int, default=240)
+    parser.add_argument("--warm-revive-grace", type=float, default=WARM_REVIVE_GRACE,
+                        help="seconds to wait for a warm seat's graceful exit before self-request force escalation")
     parser.add_argument("--warm-file", default=str(Path.home() / ".config/telegram-agent-watchdog/warm-sessions"),
                         help="private list of nurse-joy warm sessions to supervise, one name per line")
     parser.add_argument("--nurse", default=shutil.which("nurse-joy") or str(Path.home() / ".local/hx/bin/nurse-joy"))
@@ -189,6 +194,85 @@ def warm_verdicts(nurse: str, names: list[str], timeout: int, tmux: str | None =
     return verdicts
 
 
+def warm_members(nurse: str, timeout: int) -> dict[str, dict]:
+    """Return nurse-joy's reported warm-seat members, or an empty map on unreadable status."""
+    try:
+        run = subprocess.run([nurse, "status", "--json"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True, timeout=timeout, close_fds=True)
+        value = json.loads(run.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    members = value.get("members", []) if isinstance(value, dict) else []
+    return {str(m.get("name", "")).lower(): m for m in members
+            if isinstance(m, dict) and isinstance(m.get("name"), str)}
+
+
+def warm_state(name: str, member: dict | None = None) -> dict:
+    """Read the live claude-warm runtime state for a label, resolving its channel privately."""
+    state_root = state_home() / "claude-idle-compaction"
+    label = name.replace(" ", "-")
+    last_path = state_root / ("last-session.%s.json" % label)
+    try:
+        last = json.loads(last_path.read_text(encoding="utf-8"))
+        channel = last.get("channel")
+        if not isinstance(channel, str) or not re.fullmatch(r"claude-[0-9a-f]{32}", channel):
+            return {}
+        runtime_root = Path(os.environ.get("XDG_RUNTIME_DIR") or ("/run/user/%d" % os.getuid()))
+        state = json.loads((runtime_root / "claude-idle-compaction" / channel / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(state, dict):
+        return {}
+    if member:
+        # nurse-joy's live report is the seat roster; reject a mismatched supervisor
+        # rather than trusting an old label record after that label has been rebound.
+        reported_pid = member.get("supervisor_pid")
+        if reported_pid is not None and str(reported_pid) != str(state.get("supervisor_pid")):
+            return {}
+    return state
+
+
+def proc_generation(pid: object) -> str | None:
+    """Return pid and Linux kernel start-time for a live process, or None."""
+    try:
+        number = int(pid)
+        fields = Path("/proc/%d/stat" % number).read_text().rsplit(")", 1)[1].split()
+        if fields[0] == "Z":
+            return None
+        return "%d:%s" % (number, fields[19])
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+
+def warm_resume_identity(name: str, member: dict | None = None) -> tuple[str | None, str | None]:
+    """Return supervisor generation and newest reported transcript's session id."""
+    state = warm_state(name, member)
+    pid = state.get("supervisor_pid")
+    generation = proc_generation(pid)
+    if generation is None:
+        return None, None
+    candidates: list[Path] = []
+    for value in (state.get("transcript_path"), (member or {}).get("transcript_path"), (member or {}).get("transcript")):
+        if isinstance(value, str) and value:
+            candidates.append(Path(value).expanduser())
+    transcripts = (member or {}).get("transcripts")
+    if isinstance(transcripts, list):
+        candidates.extend(Path(item).expanduser() for item in transcripts if isinstance(item, str))
+    existing: list[tuple[float, Path]] = []
+    for candidate in candidates:
+        try:
+            existing.append((candidate.stat().st_mtime, candidate))
+        except OSError:
+            pass
+    if not existing:
+        return generation, None
+    transcript = max(existing, key=lambda item: item[0])[1]
+    session_id = transcript.name[:-6] if transcript.name.endswith(".jsonl") else transcript.stem
+    if not re.fullmatch(r"[A-Fa-f0-9-]{16,64}", session_id):
+        return generation, None
+    return generation, session_id
+
+
 def make_event(host: str, agent: str, kind: str, severity: str, title: str, body: str, payload: dict, when: dt.datetime) -> dict:
     return {
         "schema": SCHEMA,
@@ -254,38 +338,68 @@ def pid_alive(pid: int) -> bool:
 
 def request_main(argv: list[str]) -> int:
     """Agent-side entry: ask the external watchdog to restart an agent, then return."""
+    default_agent = os.environ.get("TELEGRAM_AGENT_SELF")
+    if not default_agent and os.environ.get("CLAUDE_WARM_HERDR_AGENT"):
+        default_agent = WARM_PREFIX + os.environ["CLAUDE_WARM_HERDR_AGENT"]
     parser = argparse.ArgumentParser(
         prog="telegram-agent-watchdog request",
         description="Request an external restart of an agent. Returns immediately and never signals any process group.",
     )
-    parser.add_argument("agent", nargs="?", default=os.environ.get("TELEGRAM_AGENT_SELF"),
-                        help="agent to restart; defaults to $TELEGRAM_AGENT_SELF")
+    parser.add_argument("agent", nargs="?", default=default_agent,
+                        help="agent to restart; defaults to $TELEGRAM_AGENT_SELF or $CLAUDE_WARM_HERDR_AGENT")
     parser.add_argument("--other", action="store_true", help="allow targeting an agent other than $TELEGRAM_AGENT_SELF")
     parser.add_argument("--requester-pid", type=int, default=os.getppid(),
                         help="process whose exit means the requesting turn has detached (default: parent)")
     parser.add_argument("--state-dir", default=str(state_home() / "telegram-agent-watchdog"))
     parser.add_argument("--pid-dir", default=str(state_home() / "telegram-agents"))
+    parser.add_argument("--warm-file", default=str(Path.home() / ".config/telegram-agent-watchdog/warm-sessions"))
+    parser.add_argument("--nurse", default=shutil.which("nurse-joy") or str(Path.home() / ".local/hx/bin/nurse-joy"))
     args = parser.parse_args(argv)
-    if not args.agent or args.agent not in STATUS_LABELS:
-        print("telegram-agent-watchdog request: name a known agent (%s) or set TELEGRAM_AGENT_SELF" % ", ".join(sorted(STATUS_LABELS)), file=sys.stderr)
+    warm_target = bool(args.agent and args.agent.startswith(WARM_PREFIX))
+    warm_name = args.agent[len(WARM_PREFIX):] if warm_target else ""
+    warm_names = read_warm_sessions(Path(args.warm_file)) if warm_target else []
+    if warm_target and (not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", warm_name) or warm_name.lower() not in {n.lower() for n in warm_names}):
+        print("telegram-agent-watchdog request: warm seat must be listed in --warm-file", file=sys.stderr)
+        return 2
+    if warm_target:
+        warm_name = next(name for name in warm_names if name.lower() == warm_name.lower())
+    if not args.agent or (not warm_target and args.agent not in STATUS_LABELS):
+        print("telegram-agent-watchdog request: name a known agent (%s) or listed warm-<name>" % ", ".join(sorted(STATUS_LABELS)), file=sys.stderr)
         return 2
     self_name = os.environ.get("TELEGRAM_AGENT_SELF")
-    if self_name and args.agent != self_name and not args.other:
+    warm_self = os.environ.get("CLAUDE_WARM_HERDR_AGENT")
+    is_self = bool(warm_target and warm_self and warm_name.lower() == warm_self.lower()) or bool(not warm_target and self_name and args.agent == self_name)
+    if self_name and not warm_target and args.agent != self_name and not args.other:
         print("telegram-agent-watchdog request: %s is not this agent (%s); pass --other to target it" % (args.agent, self_name), file=sys.stderr)
         return 2
+    if warm_self and warm_target and warm_name.lower() != warm_self.lower() and not args.other:
+        print("telegram-agent-watchdog request: %s is not this warm seat (%s); pass --other to target it" % (warm_name, warm_self), file=sys.stderr)
+        return 2
     os.umask(0o077)
-    path = Path(args.state_dir) / "requests" / ("%s.json" % args.agent)
+    canonical_agent = WARM_PREFIX + warm_name.lower() if warm_target else args.agent
+    path = Path(args.state_dir) / "requests" / ("%s.json" % canonical_agent)
     if path.exists():
         print("telegram-agent-watchdog request: revive of %s already pending" % args.agent)
         return 0
+    generation = generation_of(args.agent, Path(args.pid_dir)) if not warm_target else None
+    resume_session = None
+    if warm_target:
+        member = warm_members(args.nurse, 30).get(warm_name.lower())
+        generation, resume_session = warm_resume_identity(warm_name, member)
+        if generation is None or resume_session is None:
+            print("telegram-agent-watchdog request: live warm supervisor or transcript is unavailable", file=sys.stderr)
+            return 2
     body = {
         "schema": REQUEST_SCHEMA,
         "id": uuid.uuid4().hex,
-        "agent": args.agent,
+        "agent": canonical_agent,
         "requester_pid": args.requester_pid,
-        "generation": generation_of(args.agent, Path(args.pid_dir)),
+        "generation": generation,
+        "self_requested": is_self,
         "requested_at": int(time.time()),
     }
+    if warm_target:
+        body["resume_session"] = resume_session
     atomic_write(path, (json.dumps(body, sort_keys=True) + "\n").encode("utf-8"))
     print("telegram-agent-watchdog request: revive of %s queued; the watchdog restarts it after this turn detaches" % args.agent)
     return 0
@@ -300,7 +414,8 @@ def process_requests(args: argparse.Namespace, host: str, state: dict, when: dt.
         try:
             request = json.loads(path.read_text(encoding="utf-8"))
             agent = request["agent"]
-            if request.get("schema") != REQUEST_SCHEMA or agent not in STATUS_LABELS:
+            warm_target = isinstance(agent, str) and agent.startswith(WARM_PREFIX)
+            if request.get("schema") != REQUEST_SCHEMA or not isinstance(agent, str) or (agent not in STATUS_LABELS and not warm_target):
                 raise ValueError("bad request")
         except (OSError, ValueError, KeyError):
             path.unlink(missing_ok=True)
@@ -316,8 +431,28 @@ def process_requests(args: argparse.Namespace, host: str, state: dict, when: dt.
                                          "The requesting turn never detached within %ss; nothing was restarted" % args.request_timeout,
                                          {"request": request.get("id")}, when))
             continue  # wait until the requesting turn has detached
+        warm_name = agent[len(WARM_PREFIX):] if warm_target else None
+        warm_names = read_warm_sessions(Path(args.warm_file)) if warm_target else []
+        if warm_target and (not warm_name or warm_name.lower() not in {name.lower() for name in warm_names}):
+            path.unlink(missing_ok=True)
+            events.append(make_event(host, agent, "revive_rejected", "warning", "%s is not an approved warm seat" % agent,
+                                     "The requested warm seat is not in the private warm-session roster; no restart was attempted",
+                                     {"request": request.get("id")}, when))
+            continue
+        if warm_target:
+            warm_name = next(name for name in warm_names if name.lower() == warm_name.lower())
+            current_member = warm_members(args.nurse, 30).get(warm_name.lower())
+            current_generation, _ = warm_resume_identity(warm_name, current_member)
+        else:
+            current_generation = generation_of(agent, Path(args.pid_dir))
         fence = request.get("generation")
-        if fence is not None and fence != generation_of(agent, Path(args.pid_dir)):
+        if warm_target and not isinstance(fence, str):
+            path.unlink(missing_ok=True)
+            events.append(make_event(host, agent, "revive_stale", "notice", "%s revive request has no generation fence" % agent,
+                                     "The warm request did not record a supervisor generation; no restart was attempted",
+                                     {"request": request.get("id")}, when))
+            continue
+        if fence is not None and fence != current_generation:
             path.unlink(missing_ok=True)
             events.append(make_event(host, agent, "revive_stale", "notice", "%s revive request is stale" % agent,
                                      "%s was already restarted since the request; no second restart" % agent,
@@ -334,14 +469,40 @@ def process_requests(args: argparse.Namespace, host: str, state: dict, when: dt.
         path.unlink(missing_ok=True)
         revive[agent] = int(now)
         marker = Path(args.intent_dir) / agent
+        force_escalated = False
+        code_staleness = "not-applicable"
         try:
-            stopped = run_manager(args.manager, ["stop", agent], args.start_timeout)
-            started = run_manager(args.manager, ["start", agent], args.start_timeout) if stopped.returncode == 0 else stopped
-            ok = stopped.returncode == 0 and started.returncode == 0
-            detail = (started.stdout or "").strip()[-300:]
-        except (OSError, subprocess.SubprocessError) as exc:
+            if warm_target:
+                session_id = request.get("resume_session")
+                if not isinstance(session_id, str) or not re.fullmatch(r"[A-Fa-f0-9-]{16,64}", session_id):
+                    raise ValueError("missing or invalid live resume session")
+                cmd = [args.nurse, "revive", "--no-visit", "--resume", session_id, warm_name]
+                try:
+                    started = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                             text=True, timeout=args.warm_revive_grace, close_fds=True, env=child_env())
+                except subprocess.TimeoutExpired:
+                    if not request.get("self_requested"):
+                        raise
+                    force_escalated = True
+                    started = subprocess.run([args.nurse, "revive", "--no-visit", "--force", "--resume", session_id, warm_name],
+                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                             text=True, timeout=args.start_timeout, close_fds=True, env=child_env())
+                detail = (started.stdout or "").strip()[-300:]
+                fresh = warm_members(args.nurse, 60).get(warm_name.lower())
+                verdict = fresh.get("verdict") if fresh else None
+                ok = started.returncode == 0 and verdict in ("field", "degraded")
+                code_stale = bool(fresh and (fresh.get("code_stale") is True or fresh.get("generation_loaded") is False or verdict == "degraded"))
+                code_staleness = "stale" if code_stale else "fresh" if ok else "unknown"
+                if not ok:
+                    detail = detail or "readiness not confirmed by nurse-joy status"
+            else:
+                stopped = run_manager(args.manager, ["stop", agent], args.start_timeout)
+                started = run_manager(args.manager, ["start", agent], args.start_timeout) if stopped.returncode == 0 else stopped
+                ok = stopped.returncode == 0 and started.returncode == 0
+                detail = (started.stdout or "").strip()[-300:]
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
             ok, detail = False, type(exc).__name__
-        if ok:
+        if ok and not warm_target:
             probe = run_manager(args.manager, ["status"], 60)
             ok = classify(agent, probe.stdout) == "up"
             detail = detail or "readiness not confirmed by status"
@@ -352,7 +513,8 @@ def process_requests(args: argparse.Namespace, host: str, state: dict, when: dt.
                                  "%s self-revive %s" % (agent, "completed" if ok else "failed"),
                                  "%s was restarted externally on request and verified up" % agent if ok else
                                  "%s self-revive did not verify; the normal relaunch loop takes over: %s" % (agent, detail),
-                                 {"request": request.get("id"), "requester_pid": requester}, when))
+                                 {"request": request.get("id"), "requester_pid": requester,
+                                  "code_staleness": code_staleness, "force_escalated": force_escalated}, when))
     return events
 
 
@@ -473,7 +635,8 @@ def main(argv: list[str]) -> int:
             except OSError as exc:
                 print("telegram-agent-watchdog: spool write failed: %s" % type(exc).__name__, file=sys.stderr)
         atomic_write(state_path, (json.dumps({"schema": STATE_SCHEMA, "agents": agents_state_out, "revive": state.get("revive", {})}, sort_keys=True) + "\n").encode("utf-8"))
-        atomic_write(state_dir / "receipt.json", (json.dumps({"schema": STATE_SCHEMA, "host": host, "timestamp": int(now), "outcomes": outcomes, "events": [e["kind"] + ":" + e["payload"]["agent"] for e in events]}, sort_keys=True) + "\n").encode("utf-8"))
+        request_receipts = [dict(e["payload"], result=e["kind"]) for e in events if e["kind"].startswith("revive_")]
+        atomic_write(state_dir / "receipt.json", (json.dumps({"schema": STATE_SCHEMA, "host": host, "timestamp": int(now), "outcomes": outcomes, "events": [e["kind"] + ":" + e["payload"]["agent"] for e in events], "request_receipts": request_receipts}, sort_keys=True) + "\n").encode("utf-8"))
     for name, outcome in sorted(outcomes.items()):
         print("telegram-agent-watchdog: %s=%s" % (name, outcome))
     return 0

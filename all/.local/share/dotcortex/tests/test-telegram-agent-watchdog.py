@@ -29,8 +29,8 @@ esac
 FAKE_NURSE = """#!/usr/bin/env bash
 root="$FAKE_ROOT"
 case "$1" in
-  status) cat "$root/nurse_status" ;;
-  revive) shift; for a in "$@"; do case "$a" in --*) ;; *) echo "$a" >> "$root/revives" ;; esac; done ;;
+  status) if [ -f "$root/nurse_status_after_revive" ]; then cat "$root/nurse_status_after_revive"; else cat "$root/nurse_status"; fi ;;
+  revive) printf '%s\\n' "$*" >> "$root/revive_args"; [ ! -f "$root/delay_nurse" ] || sleep 0.2; shift; for a in "$@"; do case "$a" in --*) ;; *) [ "$a" = "$(cat "$root/session_id" 2>/dev/null)" ] || echo "$a" >> "$root/revives" ;; esac; done ;;
   *) exit 2 ;;
 esac
 """
@@ -75,7 +75,8 @@ class WatchdogTests(unittest.TestCase):
              "--boot-lock", str(self.root / "boot.lock"), "--spool", str(self.root / "spool"),
              "--pid-dir", str(self.root / "pids"), "--backoff", backoff,
              "--warm-file", str(self.root / "warm"), "--nurse", str(self.nurse), "--tmux", str(self.tmux), *extra],
-            env=dict(os.environ, FAKE_ROOT=str(self.root)), text=True, capture_output=True, timeout=30,
+            env=dict(os.environ, FAKE_ROOT=str(self.root), XDG_STATE_HOME=str(self.root / "xdg-state"),
+                     XDG_RUNTIME_DIR=str(self.root / "xdg-runtime")), text=True, capture_output=True, timeout=30,
         )
 
     def starts(self) -> list[str]:
@@ -151,11 +152,41 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(self.starts(), ["codex"])
 
     def request(self, agent: str, requester_pid: int, env: dict | None = None) -> subprocess.CompletedProcess:
+        request_env = {key: value for key, value in os.environ.items()
+                       if key not in {"TELEGRAM_AGENT_SELF", "CLAUDE_WARM_HERDR_AGENT"}}
+        request_env.update({"FAKE_ROOT": str(self.root), "XDG_STATE_HOME": str(self.root / "xdg-state"),
+                            "XDG_RUNTIME_DIR": str(self.root / "xdg-runtime")})
+        request_env.update(env or {})
         return subprocess.run(
             [str(WATCHDOG), "request", agent, "--requester-pid", str(requester_pid),
-             "--state-dir", str(self.root / "state"), "--pid-dir", str(self.root / "pids")],
-            env=dict(os.environ, **(env or {})), text=True, capture_output=True, timeout=30,
+             "--state-dir", str(self.root / "state"), "--pid-dir", str(self.root / "pids"),
+             "--warm-file", str(self.root / "warm"), "--nurse", str(self.nurse)],
+            env=request_env,
+            text=True, capture_output=True, timeout=30,
         )
+
+    def prepare_warm_request(self, name: str = "Fable") -> str:
+        session_id = "01234567-89ab-cdef-0123-456789abcdef"
+        self.root.joinpath("warm").write_text(name + "\n")
+        self.root.joinpath("session_id").write_text(session_id)
+        transcript = self.root / (session_id + ".jsonl")
+        transcript.write_text("{}\n")
+        state_root = self.root / "xdg-state/claude-idle-compaction"
+        channel = "claude-0123456789abcdef0123456789abcdef"
+        runtime = self.root / "xdg-runtime/claude-idle-compaction" / channel
+        state_root.mkdir(parents=True)
+        runtime.mkdir(parents=True)
+        (state_root / ("last-session.%s.json" % name)).write_text(json.dumps({"channel": channel}))
+        (runtime / "state.json").write_text(json.dumps({"supervisor_pid": os.getpid(), "session_id": session_id,
+                                                        "transcript_path": str(transcript),
+                                                        "argv": ["claude", "--resume", "deadbeef-dead-beef-dead-beefdeadbeef"]}))
+        self.set_warm({name: "field"})
+        return session_id
+
+    def request_warm(self, name: str = "Fable", requester_pid: int | None = None,
+                     env: dict | None = None) -> subprocess.CompletedProcess:
+        self.prepare_warm_request(name)
+        return self.request("warm-" + name.lower(), requester_pid or self.dead_pid(), env=env)
 
     def calls(self) -> list[str]:
         path = self.root / "calls"
@@ -204,7 +235,8 @@ class WatchdogTests(unittest.TestCase):
         self.request("codex", self.dead_pid())
         self.run_watchdog()
         self.assertEqual(self.calls(), ["stop:codex", "start:codex"])
-        self.assertEqual([e["kind"] for e in self.events()], ["revive_done", "revive_rejected"])
+        # Spool files from two runs in the same second sort by random id, not time.
+        self.assertCountEqual([e["kind"] for e in self.events()], ["revive_done", "revive_rejected"])
 
     def test_stale_generation_is_dropped_without_restart(self) -> None:
         (self.root / "pids").mkdir()
@@ -247,6 +279,125 @@ class WatchdogTests(unittest.TestCase):
     def revives(self) -> list[str]:
         path = self.root / "revives"
         return path.read_text().split() if path.exists() else []
+
+    def test_listed_warm_seat_request_is_accepted_with_live_generation_and_transcript(self) -> None:
+        session_id = self.prepare_warm_request()
+        result = self.request("warm-fable", self.dead_pid(), env={"CLAUDE_WARM_HERDR_AGENT": "Fable"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        queued = json.loads((self.root / "state/requests/warm-fable.json").read_text())
+        self.assertEqual(queued["resume_session"], session_id)
+        self.assertNotEqual(queued["resume_session"], "deadbeef-dead-beef-dead-beefdeadbeef")
+        self.assertTrue(queued["generation"].startswith(str(os.getpid()) + ":"))
+        self.assertTrue(queued["self_requested"])
+
+    def test_warm_environment_targets_self_when_argument_is_omitted(self) -> None:
+        session_id = self.prepare_warm_request()
+        result = subprocess.run(
+            [str(WATCHDOG), "request", "--requester-pid", str(self.dead_pid()),
+             "--state-dir", str(self.root / "state"), "--warm-file", str(self.root / "warm"),
+             "--nurse", str(self.nurse)],
+            env=dict(os.environ, FAKE_ROOT=str(self.root), XDG_STATE_HOME=str(self.root / "xdg-state"),
+                     XDG_RUNTIME_DIR=str(self.root / "xdg-runtime"), CLAUDE_WARM_HERDR_AGENT="Fable"),
+            text=True, capture_output=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        queued = json.loads((self.root / "state/requests/warm-fable.json").read_text())
+        self.assertEqual(queued["resume_session"], session_id)
+        self.assertTrue(queued["self_requested"])
+
+    def test_warm_request_uses_newest_reported_transcript_by_mtime(self) -> None:
+        self.prepare_warm_request()
+        newest_id = "fedcba98-7654-3210-fedc-ba9876543210"
+        newest = self.root / (newest_id + ".jsonl")
+        newest.write_text("{}\n")
+        os.utime(newest, ns=(newest.stat().st_atime_ns, newest.stat().st_mtime_ns + 10_000_000_000))
+        (self.root / "nurse_status").write_text(json.dumps({"members": [{"name": "Fable", "verdict": "field",
+                                                                          "transcripts": [str(self.root / ("01234567-89ab-cdef-0123-456789abcdef.jsonl")), str(newest)]}]}))
+        result = self.request("warm-fable", self.dead_pid())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        queued = json.loads((self.root / "state/requests/warm-fable.json").read_text())
+        self.assertEqual(queued["resume_session"], newest_id)
+
+    def test_unlisted_warm_seat_request_is_rejected(self) -> None:
+        self.prepare_warm_request("Fable")
+        (self.root / "warm").write_text("Opus\n")
+        result = self.request("warm-fable", self.dead_pid())
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.root / "state/requests/warm-fable.json").exists())
+
+    def test_stale_warm_generation_is_dropped(self) -> None:
+        self.prepare_warm_request()
+        self.assertEqual(self.request("warm-fable", self.dead_pid()).returncode, 0)
+        state_path = self.root / "xdg-runtime/claude-idle-compaction/claude-0123456789abcdef0123456789abcdef/state.json"
+        state = json.loads(state_path.read_text())
+        state["supervisor_pid"] = self.dead_pid()
+        state_path.write_text(json.dumps(state))
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])
+        self.assertEqual([event["kind"] for event in self.events()], ["revive_stale"])
+
+    def test_warm_revive_command_readiness_and_receipt(self) -> None:
+        session_id = self.prepare_warm_request()
+        self.assertEqual(self.request("warm-fable", self.dead_pid(), env={"CLAUDE_WARM_HERDR_AGENT": "Fable"}).returncode, 0)
+        self.run_watchdog()
+        self.assertEqual((self.root / "revive_args").read_text().splitlines(),
+                         ["revive --no-visit --resume %s Fable" % session_id])
+        event = self.events()[0]
+        self.assertEqual(event["kind"], "revive_done")
+        self.assertEqual(event["payload"]["code_staleness"], "fresh")
+        receipt = json.loads((self.root / "state/receipt.json").read_text())
+        self.assertEqual(receipt["request_receipts"][0]["code_staleness"], "fresh")
+        self.assertFalse(receipt["request_receipts"][0]["force_escalated"])
+
+    def test_warm_readiness_must_be_verified(self) -> None:
+        self.prepare_warm_request()
+        (self.root / "nurse_status_after_revive").write_text(json.dumps({"members": [{"name": "Fable", "verdict": "unknown"}]}))
+        self.request("warm-fable", self.dead_pid())
+        self.run_watchdog()
+        self.assertEqual(self.events()[0]["kind"], "revive_failed")
+        receipt = json.loads((self.root / "state/receipt.json").read_text())
+        self.assertEqual(receipt["request_receipts"][0]["code_staleness"], "unknown")
+
+    def test_degraded_warm_readiness_is_up_and_receipt_marks_stale_code(self) -> None:
+        self.prepare_warm_request()
+        (self.root / "nurse_status_after_revive").write_text(json.dumps({"members": [{"name": "Fable", "verdict": "degraded"}]}))
+        self.request("warm-fable", self.dead_pid())
+        self.run_watchdog()
+        self.assertEqual(self.events()[0]["kind"], "revive_done")
+        receipt = json.loads((self.root / "state/receipt.json").read_text())
+        self.assertEqual(receipt["request_receipts"][0]["code_staleness"], "stale")
+
+    def test_warm_revive_cooldown_is_honoured(self) -> None:
+        self.prepare_warm_request()
+        self.request("warm-fable", self.dead_pid())
+        self.run_watchdog()
+        self.request("warm-fable", self.dead_pid())
+        self.run_watchdog()
+        self.assertEqual(len((self.root / "revive_args").read_text().splitlines()), 1)
+        self.assertEqual([event["kind"] for event in self.events()], ["revive_done", "revive_rejected"])
+
+    def test_force_escalation_is_limited_to_self_requested_warm_revives(self) -> None:
+        self.prepare_warm_request()
+        (self.root / "delay_nurse").write_text("")
+        self.request("warm-fable", self.dead_pid(), env={"CLAUDE_WARM_HERDR_AGENT": "Fable"})
+        self.run_watchdog("--warm-revive-grace", "0.05")
+        args = (self.root / "revive_args").read_text().splitlines()
+        self.assertEqual(len(args), 2)
+        self.assertIn("--force", args[1])
+        self.assertTrue(json.loads((self.root / "state/receipt.json").read_text())["request_receipts"][0]["force_escalated"])
+
+        other = WatchdogTests()
+        other.setUp()
+        try:
+            other.prepare_warm_request()
+            (other.root / "delay_nurse").write_text("")
+            other.request("warm-fable", other.dead_pid())  # explicit target without self identity: never force
+            other.run_watchdog("--warm-revive-grace", "0.05")
+            args = (other.root / "revive_args").read_text().splitlines()
+            self.assertEqual(len(args), 1)
+            self.assertNotIn("--force", args[0])
+        finally:
+            other.tearDown()
 
     def test_no_warm_list_never_calls_nurse(self) -> None:
         self.set_warm({"Fable": "down"})
