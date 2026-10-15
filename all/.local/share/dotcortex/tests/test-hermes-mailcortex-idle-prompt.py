@@ -15,7 +15,12 @@ import unittest
 
 ALL_OVERLAY = Path(__file__).resolve().parents[4]
 PATCH = ALL_OVERLAY / ".bots/patches/hermes-mailcortex-idle-prompt.patch"
-SOURCE_FILES = ("gateway/run_inbound.py", "gateway/platforms/api_server.py")
+SOURCE_FILES = (
+    "gateway/run_inbound.py",
+    "gateway/platforms/api_server.py",
+    "gateway/platforms/base.py",
+    "plugins/platforms/telegram/adapter.py",
+)
 
 
 class FakeMessageEvent:
@@ -67,6 +72,7 @@ class HermesIdlePromptSeamTest(unittest.IsolatedAsyncioTestCase):
             name="Seam", bases=[], keywords=[], body=methods, decorator_list=[])
         ast.fix_missing_locations(seam_class)
         namespace = {
+            "Any": object,
             "MessageEvent": FakeMessageEvent,
             "MessageType": SimpleNamespace(TEXT="text"),
             "getattr": getattr,
@@ -84,20 +90,24 @@ class HermesIdlePromptSeamTest(unittest.IsolatedAsyncioTestCase):
         calls = []
 
         class Adapter:
+            def __init__(inner):
+                inner.busy = busy
+
+            def _session_has_pending_work(inner, session_key):
+                return inner.busy
+
             async def handle_message(inner, event):
                 calls.append(event)
                 event._gateway_accepted = True
 
         runner = self.Seam()
         adapter = Adapter()
-        runner._active_work_count = lambda: int(busy)
-        runner._background_tasks = set()
-        runner.adapters = {"telegram": SimpleNamespace(
-            _active_sessions={}, _pending_messages={})}
+        runner._peek_session_state = lambda session_key: None
 
         async def target(session_key):
             self.assertEqual(session_key, "agent:YOUR_PROFILE:telegram:dm:YOUR_CHAT_ID")
-            return (SimpleNamespace(session_id="YOUR_SESSION_ID"),
+            return (SimpleNamespace(
+                        session_id="YOUR_SESSION_ID", active_turn_token=None),
                     SimpleNamespace(platform="telegram", chat_type="dm"), adapter)
 
         runner._gateway_idle_prompt_target = target
@@ -144,8 +154,9 @@ class HermesIdlePromptSeamTest(unittest.IsolatedAsyncioTestCase):
     def test_target_is_telegram_dm_only_and_ack_follows_adapter_claim(self):
         inbound = (self.site / SOURCE_FILES[0]).read_text(encoding="utf-8")
         self.assertIn('source.platform != Platform.TELEGRAM or source.chat_type != "dm"', inbound)
-        busy_at = inbound.index("if self._gateway_idle_prompt_busy():", inbound.index(
-            "async def admit_gateway_idle_prompt"))
+        busy_at = inbound.index(
+            "if self._gateway_idle_prompt_busy(session_key, entry, adapter):",
+            inbound.index("async def admit_gateway_idle_prompt"))
         claim_at = inbound.index("await adapter.handle_message(event)", busy_at)
         ack_at = inbound.index('return "accepted" if getattr(event, "_gateway_accepted"', claim_at)
         self.assertLess(busy_at, claim_at)

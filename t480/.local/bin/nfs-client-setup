@@ -32,6 +32,21 @@ ${T480S_TS_IP}   t480s
 ${T1700_TS_IP}   t1700
 EOF
 
+# Hub consumer mount — install ~/HelmCortex as a first-class NFS mount of the
+# hub export instead of the legacy symlink (see §Hub consumer mount above).
+HELMCORTEX_HUB="${HELMCORTEX_HUB:-}"
+if [ -n "$HELMCORTEX_HUB" ]; then
+  hub_ip_var="${HELMCORTEX_HUB^^}_TS_IP"
+  hub_ip="${!hub_ip_var:-}"
+  [ -n "$hub_ip" ] || die "HELMCORTEX_HUB=$HELMCORTEX_HUB but $hub_ip_var is not set in nfs.env"
+  grep -qE "^[[:space:]]*${hub_ip}[[:space:]]+${HELMCORTEX_HUB}[[:space:]]*$" "$HOSTS_FRAG" \
+    || printf '%s   %s\n' "$hub_ip" "$HELMCORTEX_HUB" >> "$HOSTS_FRAG"
+  HELMCORTEX_DIRECT="$(mktemp)"
+  trap 'rm -f "${HELMCORTEX_DIRECT:-}"' EXIT
+  cat "$AUTOFS_DIRECT" > "$HELMCORTEX_DIRECT"
+  printf '/home/metsatron/HelmCortex -fstype=nfs4,rsize=131072,wsize=131072,async,noatime,soft,timeo=10,retrans=1,intr  %s:/home/metsatron/HelmCortex\n' "$HELMCORTEX_HUB" >> "$HELMCORTEX_DIRECT"
+fi
+
 inject_block() {
   local target="$1" src="$2"
   local tmp
@@ -62,10 +77,21 @@ sudo install -m 644 "$AUTOFS_MASTER" /etc/auto.master.d/nfs-direct.autofs
 
 echo "[4/6] /etc/auto.direct..."
 sudo touch /etc/auto.direct
-inject_block /etc/auto.direct "$AUTOFS_DIRECT"
+if [ -n "$HELMCORTEX_HUB" ]; then
+  inject_block /etc/auto.direct "$HELMCORTEX_DIRECT"
+else
+  inject_block /etc/auto.direct "$AUTOFS_DIRECT"
+fi
 
 echo "[5/6] mount points..."
 mkdir -p "${HOME}/mnt/x230" "${HOME}/mnt/t480s" "${HOME}/mnt/t1700"
+if [ -n "$HELMCORTEX_HUB" ]; then
+  if [ -L "${HOME}/HelmCortex" ]; then
+    echo "   retiring legacy symlink: $(readlink "${HOME}/HelmCortex")"
+    rm -f "${HOME}/HelmCortex"
+  fi
+  [ -e "${HOME}/HelmCortex" ] || mkdir -p "${HOME}/HelmCortex"
+fi
 
 echo "[6/6] autofs..."
 sudo service autofs restart
