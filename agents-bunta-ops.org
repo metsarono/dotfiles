@@ -1,0 +1,290 @@
+#+TITLE: bunta-ops — Bunta's vetted coordinator tool on Kikin (Option A)
+#+PROPERTY: header-args :mkdirp yes
+
+* Why this exists
+
+Bunta runs on Honey and coordinates work on Kikin and x230. Every =ssh kikin …= and =scp= he ran hit the approval gate's remote-reach floor, so the Admiral approved each one by hand all night (Telegram 2204, 7138). The Admiral approved "Option A": one vetted tool on Kikin with a fixed verb set, plus one narrow floor rule in the approval engine that allows exactly =ssh kikin bunta-ops <verb> <args>= with shell-inert arguments (=agents-approval-engine-remote.org=, class =ops_tool=, off by default).
+
+The engine only checks the *shape*. This tool owns the *meaning*: every verb validates its own arguments, never passes text to a shell, logs each call to =~/.local/state/dotcortex/bunta-ops.jsonl=, and refuses anything else. No arbitrary command passthrough exists.
+
+* Verbs (round 1)
+
+| Verb | Arguments | Does |
+|------+-----------+------|
+| =mail-inbox= | — | =mailcortex inbox bunta@kikin-kushi.helm= (last 30 rows) |
+| =mail-read= | =<file-id>= | =mailcortex read= of one of Bunta's own messages |
+| =mail-send= | =<to> <body-file> [in-reply-to]= | sends as =bunta@kikin.helm=; the body file must be a regular =/tmp/bunta/bunta-*.md= whose first line is =Subject: …=; the in-reply-to id is given without angle brackets |
+| =status= | — | live/dead for each =/tmp/bunta/*.pid=, the newest 20 entries of =/tmp/bunta=, running codex/vibe processes |
+| =logs= | =<name> [lines]= | tail (≤ 400 lines) of =/tmp/bunta/<name>.log= or =/var/tmp/fable-<name>.log= |
+| =git= | =<repo> <log\|status\|diff\|show\|branch> [args]= | read-only git on =helmcortex=, =dotcortex=, =dc-wt/<name>= or =hc-wt/<name>=; options limited, external diff and textconv disabled |
+| =x230-fetch= | =<name>= | copies =x230:/tmp/bunta/bunta-<name>= to =/tmp/bunta/bunta-<name>= |
+| =x230-push= | =<name>= | copies =/tmp/bunta/bunta-<name>= to =x230:/tmp/bunta/bunta-<name>= |
+
+Later rounds (Bunta's list, in his pain order): codex-dispatch/codex-resume on x230, vibe-dispatch, wt-add/wt-remove, land, caddy-refresh, bridge-restart, render, replay. Each new verb must also be added to =OPS_VERBS= in the engine.
+
+* Tool
+
+#+BEGIN_SRC python :tangle all/.local/bin/bunta-ops :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""bunta-ops: Bunta's vetted coordinator verbs on Kikin. See agents-bunta-ops.org."""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+SCRATCH = Path('/tmp/bunta')
+SEAT_FROM = 'bunta@kikin.helm'
+SEAT_INBOX = 'bunta@kikin-kushi.helm'
+AUDIT = HOME / '.local/state/dotcortex/bunta-ops.jsonl'
+NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$')
+MAIL_ID = re.compile(r'^[0-9]+\.[0-9]+_[0-9a-f]+\.[A-Za-z0-9-]+(?::2,[A-Z]*)?$')
+MSG_ID = re.compile(r'^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$')
+ADDRESS = re.compile(r'^[A-Za-z0-9_.+-]+@[A-Za-z0-9_.-]+\.helm$')
+GIT_ARG = re.compile(r'^[A-Za-z0-9._/~^@:-]+$')
+GIT_OPTIONS = {'--oneline', '--stat', '--short', '--porcelain', '--name-only', '--name-status', '-n', '--graph',
+               '--decorate', '--cached', '--format=%h %ad %an %s', '--date=short', '--date=iso', '-a', '-v', '--show-current'}
+REPOS = {'helmcortex': HOME / 'HelmCortex', 'dotcortex': HOME / 'DotCortex'}
+WORKTREE_PARENTS = {'dc-wt': HOME / 'DotCortex-wt-kikin', 'hc-wt': HOME / 'mnt/x230/HelmCortex-wt'}
+
+
+class Refused(Exception):
+    pass
+
+
+def audit(verb, args, outcome):
+    try:
+        AUDIT.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'verb': verb, 'args': args, 'outcome': outcome}) + '\n')
+    except OSError:
+        pass
+
+
+def run(argv, timeout=60):
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, check=False)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def scratch_file(name, *, must_exist=True):
+    if not NAME.fullmatch(name):
+        raise Refused('bad name')
+    path = SCRATCH / name
+    if must_exist and (not path.is_file() or path.is_symlink()):
+        raise Refused('not a regular scratch file')
+    if path.is_symlink() or path.is_dir():
+        raise Refused('target is a link or directory')
+    return path
+
+
+def verb_mail_inbox(args):
+    if args:
+        raise Refused('mail-inbox takes no arguments')
+    result = subprocess.run(['mailcortex', 'inbox', SEAT_INBOX], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    sys.stdout.write('\n'.join(result.stdout.splitlines()[-30:]) + '\n')
+    return result.returncode
+
+
+def verb_mail_read(args):
+    if len(args) != 1 or not MAIL_ID.fullmatch(args[0]):
+        raise Refused('mail-read <file-id>')
+    return run(['mailcortex', 'read', SEAT_INBOX, args[0]])
+
+
+def verb_mail_send(args):
+    if len(args) not in (2, 3) or not ADDRESS.fullmatch(args[0]):
+        raise Refused('mail-send <to> <bunta-*.md> [in-reply-to]')
+    if not args[1].startswith('bunta-') or not args[1].endswith('.md'):
+        raise Refused('body must be /tmp/bunta/bunta-*.md')
+    body_path = scratch_file(args[1])
+    lines = body_path.read_text(encoding='utf-8').splitlines()
+    if not lines or not lines[0].startswith('Subject: ') or not lines[0][9:].strip():
+        raise Refused('first line must be "Subject: ..."')
+    argv = ['mailcortex', 'send', '--from', SEAT_FROM, '--to', args[0], '--subject', lines[0][9:].strip(),
+            '--body', '\n'.join(lines[1:]).lstrip('\n')]
+    if len(args) == 3:
+        if not MSG_ID.fullmatch(args[2]):
+            raise Refused('in-reply-to is a bare message id')
+        argv += ['--in-reply-to', '<' + args[2] + '>']
+    return run(argv)
+
+
+def verb_status(args):
+    if args:
+        raise Refused('status takes no arguments')
+    for pid_file in sorted(SCRATCH.glob('*.pid')):
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)
+            state = 'alive'
+        except (ValueError, OSError):
+            state = 'dead'
+        print(f'{pid_file.name}: {state}')
+    entries = sorted(SCRATCH.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:20] if SCRATCH.is_dir() else []
+    for entry in entries:
+        print(time.strftime('%m-%d %H:%M', time.localtime(entry.stat().st_mtime)), entry.name)
+    result = subprocess.run(['pgrep', '-af', 'codex exec|vibe'], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10, check=False)
+    for line in result.stdout.splitlines()[:10]:
+        print('proc', line[:160])
+    return 0
+
+
+def verb_logs(args):
+    if len(args) not in (1, 2) or not NAME.fullmatch(args[0]):
+        raise Refused('logs <name> [lines]')
+    lines = int(args[1]) if len(args) == 2 and args[1].isdigit() else 60
+    lines = max(1, min(lines, 400))
+    candidates = [SCRATCH / (args[0] + '.log'), Path('/var/tmp') / ('fable-' + args[0] + '.log')]
+    path = next((p for p in candidates if p.is_file() and not p.is_symlink()), None)
+    if path is None:
+        raise Refused('no such log')
+    return run(['tail', '-n', str(lines), str(path)])
+
+
+def verb_git(args):
+    if len(args) < 2:
+        raise Refused('git <repo> <subcommand> [args]')
+    repo_name, sub, rest = args[0], args[1], args[2:]
+    if repo_name in REPOS:
+        repo = REPOS[repo_name]
+    else:
+        parent, _, name = repo_name.partition('/')
+        if parent not in WORKTREE_PARENTS or not NAME.fullmatch(name):
+            raise Refused('unknown repo')
+        repo = WORKTREE_PARENTS[parent] / name
+    if not repo.is_dir():
+        raise Refused('repo missing')
+    if sub not in {'log', 'status', 'diff', 'show', 'branch'}:
+        raise Refused('read-only subcommands only')
+    for arg in rest:
+        if arg.startswith('-'):
+            if arg not in GIT_OPTIONS and not re.fullmatch(r'-[0-9]{1,4}', arg):
+                raise Refused('option not allowed: ' + arg)
+        elif not GIT_ARG.fullmatch(arg):
+            raise Refused('bad argument')
+    if sub == 'branch' and any(a not in {'-a', '-v', '--show-current'} for a in rest):
+        raise Refused('branch listing only')
+    extra = ['--no-ext-diff', '--no-textconv'] if sub in {'diff', 'show', 'log'} else []
+    return run(['git', '-C', str(repo), '--no-pager', sub, *extra, *rest], timeout=60)
+
+
+def verb_x230_fetch(args):
+    if len(args) != 1 or not NAME.fullmatch(args[0]):
+        raise Refused('x230-fetch <name>')
+    local = scratch_file('bunta-' + args[0], must_exist=False)
+    return run(['scp', '-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', 'x230:/tmp/bunta/bunta-' + args[0], str(local)], timeout=120)
+
+
+def verb_x230_push(args):
+    if len(args) != 1 or not NAME.fullmatch(args[0]):
+        raise Refused('x230-push <name>')
+    local = scratch_file('bunta-' + args[0])
+    return run(['scp', '-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', str(local), 'x230:/tmp/bunta/bunta-' + args[0]], timeout=120)
+
+
+VERBS = {'mail-inbox': verb_mail_inbox, 'mail-read': verb_mail_read, 'mail-send': verb_mail_send,
+         'status': verb_status, 'logs': verb_logs, 'git': verb_git,
+         'x230-fetch': verb_x230_fetch, 'x230-push': verb_x230_push}
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in {'-h', '--help'}:
+        print('usage: bunta-ops <verb> [args]\nverbs: ' + ' '.join(sorted(VERBS)))
+        return 0 if len(argv) >= 2 else 2
+    verb, args = argv[1], argv[2:]
+    handler = VERBS.get(verb)
+    if handler is None:
+        audit(verb, args, 'refused: unknown verb')
+        print('bunta-ops: unknown verb', file=sys.stderr)
+        return 2
+    try:
+        code = handler(args)
+    except Refused as exc:
+        audit(verb, args, 'refused: ' + str(exc))
+        print('bunta-ops: refused: ' + str(exc), file=sys.stderr)
+        return 2
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        audit(verb, args, 'error: ' + type(exc).__name__)
+        print('bunta-ops: error: ' + type(exc).__name__, file=sys.stderr)
+        return 1
+    audit(verb, args, f'exit {code}')
+    return code
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv))
+#+END_SRC
+
+* Tests
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-bunta-ops.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""bunta-ops refuses everything outside its verbs; no network, no mail is sent."""
+import importlib.machinery
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+
+TOOL = Path(__file__).resolve().parents[3] / 'bin/bunta-ops'
+loader = importlib.machinery.SourceFileLoader('bunta_ops', str(TOOL))
+spec = importlib.util.spec_from_loader('bunta_ops', loader)
+ops = importlib.util.module_from_spec(spec)
+loader.exec_module(ops)
+
+
+class BuntaOpsTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix='bunta-ops-test-'))
+        ops.SCRATCH = self.dir
+        ops.AUDIT = self.dir / 'audit.jsonl'
+        self.calls = []
+        ops.run = lambda argv, timeout=60: self.calls.append(argv) or 0
+
+    def refused(self, verb, *args):
+        self.assertEqual(ops.main(['bunta-ops', verb, *args]), 2, (verb, args))
+
+    def test_unknown_verb_and_bad_args_refused(self):
+        self.refused('rm', '-rf', '/')
+        self.refused('mail-read', '../../etc/passwd')
+        self.refused('logs', '../secret')
+        self.refused('git', 'dotcortex', 'push')
+        self.refused('git', 'dotcortex', 'log', '--output=/tmp/x')
+        self.refused('git', 'dotcortex', 'diff', '--ext-diff')
+        self.refused('git', 'dc-wt/../../etc', 'log')
+        self.refused('git', 'dotcortex', 'branch', '-D', 'master')
+        self.refused('x230-push', 'missing-file')
+        self.refused('mail-send', 'evil@example.com', 'bunta-x.md')
+        self.assertEqual(self.calls, [])
+
+    def test_mail_send_requires_scratch_body_with_subject(self):
+        (self.dir / 'bunta-note.md').write_text('no subject here\nbody\n')
+        self.refused('mail-send', 'fable@kikin.helm', 'bunta-note.md')
+        (self.dir / 'bunta-good.md').write_text('Subject: Hello Fable\n\nbody line\n')
+        self.assertEqual(ops.main(['bunta-ops', 'mail-send', 'fable@kikin.helm', 'bunta-good.md', '1792.1@kikin.helm']), 0)
+        argv = self.calls[-1]
+        self.assertEqual(argv[:4], ['mailcortex', 'send', '--from', 'bunta@kikin.helm'])
+        self.assertIn('Hello Fable', argv)
+        self.assertEqual(argv[-2:], ['--in-reply-to', '<1792.1@kikin.helm>'])
+
+    def test_symlinked_body_refused(self):
+        (self.dir / 'bunta-link.md').symlink_to('/etc/hostname')
+        self.refused('mail-send', 'fable@kikin.helm', 'bunta-link.md')
+
+    def test_git_read_only_passes_safe_flags(self):
+        self.assertEqual(ops.main(['bunta-ops', 'git', 'dotcortex', 'log', '--oneline', '-5']), 0)
+        argv = self.calls[-1]
+        self.assertIn('--no-ext-diff', argv)
+        self.assertEqual(argv[-2:], ['--oneline', '-5'])
+
+    def test_every_call_is_audited(self):
+        self.refused('nope')
+        self.assertIn('unknown verb', (self.dir / 'audit.jsonl').read_text())
+
+
+if __name__ == '__main__':
+    unittest.main()
+#+END_SRC
