@@ -250,6 +250,166 @@ def _inert_environment_export(command):
 # filesystem-writing find options. SYNTAX-only refusals (heredocs, redirections
 # inside the roots, $() substitution, unparsable quoting) are now Decider-eligible
 # instead of hard-refused: they are plumbing, not substance.
+def _admiral_floor(event, manifest=None, coordinator=None, readonly_proven=None):
+    """The Admiral's non-overridable floor; uncertainty belongs to the judge.
+
+    This deliberately recognizes only effects that must never be model-judged.
+    The older _true_floor analysis remains available to parser helpers, but it
+    no longer decides whether an otherwise unknown request reaches a human.
+    """
+    if not isinstance(event, dict) or event.get('hook_event_name') != 'PermissionRequest':
+        return True
+    payload = event.get('tool_input')
+    if not isinstance(payload, dict):
+        return True
+    command = payload.get('command')
+    metadata = {key: value for key, value in payload.items() if key != 'command'}
+    try:
+        raw = json.dumps(metadata, ensure_ascii=False, sort_keys=True, default=str).casefold()
+    except (TypeError, ValueError):
+        return True
+    normalized_raw = re.sub(r'\\x([0-9a-fA-F]{2})', lambda match: chr(int(match.group(1), 16)), raw)
+    if (_credential_content(metadata) or _credential_content({'command': command})
+            or _protected(raw) or '.claude.json' in raw
+            or _protected(normalized_raw) or '.claude.json' in normalized_raw):
+        return True
+    if isinstance(command, str):
+        command_without_documents = _strip_heredoc_bodies(command)
+        nested = _shell_substitutions(command_without_documents if command_without_documents is not None else command)
+        for _start, _end, body in nested or ():
+            nested_event = {**event, 'tool_input': {**payload, 'command': body}}
+            if _admiral_floor(nested_event, manifest, coordinator, readonly_proven):
+                return True
+        layout = _heredoc_layout(command)
+        if layout is not None:
+            try:
+                header_words = _unwrap_words(shlex.split(layout[0], posix=True))
+            except ValueError:
+                header_words = []
+            if header_words and header_words[0].rsplit('/', 1)[-1] in INTERPRETER_WORDS:
+                for _offset, body in layout[1]:
+                    nested_event = {**event, 'tool_input': {**payload, 'command': str(body)}}
+                    if _admiral_floor(nested_event, manifest, coordinator, readonly_proven):
+                        return True
+    # Protected destinations include tool writes as well as shell redirects.
+    for key in ('file_path', 'notebook_path', 'path', 'target'):
+        value = payload.get(key)
+        if isinstance(value, str) and _protected(value):
+            return True
+    if not isinstance(command, str):
+        tool = str(event.get('tool_name') or '').casefold()
+        return tool.startswith('mcp__') and bool(re.search(r'(?:__|_)(send|reply|post|put|delete|upload|write|create|update)$', tool))
+
+    # Inspect shell segments independently. Malformed syntax is not itself a
+    # floor: the Decider receives the untouched full command and context.
+    prepared = _strip_heredoc_bodies(command)
+    scan = prepared if prepared is not None else command
+    normalized_scan = re.sub(r'\\x([0-9a-fA-F]{2})', lambda match: chr(int(match.group(1), 16)), scan).casefold()
+    if (re.search(r'secret[\W_]*vault', normalized_scan) or '.claude.json' in normalized_scan
+            or re.search(r'(?<![\w])\.env(?:[.\w-]*)?(?!\w)', normalized_scan)
+            or re.search(r'keepass(?:[.\w-]*)?\.(?:kdbx?|database)', normalized_scan)):
+        return True
+    if manifest is not None and _write_outside_roots(event, manifest):
+        return True
+    layout = _split_approval_compound(scan)
+    pieces = [text for _separator, text in layout] if layout is not None else [scan]
+    stages = []
+    for piece in pieces:
+        parsed_stages = _shell_stages(piece)
+        if parsed_stages is None:
+            stages.append(piece)
+        else:
+            stages.extend(shlex.join(_unwrap_words(stage)) for stage in parsed_stages if stage)
+    pieces = stages or pieces
+    pieces = [piece for piece in pieces if piece]
+    for piece in pieces:
+        try:
+            words = _unwrap_words(shlex.split(piece, posix=True))
+        except ValueError:
+            words = []
+        if not words:
+            continue
+        if any(_protected(word) for word in words if '/' in word or word.startswith('~') or '.' in word):
+            return True
+        lowered = [word if word in {'-C', '-F'} else word.casefold() for word in words]
+        verb = lowered[0].rsplit('/', 1)[-1]
+        if verb == 'xargs':
+            return True
+        if verb in {'eval', 'bash', 'sh', 'zsh'} and '-c' in lowered[1:]:
+            script = words[lowered.index('-c') + 1] if '-c' in lowered[1:] else shlex.join(words[1:])
+            nested_event = {**event, 'tool_input': {**payload, 'command': script}}
+            if _admiral_floor(nested_event, manifest, coordinator, readonly_proven):
+                return True
+        if any(word in SERVICE for word in lowered) or verb in {'sudo', 'doas'}:
+            return True
+        if verb in {'kill', 'pkill', 'killall'}:
+            return True
+        if (verb in PACKAGE and any(word in {'install', 'add', 'upgrade', 'update', 'remove', 'uninstall', 'sync'}
+                                   or word.startswith(('install=', 'add=')) for word in lowered[1:])):
+            return True
+        if verb in PYTHON_READERS and len(lowered) >= 4 and lowered[1:3] == ['-m', 'pip'] and lowered[3] in {'install', 'uninstall'}:
+            return True
+        if _ssh_identity_transport(lowered):
+            return True
+        piece_event = {**event, 'tool_input': {**payload, 'command': piece}}
+        if verb == 'ssh' and not (readonly_proven or _ssh_readonly_candidate(piece_event, manifest or {})):
+            piece_coordinator = coordinator or _coordinator_match(piece_event, manifest or {})
+            if piece_coordinator is None:
+                return True
+        if verb in {'curl', 'wget', 'nc', 'socat', 'telnet', 'rsync', 'scp'}:
+            if not (verb == 'ssh' and readonly_proven):
+                has_payload = any(word in {'--data', '--data-binary', '--data-raw', '--upload-file', '-d', '-T'}
+                                  or word.startswith(('--data=', '--data-binary=', '--upload-file='))
+                                  for word in lowered)
+                has_fleet_data = any(term in scan.casefold() for term in ('dotcortex', 'helmcortex', 'fleet', 'worktree'))
+                if has_payload and has_fleet_data:
+                    return True
+        # Broad git safety forms are the irreducible floor in every location.
+        # Ordinary commits/adds/merges in lane worktrees remain judgeable.
+        if verb == 'git':
+            args = lowered[1:]
+            if args[:1] == ['-C']:
+                args = args[2:]
+            sub = args[0] if args else ''
+            rest = args[1:]
+            if sub in {'reset', 'push', 'filter-branch', 'filter-repo', 'rebase', 'clean'}:
+                return True
+            if sub == 'branch' and any(arg in {'-d', '-D', '--delete', '--delete-force'} for arg in rest):
+                return True
+            if any(arg == '--force' or arg.startswith('--force=') or arg.startswith('--force-') for arg in rest):
+                return True
+            if sub == 'worktree' and any(arg in {'-f', '--force'} for arg in rest):
+                return True
+            if sub in {'checkout', 'restore'} and ('--' in rest or sub == 'restore'):
+                return True
+            if sub == 'stash' and any(arg in {'drop', 'clear', 'pop'} for arg in rest):
+                return True
+            if sub == 'commit' and '--amend' in rest:
+                return True
+        # Recursive deletion is a hard floor only when it leaves configured
+        # scratch. Ordinary in-root deletion is judged with the full request.
+        if verb == 'rm' and any(arg in {'-rf', '-fr', '--recursive'} or (arg.startswith('-') and 'r' in arg[1:] and 'f' in arg[1:]) for arg in lowered[1:]):
+            operands = [arg for arg in words[1:] if not arg.startswith('-')]
+            roots = _scratch_roots(manifest or {})
+            cwd = event.get('cwd') if isinstance(event.get('cwd'), str) else '/'
+            if not operands:
+                return True
+            for operand in operands:
+                target = _lexical(operand, cwd)
+                if target is None or not any(_inside(os.path.realpath(target), os.path.realpath(root)) for root in roots):
+                    return True
+        if any(arg == '--force' or arg.startswith('--force=') or arg.startswith('--force-') for arg in lowered[1:]):
+            return True
+        if verb in {'dd', 'mkfs', 'mkfs.ext4', 'cryptsetup', 'wipefs', 'fdisk', 'parted', 'mount', 'umount',
+                    'truncate', 'chmod', 'chown', 'at'}:
+            return True
+        if verb in {'unlink', 'rmdir'}:
+            return True
+        if verb in {'cp', 'mv', 'ln', 'install'} and '-f' in lowered[1:]:
+            return True
+    return False
+
+
 def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
     tool_input = event.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
@@ -662,6 +822,8 @@ def _inert_local_command(command, cwd='/'):
         return False
     if not words:
         return False
+    if words == ['true'] and command.strip() == 'true':
+        return True
     if _inert_environment_export(command):
         return True
     if re.fullmatch(r'command -v [A-Za-z0-9_.+-]+', command):
@@ -819,6 +981,15 @@ def _shell_substitutions(command):
     return spans if quote is None else None
 
 
+def _has_shell_substitution(event):
+    payload = event.get('tool_input') if isinstance(event, dict) else None
+    command = payload.get('command') if isinstance(payload, dict) else None
+    if not isinstance(command, str):
+        return False
+    parsed = _shell_substitutions(command)
+    return parsed is None or bool(parsed)
+
+
 def _remove_shell_substitutions(command, substitutions):
     output, cursor = [], 0
     for start, end, _body in substitutions:
@@ -841,7 +1012,7 @@ def _substitution_floor(event, manifest, coordinator=None):
             nested = {**event, 'tool_input': {**event['tool_input'], 'command': text}}
             # Authority belongs to the inner exact shape, never the outer grant.
             inner_coordinator = _coordinator_match(nested, manifest) if manifest is not None else None
-            if (_true_floor(nested, manifest, coordinator=inner_coordinator)
+            if (_admiral_floor(nested, manifest, coordinator=inner_coordinator)
                     or not _read_only_proven(nested, manifest)):
                 return True
     return False
@@ -851,7 +1022,7 @@ def _read_only_proven(event, manifest):
     """Prove a substitution producer is an existing observation shape."""
     if not isinstance(event, dict) or not isinstance(manifest, dict):
         return False
-    if _true_floor(event, manifest):
+    if _admiral_floor(event, manifest):
         return False
     command = event.get('tool_input', {}).get('command') if isinstance(event.get('tool_input'), dict) else None
     cwd = event.get('cwd')
@@ -1706,14 +1877,16 @@ def _for_loop_body_floor(event, manifest):
     variable, literal, body = match.groups()
     items = _loop_items(literal)
     if items is None:
-        return True
+        nested = {**event, 'tool_input': {**payload, 'command': body}}
+        return _admiral_floor(nested, manifest)
     for item in items:
         replacement = shlex.quote(item)
         expanded = re.sub(r'\$\{' + re.escape(variable) + r'\}|\$' + re.escape(variable) + r'\b', replacement, body)
         if '$' + variable in expanded or '${' + variable + '}' in expanded:
-            return True
+            nested = {**event, 'tool_input': {**payload, 'command': body}}
+            return _admiral_floor(nested, manifest)
         nested = {**event, 'tool_input': {**payload, 'command': expanded}}
-        if _true_floor(nested, manifest):
+        if _admiral_floor(nested, manifest):
             return True
     return False
 
@@ -1751,6 +1924,8 @@ def _git_match(event, manifest):
     try:
         words = shlex.split(tool_input["command"], posix=True)
     except ValueError:
+        return False
+    if any(any(char in word for char in ';&|<>') for word in words):
         return False
     if not words or words[0] != "git":
         return False
@@ -3336,6 +3511,17 @@ def _ssh_readonly_proven(event, manifest):
     return _remote_realpath_proven_p3(analysis, analysis["host_config"])
 
 
+def _ssh_readonly_candidate(event, manifest):
+    """Recognize the reviewed read-only SSH grammar without remote I/O."""
+    config = _class_config(manifest, 'ssh_readonly')
+    payload = event.get('tool_input') if isinstance(event, dict) else None
+    command = payload.get('command') if isinstance(payload, dict) else None
+    segments = _split_approval_compound(command) if isinstance(command, str) else None
+    return bool(config is not None and isinstance(command, str)
+                and (segments is None or len(segments) == 1)
+                and _ssh_readonly_analysis(command, config) is not None)
+
+
 def _remote_realpath_proven_p3(analysis, config):
     paths = analysis.get("realpath_paths")
     if not isinstance(paths, list) or any(not isinstance(p, str) for p in paths):
@@ -3962,23 +4148,56 @@ def _classify_single(event, manifest):
     Decider for those."""
     if not isinstance(event, dict) or event.get("hook_event_name") != "PermissionRequest":
         return False, "not_permission_request"
-    readonly_proven = _ssh_readonly_proven(event, manifest)
-    floor = _true_floor(event, manifest, readonly_proven=readonly_proven)
+    payload = event.get('tool_input')
+    if (event.get('tool_name') == 'Bash' and isinstance(payload, dict)
+            and set(payload) <= TOOL_INPUT_KEYS and payload.get('command') == 'true'):
+        return True, 'local_noop'
+    if _ssh_readonly_candidate(event, manifest):
+        return False, 'no_match_decider'
     coordinator = _coordinator_match(event, manifest)
+    readonly_proven = _ssh_readonly_proven(event, manifest)
+    floor = _admiral_floor(event, manifest, coordinator, readonly_proven=readonly_proven)
     # Only the proven exact command can narrow the overlapping remote/git
     # floor clauses. All protected paths, services, packages and writers are
     # scanned again on the FULL original request and still win.
-    if floor and (coordinator is None or _true_floor(event, manifest, coordinator, readonly_proven=readonly_proven)):
+    if floor and (coordinator is None or _admiral_floor(event, manifest, coordinator, readonly_proven=readonly_proven)):
         return False, "true_floor"
+    if manifest.get('_approval_compound_skip') is True:
+        skipped_command = payload.get('command') if isinstance(payload, dict) else None
+        skipped_segments = (_split_approval_compound(skipped_command)
+                            if isinstance(skipped_command, str) else None)
+        if skipped_segments and any(separator == '||' for separator, _text in skipped_segments):
+            return False, 'no_match_decider'
+    payload = event.get('tool_input')
+    if isinstance(payload, dict) and isinstance(payload.get('command'), str):
+        try:
+            commit_words = _unwrap_words(shlex.split(payload['command'], posix=True))
+        except ValueError:
+            commit_words = []
+        git_args = commit_words[1:] if commit_words[:1] == ['git'] else []
+        if git_args[:1] == ['-C']:
+            git_args = git_args[2:]
+        if (git_args[:1] == ['commit'] and '--' in git_args
+                and git_args[git_args.index('--') + 1:]):
+            return False, 'no_match_decider'
+        if (coordinator == 'coordinator_worktree'
+                and git_args[:1] == ['worktree'] and any(word in {'remove', 'prune'} for word in git_args)):
+            return False, 'no_match_decider'
     if coordinator is not None:
         return True, coordinator
     if readonly_proven:
-        return True, 'ssh_readonly'
+        # Fleet SSH is reviewed by the Decider with the complete remote
+        # command and local intent. The proof only narrows the hard floor.
+        return False, 'no_match_decider'
     payload = event.get('tool_input')
     command = payload.get('command') if isinstance(payload, dict) else None
-    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and _inert_local_command(command, event.get('cwd','/')):
+    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and not _has_shell_substitution(event) and _inert_local_command(command, event.get('cwd','/')):
         return (True, 'local_read') if manifest['entries']['local_read']['enabled'] else (False, 'no_match_decider')
-    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and _for_readonly(event, manifest):
+    if _interpreter_body(event):
+        # Script effects are a Decider question even when a narrow local parser
+        # could prove a read. Hard floors were already checked above.
+        return False, 'no_match_decider'
+    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and not _has_shell_substitution(event) and _for_readonly(event, manifest):
         return True, 'local_read'
     if _approval_queue_safe(event):
         return True, 'approval_queue'
@@ -3995,6 +4214,8 @@ def _classify_single(event, manifest):
     tool_input = event.get("tool_input")
     if event.get("tool_name") == "Bash" and isinstance(tool_input, dict) and set(tool_input) <= TOOL_INPUT_KEYS and isinstance(tool_input.get("command"), str) and (_routes_compound(tool_input["command"]) or re.match(r"^timeout [0-9]+(?:\.[0-9]+)?[smh]? ", tool_input["command"])):
         allow, reason = _compound(event, manifest)
+        if allow and 'root_default_allow' in reason:
+            return False, 'no_match_decider'
         if allow:
             return True, reason
         if reason.endswith("_disabled"):
@@ -4014,19 +4235,16 @@ def _classify_single(event, manifest):
             return False, f"{name}_disabled"
     if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str) and _coordinator_candidate(tool_input["command"]):
         return False, "coordinator_refused"
-    if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
-        substitutions = _shell_substitutions(tool_input["command"])
-        if (substitutions and _substitution_data_only(tool_input["command"], substitutions)
-                and not _substitution_floor(event, manifest)
-                and manifest["entries"]["local_read"]["enabled"]):
-            return True, "local_read"
     if _syntax_refusal(event):
         return False, "syntax"
     return False, "no_match_decider"
 
 
 def _hard_refusal(reason):
-    return reason in {'true_floor', 'not_permission_request', 'coordinator_refused'} or reason.startswith(('compound_refused:', 'substitution_refused:'))
+    """Only the Admiral's explicit absolute floor bypasses the judge."""
+    return (reason in {'true_floor', 'not_permission_request'}
+            or (isinstance(reason, str) and reason.startswith(('compound_refused:', 'substitution_refused:'))
+                and reason.endswith(':true_floor')))
 
 
 def _compound_segment_reason(index, text, reason):
@@ -4062,6 +4280,15 @@ def _compound_approval(event, manifest, judge=None):
     segments = _split_approval_compound(command)
     if segments is None or len(segments) < 2:
         return None
+    # Compound routing must never let a deterministic/root default hide a hard
+    # floor inside another segment. Preflight the complete original request;
+    # syntactically proven coordinator forms retain their existing carve-out.
+    for floor_index, (floor_separator, floor_text) in enumerate(segments, 1):
+        floor_event = {**event, 'tool_input': {**payload, 'command': floor_text}}
+        coordinator = _coordinator_match(floor_event, manifest)
+        if (_admiral_floor(floor_event, manifest)
+                and (coordinator is None or _admiral_floor(floor_event, manifest, coordinator))):
+            return False, _compound_segment_reason(floor_index, floor_text, 'true_floor')
     if not set(payload) <= TOOL_INPUT_KEYS or not isinstance(event.get('cwd'), str):
         return False, 'true_floor'
     current = event['cwd']
@@ -4069,20 +4296,27 @@ def _compound_approval(event, manifest, judge=None):
     remote_created = set(manifest.get('_compound_remote_created_files', ()))
     stages = []
     variables = {}
+    needs_judge = False
     for index, (separator, text) in enumerate(segments, 1):
         if _fleet_environment_export(text):
             expanded_text = text
         else:
             expanded = _literal_variable_expansion(text, current, manifest, variables)
             if expanded is None:
-                return False, _compound_segment_reason(index, text, 'true_floor') if judge else 'true_floor'
-            expanded_text, variables = expanded
+                expanded_text = text
+            else:
+                expanded_text, variables = expanded
         stage_manifest = {**manifest, '_compound_created_files': frozenset(created), '_compound_remote_created_files':frozenset(remote_created)}
         stage = {**event, 'cwd': current, 'tool_input': {**payload, 'command': expanded_text}}
         result = classify(stage, stage_manifest)
         allow, reason = result
         if not allow and _hard_refusal(reason):
             return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
+        if not allow or reason == 'root_default_allow' or separator == '||':
+            # A fallback branch can mask a failed or refused command. Even when
+            # every component is individually allowlisted (for example, a read
+            # followed by `|| true`), the command shape must reach the judge.
+            needs_judge = True
         try:
             raw_words = shlex.split(expanded_text, posix=True)
         except ValueError:
@@ -4099,7 +4333,7 @@ def _compound_approval(event, manifest, judge=None):
                 reason = 'true_floor'
                 return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
             current = target
-        stages.append((index, expanded_text, stage, stage_manifest, cd, assignment))
+        stages.append((index, expanded_text, stage, stage_manifest, cd, assignment, reason, allow))
         output = _heredoc_scratch_output(stage, stage_manifest)
         if output is not None:
             created.add(output)
@@ -4114,15 +4348,20 @@ def _compound_approval(event, manifest, judge=None):
             created.clear()
             remote_created.clear()
     used = []
-    for index, text, stage, stage_manifest, cd, assignment in stages:
+    if judge:
+        if not needs_judge:
+            used = [reason for _index, _text, _stage, _stage_manifest, cd, assignment, reason, _allow
+                    in stages if not cd and not assignment]
+            return True, 'compound:' + '+'.join(sorted(set(used or ['cd'])))
+        # Floors were checked per segment above. Give the judge the untouched
+        # full request once so it can assess interactions, cwd and intent.
+        return judge(event, {**manifest, '_approval_compound_skip': True})
+    for index, text, stage, stage_manifest, cd, assignment, reason, _allow in stages:
         if assignment:
             continue
-        try:
-            allow, reason = judge(stage, stage_manifest) if judge else _classify_scoped(stage, stage_manifest)
-        except TimeoutError:
-            return False, _compound_segment_reason(index, text, 'error:TimeoutError')
+        allow, reason = _classify_scoped(stage, stage_manifest)
         if not allow:
-            return False, _compound_segment_reason(index, text, reason) if judge else reason
+            return False, reason
         if not cd:
             used.append(reason)
     return True, 'compound:' + '+'.join(sorted(set(used or ['cd'])))
@@ -4152,18 +4391,12 @@ def _substitutions_approval(event, manifest, judge):
 def classify(event, manifest):
     if not isinstance(event, dict) or event.get('hook_event_name') != 'PermissionRequest':
         return False, 'not_permission_request'
-    if _for_readonly(event, manifest):
-        return True, 'local_read'
     if _for_loop_body_floor(event, manifest):
+        _log_decision.extras = {'decision_path': 'floor', 'judge_verdict': 'not_consulted'}
         return False, 'true_floor'
-    if _for_loop_candidate(event) is not None:
-        return False, 'true_floor'
-    compound = _compound_approval(event, manifest)
+    compound = None if manifest.get('_approval_compound_skip') is True else _compound_approval(event, manifest)
     if compound is not None:
         return compound
-    nested = _substitutions_approval(event, manifest, _classify_scoped)
-    if nested is not None:
-        return nested
     return _classify_single(event, manifest)
 
 
@@ -4172,29 +4405,27 @@ _approval_deadline = None
 
 def _decide_request(event, manifest):
     """Apply the complete gate recursively; main owns the single final ledger."""
-    if _for_readonly(event, manifest):
-        return True, 'local_read'
     if _for_loop_body_floor(event, manifest):
         return False, 'true_floor'
-    if _for_loop_candidate(event) is not None:
-        return False, 'true_floor'
-    compound = _compound_approval(event, manifest, judge=_decide_request)
+    compound = (None if manifest.get('_approval_compound_skip') is True
+                else _compound_approval(event, manifest, judge=_decide_request))
     if compound is not None:
+        if not compound[0] and _hard_refusal(compound[1]):
+            _log_decision.extras = {'decision_path': 'floor', 'judge_verdict': 'not_consulted'}
         return compound
     allow, reason = classify(event, manifest)
     if _hard_refusal(reason):
+        _log_decision.extras = {'decision_path': 'floor', 'judge_verdict': 'not_consulted'}
         return allow, reason
-    nested = _substitutions_approval(event, manifest, _decide_request) if isinstance(event, dict) else None
-    if nested is not None:
-        return nested
-    inverted = not allow and _inversion_scope(event, manifest)
-    if inverted or not allow and reason in {'no_match_decider', 'syntax'}:
+    # root_default_allow is a scope candidate, not an approval. It enters the
+    # Decider path exactly like any other unproven request.
+    inverted = reason == 'root_default_allow' or (not allow and _inversion_scope(event, manifest))
+    if inverted or not allow and reason in {'no_match_decider', 'syntax', 'coordinator_refused'}:
         config = _decider_config(manifest)
         if config is not None and _approval_deadline is not None:
             remaining = int((_approval_deadline - __import__('time').monotonic()) * 1000)
             config = {**config, 'timeout_ms': min(config['timeout_ms'], max(0, remaining))}
         if inverted:
-            allow, reason = True, 'root_default_allow'
             if config is not None:
                 config = {**config, 'danger_veto': True}
                 advisory = {**event, '_approval_roots': list(_policy_roots(manifest))}
@@ -4204,16 +4435,37 @@ def _decide_request(event, manifest):
                     if _approval_deadline is not None and __import__('time').monotonic() >= _approval_deadline:
                         raise
                     _decider_allow, status, latency_ms, verdict = True, 'unavailable', 0, 'allow'
-                _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
+                _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': verdict,
+                                        'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
                 if verdict == 'risky':
                     allow, reason = False, 'decider_risky'
+                elif verdict == 'allow' and status in {'no_risk_veto', 'accepted'}:
+                    allow, reason = True, 'decider_allow'
+                else:
+                    allow, reason = False, f'decider_{status}'
+            else:
+                _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': 'unavailable',
+                                        'decider_status': 'disabled', 'verdict': 'ask'}
+                allow, reason = False, 'decider_disabled'
         elif config is not None:
             if config['mode'] == 'single' and _write_capable(event):
                 config = {**config, 'mode': 'dual'}
             decider_allow, status, latency_ms, verdict = _decider_decide(event, config)
-            _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
+            _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': verdict,
+                                    'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
             if decider_allow:
                 allow, reason = True, 'decider_allow'
+            else:
+                allow, reason = False, f'decider_{status}'
+        else:
+            _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': 'unavailable',
+                                    'decider_status': 'disabled', 'verdict': 'ask'}
+            allow, reason = False, 'decider_disabled'
+    elif not allow:
+        _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': 'unavailable',
+                                'decider_status': 'out_of_scope', 'verdict': 'ask'}
+    elif not hasattr(_log_decision, 'extras') or 'decision_path' not in _log_decision.extras:
+        _log_decision.extras = {'decision_path': 'deterministic', 'judge_verdict': 'not_needed'}
     return allow, reason
 
 
@@ -4413,6 +4665,15 @@ def _c1_envelope(event, request_id, timeout_ms, mode="single"):
         "cwd": event.get("cwd"),
         "target_paths": [tool_input[k] for k in ("file_path", "path", "notebook_path") if isinstance(tool_input.get(k), str)],
     }
+    recent_intent = event.get('recent_intent')
+    if not isinstance(recent_intent, str):
+        recent_intent = tool_input.get('description')
+    if not isinstance(recent_intent, str):
+        recent_intent = event.get('description')
+    if not isinstance(recent_intent, str):
+        recent_intent = event.get('user_prompt')
+    if isinstance(recent_intent, str) and recent_intent.strip():
+        state['recent_intent'] = recent_intent.strip()[:4000]
 
     def native_question(qid, kind, criteria):
         return {"id": qid, "kind": kind, "instructions": "Classify the approval criterion.", "evidence_ids": [],
@@ -4641,7 +4902,12 @@ def _decider_decide(event, config):
         if answers is not None:
             if danger_veto:
                 risk = _risk_confidence(answers)
-                status, verdict = ('risky', 'risky') if risk is not None and risk >= config['threshold'] else ('no_risk_veto', 'allow')
+                if risk is None:
+                    status, verdict = 'threshold_failed', 'ask'
+                elif risk >= config['threshold']:
+                    status, verdict = 'risky', 'risky'
+                else:
+                    status, verdict = 'no_risk_veto', 'allow'
                 break
             confidence = _decider_confidence(answers, config["mode"])
             if confidence is None:
@@ -4822,8 +5088,20 @@ def main():
         manifest = _load_manifest(manifest)
         _coordinator_proof_cache = {}
         allow, reason = _decide_request(event, manifest)
+        if 'decision_path' not in _log_decision.extras:
+            if _hard_refusal(reason):
+                _log_decision.extras.update(decision_path='floor', judge_verdict='not_consulted')
+            elif not allow:
+                _log_decision.extras.update(decision_path='judge', judge_verdict='unavailable',
+                                            decider_status='out_of_scope', verdict='ask')
+            else:
+                _log_decision.extras.update(decision_path='deterministic', judge_verdict='not_needed')
     except Exception as exc:
         allow, reason = False, f'error:{type(exc).__name__}'
+        _log_decision.extras.setdefault('decision_path', 'judge' if isinstance(exc, TimeoutError) else 'initialization')
+        _log_decision.extras.setdefault('judge_verdict', 'unavailable' if isinstance(exc, TimeoutError) else 'not_consulted')
+        _log_decision.extras.setdefault('decider_status', 'timeout' if isinstance(exc, TimeoutError) else 'unavailable')
+        _log_decision.extras.setdefault('verdict', 'ask')
     finally:
         _approval_deadline = None
         _coordinator_proof_cache = None

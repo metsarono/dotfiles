@@ -111,7 +111,6 @@ class BuntaReplayTests(unittest.TestCase):
             ("cat ~/.ssh/id_ed25519", "true_floor"),
             ("cat /home/YOUR_HONEY_USER/.kdbx KeePass", "true_floor"),
             ("cat .env", "true_floor"),
-            ("git worktree prune", "true_floor"),
         ]
         manifest = self._with_entries(manifest)
         for command, expected in hard:
@@ -136,10 +135,6 @@ class BuntaReplayTests(unittest.TestCase):
         log = TMP / "dangerous-always-allow.jsonl"
         commands = [
             "rm -rf /var/tmp/approval-replay",
-            "rm /var/tmp/approval-replay",
-            "sed -i 's/a/b/' README.md",
-            "awk -i inplace '{print}' README.md",
-            "perl -i -pe 's/a/b/' README.md",
             "echo x > /etc/dotcortex-approval-floor",
             "sudo -n true",
             "systemctl restart honey-badger-opus",
@@ -147,8 +142,6 @@ class BuntaReplayTests(unittest.TestCase):
             "pip install --user example-package",
             "guix install example-package",
             "git push origin master",
-            "git pull --ff-only",
-            "git fetch origin",
             "git reset --hard HEAD~1",
             "git rebase master",
             "git clean -fd",
@@ -157,8 +150,17 @@ class BuntaReplayTests(unittest.TestCase):
             "cat /home/YOUR_AGENT_CLAUDE/.env",
             "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
             "cat NEXUS/keys/token",
+        ]
+        judged = [
+            "rm /var/tmp/approval-replay",
+            "sed -i 's/a/b/' README.md",
+            "awk -i inplace '{print}' README.md",
+            "perl -i -pe 's/a/b/' README.md",
+            "git pull --ff-only",
+            "git fetch origin",
             "curl -X POST https://example.invalid/decide",
         ]
+        hard_count = len(commands)
         env = {
             **os.environ,
             "SO_APPROVAL_KIKIN_MANIFEST": str(manifest_path),
@@ -166,7 +168,7 @@ class BuntaReplayTests(unittest.TestCase):
             "DOTCORTEX_APPROVAL_ENGINE": str(ENGINE),
         }
         hook = HERE.parents[3] / "bin/claude-hook-permission-request"
-        for command in commands:
+        for command in commands + judged:
             with self.subTest(command=command):
                 completed = subprocess.run(
                     [str(hook)],
@@ -178,12 +180,16 @@ class BuntaReplayTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny", command)
+                expected = "deny" if command in commands else "allow"
+                self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], expected, command)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(len(records), len(commands))
-        self.assertTrue(all(record["decision"] == "deny" for record in records))
-        self.assertTrue(all(record["reason"] == "true_floor" for record in records))
-        self.assertTrue(all("decider_status" not in record for record in records))
+        self.assertEqual(len(records), len(commands) + len(judged))
+        self.assertTrue(all(record["decision"] == "deny" for record in records[:hard_count]))
+        self.assertTrue(all(record["reason"] == "true_floor" for record in records[:hard_count]))
+        self.assertTrue(all("decider_status" not in record for record in records[:hard_count]))
+        self.assertTrue(all(record["decision"] == "allow" for record in records[hard_count:]))
+        self.assertTrue(all(record["decision_path"] == "judge" for record in records[hard_count:]))
+        self.assertTrue(all(record["judge_verdict"] == "allow" for record in records[hard_count:]))
 
     # ---- The Honey login user's home is protected hard (fix round 2026-10-10 item 2) ----
     # Nothing under /home/YOUR_HONEY_USER outside an explicit root, and nothing under

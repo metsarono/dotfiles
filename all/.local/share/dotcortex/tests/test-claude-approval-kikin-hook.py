@@ -152,7 +152,7 @@ class KikinApprovalHookTests(unittest.TestCase):
             if item["name"] != "ssh_readonly"
         ))
         self.assertTrue(next(item for item in self.base["classes"] if item["name"] == "ssh_readonly")["enabled"])
-        self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "allow")
+        self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "deny")
 
     def test_each_class_has_green_and_disabled_paths(self):
         cases = [
@@ -163,7 +163,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for class_name, payload in cases:
             with self.subTest(class_name=class_name):
-                self.assert_decision(payload, self.manifest(class_name), "allow")
+                self.assert_decision(payload, self.manifest(class_name), "deny" if class_name == 'safe_commit' else "allow")
                 self.assert_decision(payload, self.manifest(), "deny")
 
     def test_full_red_corpus_never_allows(self):
@@ -329,11 +329,11 @@ class KikinApprovalHookTests(unittest.TestCase):
             "ps aux | head -3",
             "uptime && df -h /var/tmp",
             "cd " + root + " && git status --short && ls /etc/passwd",
-            "python3 -c 'import json; print(json.load(open(\"" + json_path + "\"))[\"schema\"])'",
         ]
         for command in commands:
             with self.subTest(command=command):
                 self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "allow")
+        self.assert_decision(event("Bash", {"command": "python3 -c 'import json; print(json.load(open(\"" + json_path + "\"))[\"schema\"])'"}, self.root), manifest, "deny")
 
     def test_decider_disabled_keeps_grey_zone_asking(self):
         manifest = self._decider_manifest(enabled=False)
@@ -341,7 +341,9 @@ class KikinApprovalHookTests(unittest.TestCase):
         run_hook(event("Bash", {"command": "cat README.md > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(records[-1]["decision"], "deny")
-        self.assertNotIn("decider_status", records[-1])
+        self.assertEqual(records[-1]['decision_path'], 'judge')
+        self.assertEqual(records[-1]['judge_verdict'], 'unavailable')
+        self.assertEqual(records[-1]['decider_status'], 'disabled')
 
     def _classify_reason(self, payload, manifest):
         """Run the engine's classify directly (imported once) for reason checks."""
@@ -364,13 +366,17 @@ class KikinApprovalHookTests(unittest.TestCase):
             "git reset --hard HEAD~1", "git reset --merge", "git rebase master",
             "git clean -fd", "git checkout -- file.py", "git restore file.py",
             "git branch -D topic", "git stash drop", "git stash clear",
-            "git commit --amend -m x", "git worktree prune", "git worktree remove ../x",
+            "git commit --amend -m x",
             "git filter-branch --tree-filter x", "git filter-repo --x",
-            "git checkout master", "git merge master",
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
+                self.assertTrue(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()).endswith("true_floor"))
+
+    def test_lane_worktree_cleanup_and_branch_integration_are_judged(self):
+        for command in ["git worktree prune", "git worktree remove ../x", "git checkout master", "git merge master"]:
+            with self.subTest(command=command):
+                self.assertNotEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
 
     def test_true_floor_git_reads_still_classify(self):
         # Fable's additions must not floor observation forms:
@@ -389,7 +395,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
+                self.assertTrue(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()).endswith("true_floor"))
 
     def test_plain_chmod_is_an_absolute_write_floor(self):
         reason = self._classify_reason(event("Bash", {"command": "chmod +x script.sh"}, self.root), self.manifest("local_read"))
@@ -426,7 +432,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
+                self.assertTrue(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()).endswith("true_floor"))
 
     def test_floor_verbs_caught_in_multiline(self):
         # Replay finding: _split_compound refuses raw newlines, so multi-line
@@ -441,7 +447,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
+                self.assertTrue(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()).endswith("true_floor"))
 
     def test_write_capable_detection(self):
         writes = [

