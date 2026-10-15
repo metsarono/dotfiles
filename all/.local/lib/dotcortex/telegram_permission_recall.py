@@ -15,6 +15,7 @@ from pathlib import Path
 
 PREFIX = '\U0001f510 Permission: '
 SWEEP_SECONDS = 8.0
+SETTLE_SECONDS = 3.0  # our prompt is posted while the hook runs; the next request comes later
 PROBE_AHEAD = 12
 TAIL_BYTES = 4 * 1024 * 1024
 ANCHOR_RES = (
@@ -109,8 +110,10 @@ def _call(base, token, method, payload):
         return {'ok': False, 'description': 'transport'}
 
 
-def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, sweep_seconds=SWEEP_SECONDS):
-    """Return the list of deleted message ids (empty when nothing qualifies)."""
+def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, sweep_seconds=SWEEP_SECONDS,
+          settle_seconds=SETTLE_SECONDS):
+    """Return the deleted message id as a one-item list (empty when nothing qualifies)."""
+    decided = now()  # the wrapper starts this right after the gate allowed
     session = event.get('session_id', '') if isinstance(event, dict) else ''
     token, chat = _token(state_dir), _chat(state_dir)
     if not token or not chat:
@@ -128,7 +131,7 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
         _log(session=session, action='skip', why='no_anchor')
         return []
     done, deleted = set(), []
-    deadline = started + sweep_seconds
+    deadline = min(started + sweep_seconds, decided + settle_seconds)
     while now() < deadline:
         for message_id in range(anchor + 1, anchor + 1 + PROBE_AHEAD):
             if message_id in done:
@@ -142,13 +145,18 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
             done.add(message_id)
             message = reply.get('result') if isinstance(reply.get('result'), dict) else {}
             text, date = message.get('text', ''), message.get('date')
-            in_window = isinstance(date, int) and int(started) - 1 <= date <= deadline + 1
+            in_window = isinstance(date, int) and int(started) - 1 <= date <= int(decided) + 1
             if not (isinstance(text, str) and text.startswith(PREFIX) and in_window):
                 _log(session=session, action='anomaly', message_id=message_id, why='stripped_but_not_a_windowed_permission')
+                if isinstance(text, str) and text.startswith(PREFIX):
+                    deadline = 0  # a later request's prompt: stop before touching anything newer
+                    break
                 continue
             if _call(base, token, 'deleteMessage', {'chat_id': chat, 'message_id': message_id}).get('ok'):
                 deleted.append(message_id)
                 _log(session=session, action='deleted', message_id=message_id)
+            deadline = 0  # one request, one prompt
+            break
         sleep(0.5)
     _log(session=session, action='swept', anchor=anchor, deleted=deleted)
     return deleted

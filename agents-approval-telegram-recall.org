@@ -12,7 +12,8 @@ The Admiral ruled (Telegram 7116, 7118) that these must vanish, without modifyin
 - It runs only after the gate *allowed* the request. The wrapper starts it detached, so the hook's own latency is unchanged.
 - It anchors on the newest Telegram message id the session already knows: inbound =<channel … message_id="N">= tags and the reply tool's =sent (id: N)= results, read from the tail of the session transcript. Message ids in a private chat count upward, so the plugin's prompt for this request is newer than that anchor. Without an anchor it does nothing.
 - The plugin puts inline buttons on permission messages and on nothing else. For each id above the anchor it asks Telegram to strip the buttons (=editMessageReplyMarkup= with no markup). Telegram refuses this on the Admiral's own messages ("can't be edited") and on button-less bot replies ("not modified"), and a not-yet-sent id is "not found" and retried. So only a bot message that had buttons can succeed.
-- A stripped message is deleted only when its returned text starts with =🔐 Permission: = *and* its date falls inside this request's window (from the hook's start time to the end of the sweep). Anything else is left in place and logged as an anomaly.
+- A stripped message is deleted only when its returned text starts with =🔐 Permission: = *and* its date falls inside this request's window: from the hook's start to one second after the gate's decision. Anything else is left in place and logged as an anomaly.
+- It deletes at most one message, then stops. The sweep ends three seconds after the decision. A prompt dated after the decision belongs to a later request, so the sweep stops there too. (Found 2026-10-16, Telegram 7224: an eight-second sweep deleted the live prompt of the *next* request, a real floor ask, which then never reached the Admiral.)
 - It does nothing while any other tool call in this session is still unresolved in the transcript, so a real floor ask that is waiting for the Admiral can never be touched.
 - It acts only when the channel has exactly one allowlisted chat, because message ids are per chat and the anchor carries no chat for replies.
 
@@ -37,6 +38,7 @@ from pathlib import Path
 
 PREFIX = '\U0001f510 Permission: '
 SWEEP_SECONDS = 8.0
+SETTLE_SECONDS = 3.0  # our prompt is posted while the hook runs; the next request comes later
 PROBE_AHEAD = 12
 TAIL_BYTES = 4 * 1024 * 1024
 ANCHOR_RES = (
@@ -131,8 +133,10 @@ def _call(base, token, method, payload):
         return {'ok': False, 'description': 'transport'}
 
 
-def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, sweep_seconds=SWEEP_SECONDS):
-    """Return the list of deleted message ids (empty when nothing qualifies)."""
+def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, sweep_seconds=SWEEP_SECONDS,
+          settle_seconds=SETTLE_SECONDS):
+    """Return the deleted message id as a one-item list (empty when nothing qualifies)."""
+    decided = now()  # the wrapper starts this right after the gate allowed
     session = event.get('session_id', '') if isinstance(event, dict) else ''
     token, chat = _token(state_dir), _chat(state_dir)
     if not token or not chat:
@@ -150,7 +154,7 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
         _log(session=session, action='skip', why='no_anchor')
         return []
     done, deleted = set(), []
-    deadline = started + sweep_seconds
+    deadline = min(started + sweep_seconds, decided + settle_seconds)
     while now() < deadline:
         for message_id in range(anchor + 1, anchor + 1 + PROBE_AHEAD):
             if message_id in done:
@@ -164,13 +168,18 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
             done.add(message_id)
             message = reply.get('result') if isinstance(reply.get('result'), dict) else {}
             text, date = message.get('text', ''), message.get('date')
-            in_window = isinstance(date, int) and int(started) - 1 <= date <= deadline + 1
+            in_window = isinstance(date, int) and int(started) - 1 <= date <= int(decided) + 1
             if not (isinstance(text, str) and text.startswith(PREFIX) and in_window):
                 _log(session=session, action='anomaly', message_id=message_id, why='stripped_but_not_a_windowed_permission')
+                if isinstance(text, str) and text.startswith(PREFIX):
+                    deadline = 0  # a later request's prompt: stop before touching anything newer
+                    break
                 continue
             if _call(base, token, 'deleteMessage', {'chat_id': chat, 'message_id': message_id}).get('ok'):
                 deleted.append(message_id)
                 _log(session=session, action='deleted', message_id=message_id)
+            deadline = 0  # one request, one prompt
+            break
         sleep(0.5)
     _log(session=session, action='swept', anchor=anchor, deleted=deleted)
     return deleted
@@ -276,6 +285,7 @@ class RecallTests(unittest.TestCase):
         (self.state / 'access.json').write_text(json.dumps({'allowFrom': [CHAT]}))
         self.now = int(time.time())
         recall.LOG = self.dir / 'recall.jsonl'  # never write the live log
+        self.sweep_args = {}
 
     def transcript(self, *, anchor=100, unresolved=1):
         rows = [{'message': {'content': [{'type': 'text', 'text': f'<channel source="telegram" chat_id="{CHAT}" message_id="{anchor - 1}">hi</channel>'}]}},
@@ -289,7 +299,7 @@ class RecallTests(unittest.TestCase):
 
     def run_sweep(self, fake, **kwargs):
         event = {'session_id': 's', 'transcript_path': self.transcript(**kwargs)}
-        return recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=1.2)
+        return recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=1.2, **self.sweep_args)
 
     def test_deletes_only_the_windowed_permission_prompt(self):
         fake = FakeTelegram({
@@ -326,6 +336,36 @@ class RecallTests(unittest.TestCase):
         timer = threading.Timer(0.4, lambda: fake.messages.__setitem__(101, {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}))
         timer.start()
         self.assertEqual(self.run_sweep(fake), [101])
+
+    def test_deletes_only_its_own_prompt_never_the_next_one(self):
+        fake = FakeTelegram({
+            101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now},
+            102: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now},
+        })
+        self.assertEqual(self.run_sweep(fake), [101])
+        self.assertIn(102, fake.messages)
+        self.assertEqual(fake.stripped, [101])
+
+    def test_next_request_prompt_after_the_decision_is_never_touched(self):
+        # Telegram 7224: the next request's live floor prompt arrived seconds
+        # after this allow and was deleted. Now the sweep has ended by then.
+        self.sweep_args = {'settle_seconds': 0.3}
+        fake = FakeTelegram({})
+        timer = threading.Timer(0.7, lambda: fake.messages.__setitem__(101, {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}))
+        timer.start()
+        self.assertEqual(self.run_sweep(fake), [])
+        timer.join()
+        self.assertEqual(fake.stripped, [])
+        self.assertIn(101, fake.messages)
+
+    def test_prompt_dated_after_the_decision_stops_the_sweep(self):
+        fake = FakeTelegram({
+            101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now + 30},
+            102: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now + 30},
+        })
+        self.assertEqual(self.run_sweep(fake), [])
+        self.assertEqual(fake.stripped, [101])
+        self.assertIn(101, fake.messages)
 
     def test_no_state_or_ambiguous_chat_does_nothing(self):
         fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})

@@ -76,6 +76,7 @@ class RecallTests(unittest.TestCase):
         (self.state / 'access.json').write_text(json.dumps({'allowFrom': [CHAT]}))
         self.now = int(time.time())
         recall.LOG = self.dir / 'recall.jsonl'  # never write the live log
+        self.sweep_args = {}
 
     def transcript(self, *, anchor=100, unresolved=1):
         rows = [{'message': {'content': [{'type': 'text', 'text': f'<channel source="telegram" chat_id="{CHAT}" message_id="{anchor - 1}">hi</channel>'}]}},
@@ -89,7 +90,7 @@ class RecallTests(unittest.TestCase):
 
     def run_sweep(self, fake, **kwargs):
         event = {'session_id': 's', 'transcript_path': self.transcript(**kwargs)}
-        return recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=1.2)
+        return recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=1.2, **self.sweep_args)
 
     def test_deletes_only_the_windowed_permission_prompt(self):
         fake = FakeTelegram({
@@ -126,6 +127,36 @@ class RecallTests(unittest.TestCase):
         timer = threading.Timer(0.4, lambda: fake.messages.__setitem__(101, {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}))
         timer.start()
         self.assertEqual(self.run_sweep(fake), [101])
+
+    def test_deletes_only_its_own_prompt_never_the_next_one(self):
+        fake = FakeTelegram({
+            101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now},
+            102: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now},
+        })
+        self.assertEqual(self.run_sweep(fake), [101])
+        self.assertIn(102, fake.messages)
+        self.assertEqual(fake.stripped, [101])
+
+    def test_next_request_prompt_after_the_decision_is_never_touched(self):
+        # Telegram 7224: the next request's live floor prompt arrived seconds
+        # after this allow and was deleted. Now the sweep has ended by then.
+        self.sweep_args = {'settle_seconds': 0.3}
+        fake = FakeTelegram({})
+        timer = threading.Timer(0.7, lambda: fake.messages.__setitem__(101, {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}))
+        timer.start()
+        self.assertEqual(self.run_sweep(fake), [])
+        timer.join()
+        self.assertEqual(fake.stripped, [])
+        self.assertIn(101, fake.messages)
+
+    def test_prompt_dated_after_the_decision_stops_the_sweep(self):
+        fake = FakeTelegram({
+            101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now + 30},
+            102: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now + 30},
+        })
+        self.assertEqual(self.run_sweep(fake), [])
+        self.assertEqual(fake.stripped, [101])
+        self.assertIn(101, fake.messages)
 
     def test_no_state_or_ambiguous_chat_does_nothing(self):
         fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
