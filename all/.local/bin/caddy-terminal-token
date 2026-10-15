@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# caddy-terminal-token — bearer path token for the Logseq side panel's gate route.
+# The token is a credential: 0600, never committed, never in DotCortex source.
+set -euo pipefail
+
+TAG="caddy-terminal-token"
+STATE_DIR="${CADDY_TERMINAL_STATE:-$HOME/.local/state/caddy-terminal}"
+TOKEN_FILE="$STATE_DIR/terminal-token"
+ROUTE_FILE="$STATE_DIR/terminal-token-route"
+SOCKET="${CADDY_TERMINAL_SOCKET:-$STATE_DIR/run/terminal.sock}"
+GATE_URL="${CADDY_TERMINAL_GATE_URL:-http://127.0.0.1:7680}"
+
+print_url() {
+  printf '%s/%s/\n' "$GATE_URL" "$(cat "$TOKEN_FILE")"
+}
+
+case "${1:-}" in
+  -h|--help|help)
+    echo "Usage: $TAG [--print] [--rotate]"
+    echo "  (default) create the token if missing, then print the panel URL"
+    echo "  --print   only print the current URL; fails if no token exists"
+    echo "  --rotate  force a fresh token (old one dies at the next gate restart)"
+    exit 0 ;;
+  --print) ;;
+  --rotate) ;;
+  '') ;;
+  *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { echo "$TAG: one argument at most" >&2; exit 2; }
+
+umask 077
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+
+if [ ! -f "$TOKEN_FILE" ] || [ "${1:-}" = "--rotate" ]; then
+  # 32 bytes from the kernel CSPRNG -> 64 hex chars (256 bits).
+  TOKEN="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  TMP="$(mktemp "$STATE_DIR/.terminal-token.XXXXXXXX")"
+  printf '%s\n' "$TOKEN" > "$TMP"
+  chmod 600 "$TMP"
+  mv "$TMP" "$TOKEN_FILE"
+  # Snippet the gate site imports FIRST (before its catch-all handle):
+  # handle_path strips the token prefix, so ttyd sees clean /, /token, /ws paths.
+  TMP="$(mktemp "$STATE_DIR/.terminal-token-route.XXXXXXXX")"
+  {
+    printf '# Managed by %s. Bearer-token route for the Logseq side panel (fix round 1).\n' "$TAG"
+    printf '# Import order matters: this must be the first handle in the gate site.\n'
+    printf 'handle_path /%s/* {\n' "$TOKEN"
+    printf '\treverse_proxy unix/%s\n' "$SOCKET"
+    printf '}\n'
+  } > "$TMP"
+  chmod 600 "$TMP"
+  mv "$TMP" "$ROUTE_FILE"
+fi
+
+[ -f "$TOKEN_FILE" ] || { echo "$TAG: no token at $TOKEN_FILE" >&2; exit 1; }
+echo "$TAG: paste this URL into the Logseq ttyd plugin's Terminal URL setting:" >&2
+print_url
+echo "$TAG: token and Caddy route snippet live in $STATE_DIR (0600)" >&2
+if [ -f "$ROUTE_FILE" ]; then
+  echo "Restart the Caddy gate instance for the route snippet to take effect." >&2
+fi

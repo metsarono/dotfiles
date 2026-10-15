@@ -6,14 +6,23 @@
 
 * Launcher
 
-The ~logseq-db~ wrapper ensures ttyd is running before handing off to the AppImage.
-The AppImage release conf lives in ~package-appimage.org~ (managed by ~apprelease~).
+The ~logseq-db~ wrapper ensures the ttyd terminal server is running before handing off to the AppImage.
+The AppImage release conf lies in ~package-appimage.org~ (managed by ~apprelease~).
 
 ** Wrapper script
 
+ttyd lives behind the Caddy gate on a unix socket (=services-web-terminal.org=,
+fix round 1: no TCP port anywhere — no local agent user can reach the
+operator's shell). ~logseq-db~ delegates every ttyd decision to
+=caddy-terminal-serve=: flags, socket path, patched index. It never duplicates
+them. The panel itself loads the gate's token URL (see the ttyd Terminal
+Plugin section).
+
 #+name: logseq-db-launcher
 #+BEGIN_SRC bash :tangle all/.local/bin/logseq-db :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :comments no
-# Ensure ttyd terminal server is running on port 7681 before opening Logseq
+# Ensure the ttyd terminal server (unix socket, services-web-terminal.org) is
+# live before opening Logseq. No TCP port: the operator's shell is not reachable
+# by other local users (Bunta review, fix round 1).
 load_private_env() {
   local line key
   [ -f "$HOME/.env" ] || return 0
@@ -32,32 +41,65 @@ load_private_env() {
 
 load_private_env
 
+SERVE="$HOME/.local/bin/caddy-terminal-serve"
+if ! "$SERVE" --check 2>/dev/null; then
+  # caddy-terminal-serve owns every ttyd flag (services-web-terminal.org):
+  # unix socket in a 0700 dir, patched index via logseq-ttyd-index, same
+  # instance the Caddy gate fronts. The supervisor adopts this one too.
+  CADDY_TERMINAL_FONT_SIZE="${LOGSEQ_TTYD_FONT_SIZE:-16}" \
+  CADDY_TERMINAL_FONT_FAMILY="${LOGSEQ_TTYD_FONT_FAMILY:-SFMono Nerd Font, monospace}" \
+    setsid "$SERVE" </dev/null &>/dev/null &
+  disown
+fi
+exec "$HOME/Applications/Logseq-linux-x86_64-latest.AppImage" --no-sandbox "$@"
+#+END_SRC
+
+** ttyd index builder
+
+~logseq-ttyd-index~ builds and refreshes the patched ttyd index cache and prints
+its path. It is the single owner of the index patch (Shift+Enter handling and
+websocket tracking): both the =logseq-db= launcher and the Caddy web terminal
+(=services-web-terminal.org=) call it. Never fork this logic into a second copy.
+
+The upstream index is captured by briefly running a build ttyd — on a unix
+socket inside the 0700 cache dir, never a TCP port (fix round 1: a TCP build
+listener was a transient unauthenticated shell, same class as the 7681 hole).
+
+#+name: logseq-ttyd-index-script
+#+BEGIN_SRC bash :tangle all/.local/bin/logseq-ttyd-index :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :comments no
+# Builds the patched ttyd index (see ttyd Terminal Plugin) and prints its path.
+set -euo pipefail
+
 ensure_logseq_ttyd_index() {
-  local ttyd_bin cache_dir index stamp build_stamp build_port log pid
+  local ttyd_bin cache_dir index stamp build_stamp build_sock log pid
   ttyd_bin="${LOGSEQ_TTYD_BIN:-/home/metsatron/.local/bin/ttyd}"
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/logseq-ttyd"
   index="$cache_dir/index.html"
   stamp="$cache_dir/ttyd.stamp"
-  build_port="${LOGSEQ_TTYD_INDEX_PORT:-17681}"
+  build_sock="$cache_dir/index-build.sock"
   log="$cache_dir/index-build.log"
 
+  umask 077
   mkdir -p "$cache_dir"
+  chmod 700 "$cache_dir"
   build_stamp="$(stat -c '%Y:%s' "$ttyd_bin" 2>/dev/null || printf unknown)"
   if [ -s "$index" ] && [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$build_stamp" ]; then
     printf '%s\n' "$index"
     return 0
   fi
 
-  "$ttyd_bin" -p "$build_port" zsh >"$log" 2>&1 &
+  rm -f "$build_sock"
+  "$ttyd_bin" -i "$build_sock" zsh >"$log" 2>&1 &
   pid="$!"
   for _ in $(seq 1 40); do
-    if curl -fsS "http://127.0.0.1:$build_port/" -o "$index.raw" 2>>"$log"; then
+    if curl -fsS --unix-socket "$build_sock" -o "$index.raw" http://localhost/ 2>>"$log"; then
       break
     fi
     sleep 0.1
   done
   kill "$pid" >/dev/null 2>&1 || true
   wait "$pid" >/dev/null 2>&1 || true
+  rm -f "$build_sock"
 
   if [ ! -s "$index.raw" ]; then
     printf 'logseq-db: failed to build ttyd index; see %s\n' "$log" >&2
@@ -149,14 +191,7 @@ PY
   printf '%s\n' "$index"
 }
 
-if ! ss -tlnp 2>/dev/null | grep -q ':7681'; then
-  TTYD_FONT_SIZE="${LOGSEQ_TTYD_FONT_SIZE:-16}"
-  TTYD_FONT_FAMILY="${LOGSEQ_TTYD_FONT_FAMILY:-SFMono Nerd Font, monospace}"
-  TTYD_INDEX="$(ensure_logseq_ttyd_index)"
-  setsid /home/metsatron/.local/bin/ttyd -W -p 7681 -I "$TTYD_INDEX" -t "fontSize=$TTYD_FONT_SIZE" -t "fontFamily=\"$TTYD_FONT_FAMILY\"" zsh </dev/null &>/dev/null &
-  disown
-fi
-exec "$HOME/Applications/Logseq-linux-x86_64-latest.AppImage" --no-sandbox "$@"
+ensure_logseq_ttyd_index
 #+END_SRC
 
 ** Desktop entry
@@ -284,7 +319,18 @@ manages =~/.logseq/= and the plugin directory must remain writable by the app.
 plugin template). It is not authored — keep the copy at
 =~/.logseq/plugins/logseq-ttyd/lsplugin.user.js= in place and do not tangle it.
 
-The ttyd server is started by the =logseq-db= launcher before Logseq loads.
+The ttyd server is started by the =logseq-db= launcher before Logseq loads
+(unix socket, no TCP port — =services-web-terminal.org=).
+
+The side panel does NOT talk to the socket directly. It loads the Caddy
+gate's token URL (fix round 1): Logseq is Electron, and an Electron iframe
+cannot answer a basic-auth challenge — the native dialog never appears for
+subresources, so the panel would render the gate's 401 page. Instead
+=caddy-terminal-token= (services-web-terminal.org) mints a 256-bit path token
+(0600, metsatron-only); the gate serves =/<token>/= without a password, and
+that full URL — printed by the helper — is pasted once into the plugin's
+"Terminal URL" setting. The gate still binds 127.0.0.1, so the token grants
+nothing off-box. Until that paste the panel shows the gate's 401 page.
 
 To iterate on the plugin: edit this file, then =loom logseq:tangle= or
 =tangle-one logseq.org=. Changes land in =~/.logseq/plugins/logseq-ttyd/=
@@ -337,14 +383,14 @@ entirely as a belt-and-suspenders.
 <body>
 <script src="./lsplugin.user.js"></script>
 <script>
-const TTYD_URL = 'http://localhost:7681';
+const TTYD_URL = 'http://127.0.0.1:7680/';
 
 const settingsSchema = [
   {
     key: 'terminalUrl',
     type: 'string',
     title: 'Terminal URL',
-    description: 'URL loaded in the terminal iframe.',
+    description: 'Terminal iframe URL. Run caddy-terminal-token (services-web-terminal.org) and paste the URL it prints here — the panel goes through the authenticated Caddy gate on a 0600 bearer path token. Without it the panel shows the gate 401 page.',
     default: TTYD_URL,
   },
   {

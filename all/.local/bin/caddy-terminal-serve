@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# caddy-terminal-serve — foreground ttyd launcher for the Caddy web terminal.
+# Same ttyd, same patched index as the Logseq side panel (logseq.org).
+# Unix socket only: no TCP port for any local user to reach (fix round 1).
+set -euo pipefail
+
+TAG="caddy-terminal-serve"
+TTYD_BIN="${CADDY_TERMINAL_TTYD:-$HOME/.local/bin/ttyd}"
+INDEX_TOOL="${CADDY_TERMINAL_INDEX:-$HOME/.local/bin/logseq-ttyd-index}"
+STATE_DIR="${CADDY_TERMINAL_STATE:-$HOME/.local/state/caddy-terminal}"
+RUN_DIR="${CADDY_TERMINAL_RUN_DIR:-$STATE_DIR/run}"
+SOCKET="${CADDY_TERMINAL_SOCKET:-$RUN_DIR/terminal.sock}"
+FONT_SIZE="${CADDY_TERMINAL_FONT_SIZE:-16}"
+FONT_FAMILY="${CADDY_TERMINAL_FONT_FAMILY:-SFMono Nerd Font, monospace}"
+CURL_BIN="${CADDY_TERMINAL_CURL:-curl}"
+
+[ -x "$TTYD_BIN" ] || { echo "$TAG: missing $TTYD_BIN" >&2; exit 69; }
+[ -x "$INDEX_TOOL" ] || { echo "$TAG: missing $INDEX_TOOL (tangle logseq.org and stow)" >&2; exit 69; }
+
+socket_alive() {
+  [ -S "$SOCKET" ] || return 1
+  "$CURL_BIN" -s --max-time 2 --unix-socket "$SOCKET" -o /dev/null http://localhost/ 2>/dev/null
+}
+
+if [ "${1:-}" = "--check" ]; then
+  [ "$#" -eq 1 ] || { echo "$TAG: --check takes no other arguments" >&2; exit 2; }
+  # Read-only probe for the supervisor and logseq-db: 0 = live, 3 = down.
+  socket_alive || exit 3
+  exit 0
+fi
+[ "$#" -eq 0 ] || { echo "Usage: $TAG [--check]" >&2; exit 2; }
+
+# umask 077: libwebsockets creates the socket as 0777 & ~umask, so it is
+# owner-only from birth; 0600 is forced below once it exists. The 0700 run
+# directory is the outer wall — no other local user can traverse to it.
+umask 077
+mkdir -p "$RUN_DIR"
+chmod 700 "$STATE_DIR" "$RUN_DIR"
+
+if socket_alive; then
+  echo "$TAG: socket already live: $SOCKET" >&2
+  exit 0
+fi
+# Stale socket file left by a dead ttyd blocks the fresh bind — remove it
+# only after the liveness probe failed (never a live listener's file).
+[ -S "$SOCKET" ] && rm -f "$SOCKET"
+
+TTYD_INDEX="$("$INDEX_TOOL")" || { echo "$TAG: index build failed" >&2; exit 1; }
+
+"$TTYD_BIN" -W -i "$SOCKET" -I "$TTYD_INDEX" \
+  -t "fontSize=$FONT_SIZE" -t "fontFamily=\"$FONT_FAMILY\"" zsh &
+ttyd_pid=$!
+for _ in $(seq 1 50); do
+  [ -S "$SOCKET" ] && break
+  kill -0 "$ttyd_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if [ -S "$SOCKET" ]; then
+  chmod 0600 "$SOCKET"
+  wait "$ttyd_pid"
+else
+  wait "$ttyd_pid" || true
+  echo "$TAG: ttyd exited without creating $SOCKET" >&2
+  exit 1
+fi
