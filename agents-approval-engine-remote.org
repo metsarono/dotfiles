@@ -1048,17 +1048,27 @@ def _compound_approval(event, manifest, judge=None):
     created = set(manifest.get('_compound_created_files', ()))
     remote_created = set(manifest.get('_compound_remote_created_files', ()))
     stages = []
+    variables = {}
     for index, (separator, text) in enumerate(segments, 1):
+        if _fleet_environment_export(text):
+            expanded_text = text
+        else:
+            expanded = _literal_variable_expansion(text, current, manifest, variables)
+            if expanded is None:
+                return False, _compound_segment_reason(index, text, 'true_floor') if judge else 'true_floor'
+            expanded_text, variables = expanded
         stage_manifest = {**manifest, '_compound_created_files': frozenset(created), '_compound_remote_created_files':frozenset(remote_created)}
-        stage = {**event, 'cwd': current, 'tool_input': {**payload, 'command': text}}
+        stage = {**event, 'cwd': current, 'tool_input': {**payload, 'command': expanded_text}}
         result = classify(stage, stage_manifest)
         allow, reason = result
         if not allow and _hard_refusal(reason):
-            return False, _compound_segment_reason(index, text, reason) if judge else reason
+            return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
         try:
-            words = _unwrap_words(shlex.split(text, posix=True))
+            raw_words = shlex.split(expanded_text, posix=True)
         except ValueError:
-            words = []
+            raw_words = []
+        assignment = bool(raw_words) and all(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', word) for word in raw_words)
+        words = _unwrap_words(raw_words)
         cd = words[:1] == ['cd']
         if cd:
             # cd must be a simple command and its success must gate the next
@@ -1067,9 +1077,9 @@ def _compound_approval(event, manifest, judge=None):
             if (separator not in {None, '&&'} or target is None or not os.path.isdir(target)
                     or index < len(segments) and segments[index][0] != '&&'):
                 reason = 'true_floor'
-                return False, _compound_segment_reason(index, text, reason) if judge else reason
+                return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
             current = target
-        stages.append((index, text, stage, stage_manifest, cd))
+        stages.append((index, expanded_text, stage, stage_manifest, cd, assignment))
         output = _heredoc_scratch_output(stage, stage_manifest)
         if output is not None:
             created.add(output)
@@ -1084,7 +1094,9 @@ def _compound_approval(event, manifest, judge=None):
             created.clear()
             remote_created.clear()
     used = []
-    for index, text, stage, stage_manifest, cd in stages:
+    for index, text, stage, stage_manifest, cd, assignment in stages:
+        if assignment:
+            continue
         try:
             allow, reason = judge(stage, stage_manifest) if judge else _classify_scoped(stage, stage_manifest)
         except TimeoutError:
@@ -1629,8 +1641,11 @@ def _decider_decide(event, config):
 
 def _floor_rule_for_record(event, manifest, reason):
     """Name the first durable floor rule without recording request contents."""
-    if 'true_floor' not in str(reason):
+    reason_text = str(reason)
+    if not (reason_text == 'true_floor' or reason_text.startswith(('compound_refused:', 'substitution_refused:'))):
         return None
+    if 'coordinator_refused' in reason_text:
+        return 'coordinator'
     payload = event.get('tool_input') if isinstance(event, dict) else None
     if not isinstance(payload, dict):
         return 'invalid-input'
@@ -1658,7 +1673,7 @@ def _floor_rule_for_record(event, manifest, reason):
     if any(_protected(word) for word in candidate_words
            if '/' in word or word.startswith('~') or '.' in word):
         return 'protected'
-    if 'substitution_refused' in str(reason) or '$(' in candidate or '`' in candidate:
+    if 'substitution_refused' in reason_text or '$(' in candidate or '`' in candidate:
         return 'substitution'
     if '<<' in candidate:
         return 'heredoc'
@@ -1682,7 +1697,20 @@ def _floor_rule_for_record(event, manifest, reason):
         return 'package'
     if lowered and lowered[0] in INTERPRETER_WORDS:
         return 'interpreter'
-    return 'true-floor'
+    if lowered and lowered[0] in WRITE_VERBS:
+        return 'write'
+    if lowered and lowered[0] == 'git':
+        if any(word in {'commit', 'add', 'reset', 'checkout', 'restore', 'merge', 'rebase', 'push', 'pull', 'fetch'} for word in lowered[1:]):
+            return 'git-write'
+        if 'master' in lowered[1:]:
+            return 'git-protected-branch'
+    if any(word in REMOTE for word in lowered):
+        return 'remote'
+    if any(word in OPAQUE_COMMANDS for word in lowered):
+        return 'interpreter'
+    if any('$' in word or '`' in word for word in candidate_words):
+        return 'shell-expansion'
+    return 'command-shape'
 
 
 def _log_decision(event, allow, reason):

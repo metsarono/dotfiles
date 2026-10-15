@@ -249,8 +249,8 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
             return (False, 'risky', 1, 'risky') if event['tool_input']['command'] == 'make risky' else (True, 'no_risk_veto', 1, 'allow')
         result, record, _ = self.in_process('printf "%s" "$(make risky)"', verdict=decide)
         self.assertEqual(result['behavior'], 'deny')
-        self.assertIn('substitution_1', record['reason'])
-        self.assertIn('decider_risky', record['reason'])
+        self.assertEqual(record['reason'], 'true_floor')
+        self.assertEqual(record.get('floor_rule'), 'substitution')
 
     def test_substitution_unquoted_heredoc_expansion_cannot_bypass_floor(self):
         command = f'cat > {self.prompt} <<EOF\n$(rm -rf README.org)\nEOF'

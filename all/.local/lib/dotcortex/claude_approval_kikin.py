@@ -165,9 +165,12 @@ def _unsafe_redirect(command, manifest=None, cwd=None, segmented=False):
     if targets is None:
         return True
     for operator, target in targets:
-        # A heredoc supplies request data, and fd duplication never names a
-        # filesystem target. Both remain inert in the proven segment lane.
-        if operator in {'<<', '<<-', '<<<', '>&', '<&'} and target in {'&1', '&2', '1', '2'}:
+        # A heredoc or here-string supplies request data, and fd duplication
+        # never names a filesystem target. The delimiter is not an output
+        # destination; the separate `>`/`>>` target is checked independently.
+        if operator in {'<<', '<<-', '<<<'}:
+            continue
+        if operator in {'>&', '<&'} and target in {'&1', '&2', '1', '2'}:
             continue
         if segmented and manifest is not None and isinstance(cwd, str) and _scratch_redirect_target(target, cwd, manifest):
             continue
@@ -279,6 +282,12 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         readonly_proven = bool(manifest is not None and _ssh_readonly_proven(event, manifest))
     if manifest is not None and _for_readonly(floor_event, manifest):
         return False
+    # Exact safe-commit proofs and near coordinator candidates retain their
+    # historical class/refusal reasons. Generic git writes still floor below.
+    commit_candidate = bool(re.match(r'^\s*git\s+(?:-C\s+\S+\s+)?commit(?:\s|$)', command))
+    if manifest is not None and (_safe_commit(floor_event, manifest)
+                                 or (commit_candidate and '--amend' not in command and _coordinator_candidate(command))):
+        return False
     if (not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}
             and _split_approval_compound(tool_input['command']) is None):
         substitutions = _shell_substitutions(command)
@@ -304,9 +313,28 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
             # A proven split gets one shell-effect decision per segment. The
             # trusted fleet export is data; all other unresolved expansion
             # remains conservative, including substitutions and variables.
+            segment_cwd = floor_event.get('cwd') if isinstance(floor_event.get('cwd'), str) else '/'
+            variables = {}
+            expanded_parts = []
             for _separator, text in split:
                 if _fleet_environment_export(text):
+                    expanded_parts.append(text)
                     continue
+                expanded = _literal_variable_expansion(text, segment_cwd, manifest, variables)
+                if expanded is None:
+                    return True
+                text, variables = expanded
+                try:
+                    expanded_words = _unwrap_words(shlex.split(text, posix=True))
+                except ValueError:
+                    return True
+                if not expanded_words:
+                    continue
+                if expanded_words[:1] == ['cd'] and len(expanded_words) == 2:
+                    target = _path(expanded_words[1], segment_cwd, _policy_roots(manifest))
+                    if target is not None:
+                        segment_cwd = target
+                expanded_parts.append(text)
                 if _dynamic_shell(text):
                     substitutions = _shell_substitutions(text)
                     if (substitutions is None or not _substitution_data_only(text, substitutions)
@@ -315,6 +343,10 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
                     residual = _remove_shell_substitutions(text, substitutions)
                     if _dynamic_shell(residual):
                         return True
+                else:
+                    residual = text
+            if expanded_parts:
+                residual = ' ; '.join(expanded_parts)
         elif _dynamic_shell(command):
             substitutions = _shell_substitutions(command)
             residual = _remove_shell_substitutions(command, substitutions) if substitutions is not None else None
@@ -477,6 +509,10 @@ def _floor_verb(lowered, coordinator=None):
             return True  # unreviewed global configuration can change every effect
         sub = lowered[1] if len(lowered) > 1 else ""
         rest = lowered[2:]
+        if sub in {"commit", "add"} and coordinator not in {"coordinator_commit", "coordinator_integrate"}:
+            return True
+        if sub == "merge" and coordinator != "coordinator_integrate":
+            return True
         if sub in {"push", "pull", "fetch", "clone", "rebase", "clean", "submodule"} and not (sub == "push" and coordinator == "coordinator_integrate"):
             return True  # any form, per review
         if sub == "reset":
@@ -762,9 +798,61 @@ def _substitution_floor(event, manifest, coordinator=None):
             nested = {**event, 'tool_input': {**event['tool_input'], 'command': text}}
             # Authority belongs to the inner exact shape, never the outer grant.
             inner_coordinator = _coordinator_match(nested, manifest) if manifest is not None else None
-            if _true_floor(nested, manifest, coordinator=inner_coordinator):
+            if (_true_floor(nested, manifest, coordinator=inner_coordinator)
+                    or not _read_only_proven(nested, manifest)):
                 return True
     return False
+
+
+def _read_only_proven(event, manifest):
+    """Prove a substitution producer is an existing observation shape."""
+    if not isinstance(event, dict) or not isinstance(manifest, dict):
+        return False
+    if _true_floor(event, manifest):
+        return False
+    command = event.get('tool_input', {}).get('command') if isinstance(event.get('tool_input'), dict) else None
+    cwd = event.get('cwd')
+    if not isinstance(command, str) or not isinstance(cwd, str):
+        return False
+    if _inert_local_command(command, cwd):
+        return True
+    substitutions = _shell_substitutions(command)
+    if (substitutions and _substitution_data_only(command, substitutions)
+            and not _substitution_floor(event, manifest)):
+        return True
+    if _routes_compound(command):
+        ok, _reason = _compound(event, manifest)
+        return ok
+    try:
+        words = _unwrap_words(shlex.split(command, posix=True))
+    except ValueError:
+        return False
+    if not words:
+        return False
+    staged = {**event, 'tool_input': {**event['tool_input'], 'command': shlex.join(words)}}
+    return bool(_local_match(staged, manifest, words) or _git_match(staged, manifest)
+                or _git_rev_parse_read(staged, manifest))
+
+
+def _git_rev_parse_read(event, manifest):
+    """Allow only the literal repository-root probe used as read data."""
+    payload, cwd = event.get('tool_input'), event.get('cwd')
+    if event.get('tool_name') != 'Bash' or not isinstance(payload, dict) or not isinstance(cwd, str):
+        return False
+    try:
+        words = _unwrap_words(shlex.split(payload.get('command', ''), posix=True))
+    except ValueError:
+        return False
+    if words[:1] != ['git']:
+        return False
+    repo_raw, args = cwd, words[1:]
+    if args[:1] == ['-C']:
+        if len(args) < 3:
+            return False
+        repo_raw, args = args[1], args[2:]
+    if args != ['rev-parse', '--show-toplevel']:
+        return False
+    return _repo(repo_raw, cwd, manifest) is not None
 
 
 def _substitution_data_only(command, substitutions):
@@ -930,6 +1018,19 @@ def _unwrap_words(words):
             words.pop(0)
             while words and words[0] in {'--', '-p', '-i'}:
                 words.pop(0)
+            if verb == 'env':
+                # `env -u NAME ...` only changes the child environment.  It
+                # does not make the wrapped command opaque; unsupported env
+                # options still fail closed below.
+                while words:
+                    if words[0] == '-u' and len(words) >= 2:
+                        del words[:2]
+                    elif words[0].startswith('-u') and len(words[0]) > 2:
+                        words.pop(0)
+                    elif re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', words[0]):
+                        words.pop(0)
+                    else:
+                        break
             if words and words[0].startswith('-'):
                 return ['eval']  # unsupported execution-wrapper options
             continue
@@ -940,6 +1041,57 @@ def _unwrap_words(words):
             return ['eval']
         break
     return words
+
+
+def _literal_variable_expansion(text, cwd, manifest, variables=None):
+    """Expand only same-compound NAME=literal-root-path variables.
+
+    Shell variables are otherwise dynamic.  This deliberately handles the
+    narrow, reviewable form used by read chains (`f=README; wc -l $f`): the
+    assignment must be a literal path that resolves inside the observation
+    roots, and unknown variables remain untouched for the ordinary floor.
+    """
+    if not isinstance(text, str) or not isinstance(cwd, str) or not isinstance(manifest, dict):
+        return None
+    try:
+        words = shlex.split(text, posix=True)
+    except ValueError:
+        return None
+    state = dict(variables or {})
+    index = 0
+    while index < len(words) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', words[index]):
+        name, value = words[index].split('=', 1)
+        if not value or '$' in value or '`' in value or '\\' in value:
+            return None
+        resolved = _path(value, cwd, _read_roots(manifest), exists=False)
+        if resolved is None:
+            return None
+        state[name] = resolved
+        index += 1
+    if index == len(words):
+        return shlex.join(words), state
+    pattern = re.compile(r'\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})')
+
+    def replace(match):
+        return state.get(match.group(1) or match.group(2), match.group(0))
+
+    # Keep shell substitutions, heredoc markers and quoting intact.  Rejoining
+    # shlex words here would turn `$(read)` into a quoted literal and could
+    # accidentally erase the very floor that must inspect it.
+    return pattern.sub(replace, text), state
+
+
+def _assignment_only(text, cwd, manifest, variables=None):
+    """Return updated variable state for a pure literal assignment stage."""
+    expanded = _literal_variable_expansion(text, cwd, manifest, variables)
+    if expanded is None:
+        return None
+    rendered, state = expanded
+    try:
+        words = shlex.split(rendered, posix=True)
+    except ValueError:
+        return None
+    return state if words and all(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', word) for word in words) else None
 
 
 def _write_outside_roots(event, manifest):
@@ -1261,6 +1413,7 @@ def _local_match(event, manifest, words=None):
             words = shlex.split(tool_input["command"], posix=True)
         except ValueError:
             return False
+    words = _unwrap_words(words)
     reviewed_verbs = set(entry.get("bash_verbs") or ()) | FILTERS | SYSTEM_READERS | {
         "cat", "find", "ls", "stat", "mailcortex", "awk", "jq"
     }
@@ -1752,19 +1905,29 @@ def _compound(event, manifest):
     """Approve a compound only when every stage is a cd inside the roots, an enabled
     read or git observation, or (after a pipe) a stdin-only filter."""
     segments = _split_compound(event["tool_input"]["command"])
-    cwd = _path(event.get("cwd"), event.get("cwd") or "/", manifest["roots"]) if isinstance(event.get("cwd"), str) else None
+    roots = _policy_roots(manifest)
+    cwd = _path(event.get("cwd"), event.get("cwd") or "/", roots) if isinstance(event.get("cwd"), str) else None
     if segments is None or cwd is None:
         return False, "no_match"
     used = []
-    for separator, text in segments:
+    variables = {}
+    for separator, original in segments:
+        if _fleet_environment_export(original):
+            continue
+        expanded = _literal_variable_expansion(original, cwd, manifest, variables)
+        if expanded is None:
+            return False, "no_match"
+        text, variables = expanded
         try:
             words = shlex.split(text, posix=True)
         except ValueError:
             return False, "no_match"
-        if words[:1] == ["timeout"] and len(words) > 2 and re.fullmatch(r"\d+(?:\.\d+)?[smh]?", words[1]):
-            words = words[2:]
+        words = _unwrap_words(words)
         if not words:
-            return False, "no_match"
+            # A pure literal assignment is an inert environment update for
+            # the later stages. Unsupported assignment syntax was rejected by
+            # _literal_variable_expansion above.
+            continue
         if words[0] in {"true", "echo"}:
             # No redirection can survive _split_compound, so these only print or no-op.
             continue
@@ -1777,7 +1940,7 @@ def _compound(event, manifest):
             # so later relative paths really resolve where this check resolved them.
             if separator not in (None, "&&"):
                 return False, "no_match"
-            target = _path(words[1], cwd, manifest["roots"]) if len(words) == 2 else None
+            target = _path(words[1], cwd, roots) if len(words) == 2 else None
             if target is None or not os.path.isdir(target):
                 return False, "no_match"
             cwd = target
@@ -3635,17 +3798,27 @@ def _compound_approval(event, manifest, judge=None):
     created = set(manifest.get('_compound_created_files', ()))
     remote_created = set(manifest.get('_compound_remote_created_files', ()))
     stages = []
+    variables = {}
     for index, (separator, text) in enumerate(segments, 1):
+        if _fleet_environment_export(text):
+            expanded_text = text
+        else:
+            expanded = _literal_variable_expansion(text, current, manifest, variables)
+            if expanded is None:
+                return False, _compound_segment_reason(index, text, 'true_floor') if judge else 'true_floor'
+            expanded_text, variables = expanded
         stage_manifest = {**manifest, '_compound_created_files': frozenset(created), '_compound_remote_created_files':frozenset(remote_created)}
-        stage = {**event, 'cwd': current, 'tool_input': {**payload, 'command': text}}
+        stage = {**event, 'cwd': current, 'tool_input': {**payload, 'command': expanded_text}}
         result = classify(stage, stage_manifest)
         allow, reason = result
         if not allow and _hard_refusal(reason):
-            return False, _compound_segment_reason(index, text, reason) if judge else reason
+            return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
         try:
-            words = _unwrap_words(shlex.split(text, posix=True))
+            raw_words = shlex.split(expanded_text, posix=True)
         except ValueError:
-            words = []
+            raw_words = []
+        assignment = bool(raw_words) and all(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', word) for word in raw_words)
+        words = _unwrap_words(raw_words)
         cd = words[:1] == ['cd']
         if cd:
             # cd must be a simple command and its success must gate the next
@@ -3654,9 +3827,9 @@ def _compound_approval(event, manifest, judge=None):
             if (separator not in {None, '&&'} or target is None or not os.path.isdir(target)
                     or index < len(segments) and segments[index][0] != '&&'):
                 reason = 'true_floor'
-                return False, _compound_segment_reason(index, text, reason) if judge else reason
+                return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
             current = target
-        stages.append((index, text, stage, stage_manifest, cd))
+        stages.append((index, expanded_text, stage, stage_manifest, cd, assignment))
         output = _heredoc_scratch_output(stage, stage_manifest)
         if output is not None:
             created.add(output)
@@ -3671,7 +3844,9 @@ def _compound_approval(event, manifest, judge=None):
             created.clear()
             remote_created.clear()
     used = []
-    for index, text, stage, stage_manifest, cd in stages:
+    for index, text, stage, stage_manifest, cd, assignment in stages:
+        if assignment:
+            continue
         try:
             allow, reason = judge(stage, stage_manifest) if judge else _classify_scoped(stage, stage_manifest)
         except TimeoutError:
@@ -4216,8 +4391,11 @@ def _decider_decide(event, config):
 
 def _floor_rule_for_record(event, manifest, reason):
     """Name the first durable floor rule without recording request contents."""
-    if 'true_floor' not in str(reason):
+    reason_text = str(reason)
+    if not (reason_text == 'true_floor' or reason_text.startswith(('compound_refused:', 'substitution_refused:'))):
         return None
+    if 'coordinator_refused' in reason_text:
+        return 'coordinator'
     payload = event.get('tool_input') if isinstance(event, dict) else None
     if not isinstance(payload, dict):
         return 'invalid-input'
@@ -4245,7 +4423,7 @@ def _floor_rule_for_record(event, manifest, reason):
     if any(_protected(word) for word in candidate_words
            if '/' in word or word.startswith('~') or '.' in word):
         return 'protected'
-    if 'substitution_refused' in str(reason) or '$(' in candidate or '`' in candidate:
+    if 'substitution_refused' in reason_text or '$(' in candidate or '`' in candidate:
         return 'substitution'
     if '<<' in candidate:
         return 'heredoc'
@@ -4269,7 +4447,20 @@ def _floor_rule_for_record(event, manifest, reason):
         return 'package'
     if lowered and lowered[0] in INTERPRETER_WORDS:
         return 'interpreter'
-    return 'true-floor'
+    if lowered and lowered[0] in WRITE_VERBS:
+        return 'write'
+    if lowered and lowered[0] == 'git':
+        if any(word in {'commit', 'add', 'reset', 'checkout', 'restore', 'merge', 'rebase', 'push', 'pull', 'fetch'} for word in lowered[1:]):
+            return 'git-write'
+        if 'master' in lowered[1:]:
+            return 'git-protected-branch'
+    if any(word in REMOTE for word in lowered):
+        return 'remote'
+    if any(word in OPAQUE_COMMANDS for word in lowered):
+        return 'interpreter'
+    if any('$' in word or '`' in word for word in candidate_words):
+        return 'shell-expansion'
+    return 'command-shape'
 
 
 def _log_decision(event, allow, reason):

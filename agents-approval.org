@@ -1389,8 +1389,57 @@ class DeciderWideningTests(unittest.TestCase):
         self.manifest['classes'][0]['enabled'] = True
         self.manifest['classes'][1]['enabled'] = True
         self.assertEqual(self.run_hook('for f in README.org notes.txt; do cat "$f" && head -1 "$f"; done'), 'allow')
+        self.assertEqual(self.run_hook('for f in README.org notes.txt; do env -u CLAUDE_IDLE_CHANNEL timeout 5 cat "$f" | head -1; done'), 'allow')
         self.assertEqual(self.run_hook('for f in README.org; do kill -TERM 123; done'), 'deny')
         self.assertEqual(self.run_hook('for f in $(printf README.org); do cat "$f"; done'), 'deny')
+
+    def test_replay_read_chains_keep_literal_assignments_and_wrappers(self):
+        self.manifest['classes'][0]['enabled'] = True
+        self.manifest['classes'][1]['enabled'] = True
+        cases = [
+            'cd ' + str(self.root) + ' && f=README.org; wc -l $f; grep -n "^#" $f | head -40',
+            'cd ' + str(self.root) + ' && sed -n 1,2p README.org; grep -n -E synthetic README.org',
+            'cd ' + str(self.root) + ' && env -u CLAUDE_IDLE_CHANNEL timeout 5 cat README.org 2>&1 | cut -c1-80 | tail -1',
+        ]
+        for command in cases:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'allow')
+
+    def test_read_substitutions_are_proven_and_effect_limited(self):
+        self.manifest['classes'][0]['enabled'] = True
+        self.manifest['classes'][1]['enabled'] = True
+        (self.root / '.git').mkdir()
+        allowed = [
+            'printf "%s" "$(ps -o ppid= -p 1)"',
+            'grep -n "$(cat README.org)" README.org',
+            'printf "%s" "$(git -C ' + str(self.root) + ' rev-parse --show-toplevel)"',
+        ]
+        for command in allowed:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'allow')
+        denied = [
+            '$(cat README.org) README.org',
+            'eval "$(cat README.org)"',
+            'python3 -c "$(cat README.org)"',
+            'printf x > "$(cat README.org)"',
+        ]
+        for command in denied:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'deny')
+
+    def test_new_read_shapes_do_not_hide_absolute_floor_cases(self):
+        cases = [
+            'cd ' + str(self.root) + ' && f=README.org; cat .env; wc -l $f',
+            'cd ' + str(self.root) + ' && cat README.org | kill -TERM 123',
+            'cd ' + str(self.root) + ' && env -u CLAUDE_IDLE_CHANNEL timeout 5 ssh -i ~/.ssh/id_ed25519 YOUR_HOST date',
+            'cat README.org > ' + str(self.scratch / 'safe') + ' <<EOF\nOPENROUTER_API_KEY=SYNTHETIC_VALUE_12345\nEOF',
+            'grep "$(cat .env)" README.org',
+            'cat README.org > ' + str(self.scratch / 'safe') + ' && python3 - <<EOF\nprint(1)\nEOF',
+            'd=' + str(self.outside) + '; cat README.org > $d/out.txt',
+        ]
+        for command in cases:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'deny')
 
     def test_full_text_protected_credential_and_ssh_scans_survive_widening(self):
         cases = [
@@ -1416,12 +1465,15 @@ class DeciderWideningTests(unittest.TestCase):
             ('cat .env > ' + str(self.scratch / 'report'), 'protected'),
             ('ssh -i ~/.ssh/id_ed25519 YOUR_HOST date', 'ssh-identity'),
             ('export API_KEY=SYNTHETIC_VALUE_12345 > ' + str(self.scratch / 'report'), 'credential'),
+            ('git add README.org', 'git-write'),
+            ('python3 -c "print(1)"', 'interpreter'),
         ]
         for command, rule in cases:
             with self.subTest(rule=rule):
                 self.assertEqual(self.run_hook(command), 'deny')
                 record = json.loads(self.ledger.read_text().splitlines()[-1])
                 self.assertEqual(record['floor_rule'], rule)
+                self.assertNotIn(record['floor_rule'], {'true-floor', None})
                 self.assertNotIn(command, json.dumps(record))
 
 
