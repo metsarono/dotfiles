@@ -7,7 +7,7 @@ DELAY=15
 RETRY_SECONDS=5
 ADOPT_SECONDS=30
 LAUNCHER="${CADDY_TERMINAL_SUPERVISE_LAUNCHER:-$HOME/.local/bin/caddy-terminal-serve}"
-PORT="${CADDY_TERMINAL_PORT:-7681}"
+SOCKET="${CADDY_TERMINAL_SOCKET:-$HOME/.local/state/caddy-terminal/run/terminal.sock}"
 HOSTNAME_BIN="${CADDY_TERMINAL_SUPERVISE_HOSTNAME_BIN:-hostname}"
 
 while [ "$#" -gt 0 ]; do
@@ -27,7 +27,7 @@ CURRENT_HOST="$($HOSTNAME_BIN -s)"
 [ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: wrong host ($CURRENT_HOST != $EXPECTED_HOST), nothing to do" >&2; exit 1; }
 [ -x "$LAUNCHER" ] || { echo "$TAG: launcher is not executable: $LAUNCHER" >&2; exit 69; }
 
-LOG_DIR="$HOME/.local/state/caddy-terminal"
+LOG_DIR="${CADDY_TERMINAL_STATE:-$HOME/.local/state/caddy-terminal}"
 mkdir -p "$LOG_DIR"
 exec 9>"$LOG_DIR/supervisor.lock"
 if ! flock -n 9; then
@@ -37,20 +37,20 @@ fi
 
 log() { printf '%s %s %s\n' "$(date -Is)" "$TAG" "$*" >> "$LOG_DIR/supervisor.log"; }
 
-# No pipe: under pipefail, grep -q exiting early can SIGPIPE ss and read as
-# "not listening" (same trap as caddy-serve).
-listening() { [ -n "$(ss -H -tln "( sport = :$PORT )" 2>/dev/null)" ]; }
+# Liveness is the launcher's --check probe (curl through the unix socket):
+# no TCP port exists, and a stale socket file from a dead ttyd reads as down.
+alive() { "$LAUNCHER" --check 2>/dev/null; }
 
-log "supervisor starting (host=$CURRENT_HOST, launcher=$LAUNCHER, port=$PORT)"
+log "supervisor starting (host=$CURRENT_HOST, launcher=$LAUNCHER, socket=$SOCKET)"
 
 # Boot path: give the machine a moment, then own the terminal forever,
 # respawning on death — filebrowser-supervise shape.
 sleep "$DELAY"
 adopted=0
 while :; do
-  if listening; then
+  if alive; then
     if [ "$adopted" -eq 0 ]; then
-      log "port $PORT already listening; adopting existing ttyd"
+      log "terminal socket already live; adopting existing ttyd"
       adopted=1
     fi
     sleep "$ADOPT_SECONDS"

@@ -3,31 +3,35 @@
 set -euo pipefail
 
 ensure_logseq_ttyd_index() {
-  local ttyd_bin cache_dir index stamp build_stamp build_port log pid
+  local ttyd_bin cache_dir index stamp build_stamp build_sock log pid
   ttyd_bin="${LOGSEQ_TTYD_BIN:-/home/metsatron/.local/bin/ttyd}"
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/logseq-ttyd"
   index="$cache_dir/index.html"
   stamp="$cache_dir/ttyd.stamp"
-  build_port="${LOGSEQ_TTYD_INDEX_PORT:-17681}"
+  build_sock="$cache_dir/index-build.sock"
   log="$cache_dir/index-build.log"
 
+  umask 077
   mkdir -p "$cache_dir"
+  chmod 700 "$cache_dir"
   build_stamp="$(stat -c '%Y:%s' "$ttyd_bin" 2>/dev/null || printf unknown)"
   if [ -s "$index" ] && [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$build_stamp" ]; then
     printf '%s\n' "$index"
     return 0
   fi
 
-  "$ttyd_bin" -p "$build_port" zsh >"$log" 2>&1 &
+  rm -f "$build_sock"
+  "$ttyd_bin" -i "$build_sock" zsh >"$log" 2>&1 &
   pid="$!"
   for _ in $(seq 1 40); do
-    if curl -fsS "http://127.0.0.1:$build_port/" -o "$index.raw" 2>>"$log"; then
+    if curl -fsS --unix-socket "$build_sock" -o "$index.raw" http://localhost/ 2>>"$log"; then
       break
     fi
     sleep 0.1
   done
   kill "$pid" >/dev/null 2>&1 || true
   wait "$pid" >/dev/null 2>&1 || true
+  rm -f "$build_sock"
 
   if [ ! -s "$index.raw" ]; then
     printf 'logseq-db: failed to build ttyd index; see %s\n' "$log" >&2

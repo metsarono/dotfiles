@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Ensure ttyd terminal server is running on port 7681 before opening Logseq
+# Ensure the ttyd terminal server (unix socket, services-web-terminal.org) is
+# live before opening Logseq. No TCP port: the operator's shell is not reachable
+# by other local users (Bunta review, fix round 1).
 load_private_env() {
   local line key
   [ -f "$HOME/.env" ] || return 0
@@ -18,14 +20,14 @@ load_private_env() {
 
 load_private_env
 
-if ! ss -tlnp 2>/dev/null | grep -q ':7681'; then
-  TTYD_FONT_SIZE="${LOGSEQ_TTYD_FONT_SIZE:-16}"
-  TTYD_FONT_FAMILY="${LOGSEQ_TTYD_FONT_FAMILY:-SFMono Nerd Font, monospace}"
-  # logseq-ttyd-index owns the patched index (Shift+Enter + websocket tracking).
-  TTYD_INDEX="$("$HOME/.local/bin/logseq-ttyd-index")" || exit 1
-  # Loopback only (-i lo): the tailnet face is the Caddy basic_auth gate
-  # (services-web-terminal.org), never ttyd itself.
-  setsid /home/metsatron/.local/bin/ttyd -W -i lo -p 7681 -I "$TTYD_INDEX" -t "fontSize=$TTYD_FONT_SIZE" -t "fontFamily=\"$TTYD_FONT_FAMILY\"" zsh </dev/null &>/dev/null &
+SERVE="$HOME/.local/bin/caddy-terminal-serve"
+if ! "$SERVE" --check 2>/dev/null; then
+  # caddy-terminal-serve owns every ttyd flag (services-web-terminal.org):
+  # unix socket in a 0700 dir, patched index via logseq-ttyd-index, same
+  # instance the Caddy gate fronts. The supervisor adopts this one too.
+  CADDY_TERMINAL_FONT_SIZE="${LOGSEQ_TTYD_FONT_SIZE:-16}" \
+  CADDY_TERMINAL_FONT_FAMILY="${LOGSEQ_TTYD_FONT_FAMILY:-SFMono Nerd Font, monospace}" \
+    setsid "$SERVE" </dev/null &>/dev/null &
   disown
 fi
 exec "$HOME/Applications/Logseq-linux-x86_64-latest.AppImage" --no-sandbox "$@"

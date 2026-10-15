@@ -1,5 +1,5 @@
 #+TITLE: Web Terminal
-#+DESCRIPTION: ttyd web terminal for the Caddy — supervised loopback ttyd, Caddy basic_auth gate, tailscale publication, credential helper
+#+DESCRIPTION: ttyd web terminal for the Caddy — supervised unix-socket ttyd, Caddy basic_auth + token gate, tailscale publication, credential helper
 #+AUTHOR: Mètsàtron — Sovereign Weaver
 #+LANGUAGE: en
 #+PROPERTY: header-args :mkdirp yes :results silent :comments no
@@ -11,9 +11,9 @@ terminal published in the Caddy. Chosen security (option A): tailnet-only
 publication plus a password credential that he sets himself.
 
 The terminal is the SAME ttyd instance the Logseq side panel uses (logseq.org):
-one server on loopback 7681, one patched index (Shift+Enter handling and
+one server on a unix socket, one patched index (Shift+Enter handling and
 websocket tracking, owned by =logseq-ttyd-index= — never forked here). The
-Caddy reuses it; Logseq keeps it.
+Caddy gate fronts it; Logseq reaches it through the same gate.
 
 * Wiring
 
@@ -21,14 +21,25 @@ Caddy reuses it; Logseq keeps it.
 browser --tailnet--> https://<tailnet-host>:7682   (tailscale serve, TLS)
                         |
                         v
-                    http://127.0.0.1:7680         (Caddy basic_auth gate)
+                    http://127.0.0.1:7680         (Caddy gate: basic_auth + token route)
                         |   bcrypt hash in a 0600 file (caddy-terminal-passwd)
+                        |   bearer path token in a 0600 file (caddy-terminal-token)
                         v
-                    http://127.0.0.1:7681         (ttyd, zsh, patched index)
+                    unix://$HOME/.local/state/caddy-terminal/run/terminal.sock
+                        (ttyd, zsh, patched index; socket 0600 in a 0700 dir)
 #+END_EXAMPLE
 
-- ttyd binds loopback only (=-i lo=). Nothing but loopback and the gate ever
-  reach it; the tailnet IP never serves 7681.
+- ttyd has NO TCP PORT, ever. It listens on a UNIX socket only:
+  =$HOME/.local/state/caddy-terminal/run/terminal.sock=, created mode 0600
+  inside a 0700 directory owned by metsatron. No local agent user on Kikin
+  can traverse to the socket, and there is no port for any user to reach.
+  This is the fix-round-1 law (Bunta review 2026-10-15): the previous
+  loopback TCP listener on 7681 was an unauthenticated operator shell
+  reachable by every local agent user — not acceptable behind the
+  agent-user isolation the Admiral set up. ttyd 1.7.7 supports it natively:
+  =-i /path.sock= binds a unix socket (=-U user:group= exists but is not
+  needed — the process already runs as metsatron; umask 077 makes the socket
+  owner-only at birth, and the launcher then forces 0600).
 - The credential NEVER rides a command line. ttyd runs without =-c= (=-c= is
   visible in =ps=, and agent users exist on Kikin). Authentication is Caddy
   =basic_auth= whose bcrypt hash lives in a 0600 machine-local file written by
@@ -44,38 +55,97 @@ browser --tailnet--> https://<tailnet-host>:7682   (tailscale serve, TLS)
   that respawns the daemon forever), started by the user crontab =@reboot=
   plus a =*/2= liveness entry. No root anywhere.
 
-Residual risk, accepted with option A: any LOCAL user on Kikin can reach
-127.0.0.1:7681 without a password. That is inherent — the Logseq side panel
-needs an unauthenticated loopback ttyd — and the chosen gate covers the
-tailnet, the only network face. Flagged for Bunta's review regardless.
+CLOSED (fix round 1): the residual risk of the first draft — "any LOCAL user
+on Kikin can reach the terminal without a password" — is gone. ttyd no longer
+has any TCP listener; the only entry is the Caddy gate (basic_auth for the
+tailnet, bearer path token for the Logseq side panel), and the socket itself
+is 0600 in a 0700 metsatron-only directory. No listener gives an
+unauthenticated shell to another local user.
 
 * Launcher: caddy-terminal-serve
 
-Plain foreground =exec= for the supervisor to own, mirroring =filebrowser-serve=
-(the cron contract owns liveness, the launcher owns config/port). Reuses the
+Plain foreground launcher for the supervisor to own, mirroring =filebrowser-serve=
+(the cron contract owns liveness, the launcher owns config/socket). Reuses the
 patched index via =logseq-ttyd-index= (logseq.org) and the same theme options
 the Logseq side panel gets.
+
+NO TCP PORT. ttyd binds a unix socket in a 0700 run directory; =umask 077=
+makes the socket owner-only the instant libwebsockets creates it, and the
+launcher then forces mode 0600 explicitly (fix round 1 — no local agent user
+may reach the operator's shell). =--check= is the single liveness probe the
+supervisor and =logseq-db= share: exit 0 means the socket answers, 3 means
+down. Never fork this probe.
+
+The launcher does not =exec= ttyd directly: it starts ttyd in the background,
+waits for the socket file to appear, forces 0600, then blocks in =wait= —
+same foreground semantics for the supervisor, plus the chmod window.
 
 #+name: caddy-terminal-serve
 #+BEGIN_SRC bash :tangle all/.local/bin/caddy-terminal-serve :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
 # caddy-terminal-serve — foreground ttyd launcher for the Caddy web terminal.
 # Same ttyd, same patched index as the Logseq side panel (logseq.org).
-# Loopback only: the tailnet face is the Caddy basic_auth gate, never ttyd.
+# Unix socket only: no TCP port for any local user to reach (fix round 1).
 set -euo pipefail
 
+TAG="caddy-terminal-serve"
 TTYD_BIN="${CADDY_TERMINAL_TTYD:-$HOME/.local/bin/ttyd}"
 INDEX_TOOL="${CADDY_TERMINAL_INDEX:-$HOME/.local/bin/logseq-ttyd-index}"
-PORT="${CADDY_TERMINAL_PORT:-7681}"
+STATE_DIR="${CADDY_TERMINAL_STATE:-$HOME/.local/state/caddy-terminal}"
+RUN_DIR="${CADDY_TERMINAL_RUN_DIR:-$STATE_DIR/run}"
+SOCKET="${CADDY_TERMINAL_SOCKET:-$RUN_DIR/terminal.sock}"
 FONT_SIZE="${CADDY_TERMINAL_FONT_SIZE:-16}"
 FONT_FAMILY="${CADDY_TERMINAL_FONT_FAMILY:-SFMono Nerd Font, monospace}"
+CURL_BIN="${CADDY_TERMINAL_CURL:-curl}"
 
-[ -x "$TTYD_BIN" ] || { echo "caddy-terminal-serve: missing $TTYD_BIN" >&2; exit 69; }
-[ -x "$INDEX_TOOL" ] || { echo "caddy-terminal-serve: missing $INDEX_TOOL (tangle logseq.org and stow)" >&2; exit 69; }
+[ -x "$TTYD_BIN" ] || { echo "$TAG: missing $TTYD_BIN" >&2; exit 69; }
+[ -x "$INDEX_TOOL" ] || { echo "$TAG: missing $INDEX_TOOL (tangle logseq.org and stow)" >&2; exit 69; }
 
-TTYD_INDEX="$("$INDEX_TOOL")" || { echo "caddy-terminal-serve: index build failed" >&2; exit 1; }
+socket_alive() {
+  [ -S "$SOCKET" ] || return 1
+  "$CURL_BIN" -s --max-time 2 --unix-socket "$SOCKET" -o /dev/null http://localhost/ 2>/dev/null
+}
 
-exec "$TTYD_BIN" -W -i lo -p "$PORT" -I "$TTYD_INDEX" \
-  -t "fontSize=$FONT_SIZE" -t "fontFamily=\"$FONT_FAMILY\"" zsh
+if [ "${1:-}" = "--check" ]; then
+  [ "$#" -eq 1 ] || { echo "$TAG: --check takes no other arguments" >&2; exit 2; }
+  # Read-only probe for the supervisor and logseq-db: 0 = live, 3 = down.
+  socket_alive || exit 3
+  exit 0
+fi
+[ "$#" -eq 0 ] || { echo "Usage: $TAG [--check]" >&2; exit 2; }
+
+# umask 077: libwebsockets creates the socket as 0777 & ~umask, so it is
+# owner-only from birth; 0600 is forced below once it exists. The 0700 run
+# directory is the outer wall — no other local user can traverse to it.
+umask 077
+mkdir -p "$RUN_DIR"
+chmod 700 "$STATE_DIR" "$RUN_DIR"
+
+if socket_alive; then
+  echo "$TAG: socket already live: $SOCKET" >&2
+  exit 0
+fi
+# Stale socket file left by a dead ttyd blocks the fresh bind — remove it
+# only after the liveness probe failed (never a live listener's file).
+[ -S "$SOCKET" ] && rm -f "$SOCKET"
+
+TTYD_INDEX="$("$INDEX_TOOL")" || { echo "$TAG: index build failed" >&2; exit 1; }
+
+"$TTYD_BIN" -W -i "$SOCKET" -I "$TTYD_INDEX" \
+  -t "fontSize=$FONT_SIZE" -t "fontFamily=\"$FONT_FAMILY\"" zsh &
+ttyd_pid=$!
+for _ in $(seq 1 50); do
+  [ -S "$SOCKET" ] && break
+  kill -0 "$ttyd_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if [ -S "$SOCKET" ]; then
+  chmod 0600 "$SOCKET"
+  wait "$ttyd_pid"
+else
+  wait "$ttyd_pid" || true
+  echo "$TAG: ttyd exited without creating $SOCKET" >&2
+  exit 1
+fi
 #+END_SRC
 
 #+BEGIN_SRC sh
@@ -87,9 +157,12 @@ chmod +x ~/DotCortex/all/.local/bin/caddy-terminal-serve
 The =filebrowser-supervise= shape: flock singleton, host guard, respawn forever.
 One addition the filebrowser lane does not need: the Logseq launcher
 (=logseq-db=) may legitimately have started ttyd first. The supervisor adopts
-any existing listener on the port and only spawns the launcher when the port is
-free — one owner at a time, whoever got there first, and the supervisor always
-outlives a crash.
+any live socket and only spawns the launcher when the socket is down — one
+owner at a time, whoever got there first, and the supervisor always outlives a
+crash. Liveness is the launcher's own =--check= probe (single owner, never
+duplicated); a socket FILE left by a dead ttyd is not "alive" — the probe
+connects through it, so stale files fall through to a respawn and the
+launcher clears them.
 
 #+name: caddy-terminal-supervise
 #+BEGIN_SRC bash :tangle linux/.local/bin/caddy-terminal-supervise :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
@@ -101,7 +174,7 @@ DELAY=15
 RETRY_SECONDS=5
 ADOPT_SECONDS=30
 LAUNCHER="${CADDY_TERMINAL_SUPERVISE_LAUNCHER:-$HOME/.local/bin/caddy-terminal-serve}"
-PORT="${CADDY_TERMINAL_PORT:-7681}"
+SOCKET="${CADDY_TERMINAL_SOCKET:-$HOME/.local/state/caddy-terminal/run/terminal.sock}"
 HOSTNAME_BIN="${CADDY_TERMINAL_SUPERVISE_HOSTNAME_BIN:-hostname}"
 
 while [ "$#" -gt 0 ]; do
@@ -121,7 +194,7 @@ CURRENT_HOST="$($HOSTNAME_BIN -s)"
 [ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: wrong host ($CURRENT_HOST != $EXPECTED_HOST), nothing to do" >&2; exit 1; }
 [ -x "$LAUNCHER" ] || { echo "$TAG: launcher is not executable: $LAUNCHER" >&2; exit 69; }
 
-LOG_DIR="$HOME/.local/state/caddy-terminal"
+LOG_DIR="${CADDY_TERMINAL_STATE:-$HOME/.local/state/caddy-terminal}"
 mkdir -p "$LOG_DIR"
 exec 9>"$LOG_DIR/supervisor.lock"
 if ! flock -n 9; then
@@ -131,20 +204,20 @@ fi
 
 log() { printf '%s %s %s\n' "$(date -Is)" "$TAG" "$*" >> "$LOG_DIR/supervisor.log"; }
 
-# No pipe: under pipefail, grep -q exiting early can SIGPIPE ss and read as
-# "not listening" (same trap as caddy-serve).
-listening() { [ -n "$(ss -H -tln "( sport = :$PORT )" 2>/dev/null)" ]; }
+# Liveness is the launcher's --check probe (curl through the unix socket):
+# no TCP port exists, and a stale socket file from a dead ttyd reads as down.
+alive() { "$LAUNCHER" --check 2>/dev/null; }
 
-log "supervisor starting (host=$CURRENT_HOST, launcher=$LAUNCHER, port=$PORT)"
+log "supervisor starting (host=$CURRENT_HOST, launcher=$LAUNCHER, socket=$SOCKET)"
 
 # Boot path: give the machine a moment, then own the terminal forever,
 # respawning on death — filebrowser-supervise shape.
 sleep "$DELAY"
 adopted=0
 while :; do
-  if listening; then
+  if alive; then
     if [ "$adopted" -eq 0 ]; then
-      log "port $PORT already listening; adopting existing ttyd"
+      log "terminal socket already live; adopting existing ttyd"
       adopted=1
     fi
     sleep "$ADOPT_SECONDS"
@@ -289,15 +362,106 @@ echo "Restart the Caddy gate instance (FileBrowser front) to apply, then reload 
 chmod +x ~/DotCortex/all/.local/bin/caddy-terminal-passwd
 #+END_SRC
 
+* Token helper: caddy-terminal-token
+
+The Logseq side panel cannot type a password. Logseq is Electron: the ttyd
+panel is an iframe, and Electron surfaces HTTP 401 challenges through the
+session's =login= event — a native Basic-auth dialog does NOT appear for
+iframe subresources, and the plugin renderer cannot register a session
+=login= handler. Routing the panel through the basic_auth gate would render
+the panel as a dead 401 page. So the panel gets its own authenticated route
+on the SAME gate: a 256-bit random path token. The URL
+=http://127.0.0.1:7680/<token>/= is a bearer credential — but the gate still
+binds =127.0.0.1=, so the token is worthless off-box, and the token file is
+0600 in metsatron's home, unreadable by agent users. This was the second
+option Bunta's review explicitly sanctioned ("if Electron's webview can't
+handle basic auth... a long random path token stored 0600, documented").
+
+=caddy-terminal-token= owns the token and the Caddy snippet the gate imports:
+it creates the token on first run, never rotates silently (=--rotate= is
+explicit), and prints the ready-to-paste URL for the Logseq plugin's
+"Terminal URL" setting. Rotating or re-running requires restarting the Caddy
+gate instance (admin off) and re-pasting the URL in Logseq.
+
+#+name: caddy-terminal-token
+#+BEGIN_SRC bash :tangle all/.local/bin/caddy-terminal-token :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
+# caddy-terminal-token — bearer path token for the Logseq side panel's gate route.
+# The token is a credential: 0600, never committed, never in DotCortex source.
+set -euo pipefail
+
+TAG="caddy-terminal-token"
+STATE_DIR="${CADDY_TERMINAL_STATE:-$HOME/.local/state/caddy-terminal}"
+TOKEN_FILE="$STATE_DIR/terminal-token"
+ROUTE_FILE="$STATE_DIR/terminal-token-route"
+SOCKET="${CADDY_TERMINAL_SOCKET:-$STATE_DIR/run/terminal.sock}"
+GATE_URL="${CADDY_TERMINAL_GATE_URL:-http://127.0.0.1:7680}"
+
+print_url() {
+  printf '%s/%s/\n' "$GATE_URL" "$(cat "$TOKEN_FILE")"
+}
+
+case "${1:-}" in
+  -h|--help|help)
+    echo "Usage: $TAG [--print] [--rotate]"
+    echo "  (default) create the token if missing, then print the panel URL"
+    echo "  --print   only print the current URL; fails if no token exists"
+    echo "  --rotate  force a fresh token (old one dies at the next gate restart)"
+    exit 0 ;;
+  --print) ;;
+  --rotate) ;;
+  '') ;;
+  *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { echo "$TAG: one argument at most" >&2; exit 2; }
+
+umask 077
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+
+if [ ! -f "$TOKEN_FILE" ] || [ "${1:-}" = "--rotate" ]; then
+  # 32 bytes from the kernel CSPRNG -> 64 hex chars (256 bits).
+  TOKEN="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  TMP="$(mktemp "$STATE_DIR/.terminal-token.XXXXXXXX")"
+  printf '%s\n' "$TOKEN" > "$TMP"
+  chmod 600 "$TMP"
+  mv "$TMP" "$TOKEN_FILE"
+  # Snippet the gate site imports FIRST (before its catch-all handle):
+  # handle_path strips the token prefix, so ttyd sees clean /, /token, /ws paths.
+  TMP="$(mktemp "$STATE_DIR/.terminal-token-route.XXXXXXXX")"
+  {
+    printf '# Managed by %s. Bearer-token route for the Logseq side panel (fix round 1).\n' "$TAG"
+    printf '# Import order matters: this must be the first handle in the gate site.\n'
+    printf 'handle_path /%s/* {\n' "$TOKEN"
+    printf '\treverse_proxy unix/%s\n' "$SOCKET"
+    printf '}\n'
+  } > "$TMP"
+  chmod 600 "$TMP"
+  mv "$TMP" "$ROUTE_FILE"
+fi
+
+[ -f "$TOKEN_FILE" ] || { echo "$TAG: no token at $TOKEN_FILE" >&2; exit 1; }
+echo "$TAG: paste this URL into the Logseq ttyd plugin's Terminal URL setting:" >&2
+print_url
+echo "$TAG: token and Caddy route snippet live in $STATE_DIR (0600)" >&2
+if [ -f "$ROUTE_FILE" ]; then
+  echo "Restart the Caddy gate instance for the route snippet to take effect." >&2
+fi
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/all/.local/bin/caddy-terminal-token
+#+END_SRC
+
 * Gate site (machine-local Caddyfile, not in DotCortex)
 
-Decided ports: gate 7680 (loopback), ttyd 7681 (loopback), tailnet 7682
-(tailscale serve). The site block is appended to the unprivileged FileBrowser
-Caddy instance's machine-local =$HOME/.local/state/filebrowser/caddy/.Caddyfile=
-(back it up first; =auto_https off= and =admin off= stay), and the instance is
-restarted. The hash file is imported, never inlined.
+Decided ports: gate 7680 (loopback), tailnet 7682 (tailscale serve) — ttyd
+has no port; it is a unix socket behind the gate. The site block is appended
+to the unprivileged FileBrowser Caddy instance's machine-local
+=$HOME/.local/state/filebrowser/caddy/.Caddyfile= (back it up first;
+=auto_https off= and =admin off= stay), and the instance is restarted. The
+hash file and the token-route snippet are imported, never inlined.
 
-Two details verified live (2026-10-15) and load-bearing:
+Three details verified live (2026-10-15) and load-bearing:
 
 - =bind 127.0.0.1= is REQUIRED. Without it a host-IP site address binds the
   port on every interface — the gate briefly listened on the LAN and tailnet
@@ -305,12 +469,21 @@ Two details verified live (2026-10-15) and load-bearing:
 - No Host matcher (=http://:7680=). =tailscale serve= forwards its own Host
   header; a =127.0.0.1= host matcher would miss those requests. The listener
   is loopback-only, so wildcard Host is safe — only tailscaled can reach it.
+- The token route import must come FIRST. =handle= blocks are mutually
+  exclusive and evaluated in order; the token =handle_path= claims its prefix
+  and the bare =handle= is the authenticated catch-all. Both routes proxy the
+  same unix socket. No X-Frame-Options or CSP is emitted on either route —
+  ttyd sends none, Caddy basic_auth adds none — so both the Centre window and
+  the Logseq panel can frame the terminal.
 
 #+BEGIN_EXAMPLE
 http://:7680 {
 	bind 127.0.0.1
-	import /home/metsatron/.local/state/caddy-terminal/terminal-auth
-	reverse_proxy 127.0.0.1:7681
+	import /home/metsatron/.local/state/caddy-terminal/terminal-token-route
+	handle {
+		import /home/metsatron/.local/state/caddy-terminal/terminal-auth
+		reverse_proxy unix//home/metsatron/.local/state/caddy-terminal/run/terminal.sock
+	}
 }
 #+END_EXAMPLE
 
@@ -327,11 +500,28 @@ here: the dock registry owns app routing, icons and window shape.
 
 * Verification
 
-Live checks (Kikin, run by the builder; recorded in the handoff report):
+Live checks (Kikin, run by the builder; recorded in the handoff report).
+The round-1 core: NO listener gives an unauthenticated shell to another
+local user.
 
-1. No credential: =curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7680/=
+1. No TCP listener for ttyd at all: =ss -H -tln "( sport = :7681 )"$ returns
+   nothing for the supervised instance (a pre-fix Logseq ttyd may linger
+   until reboot — find it by PID and kill it, never by name).
+2. Socket hygiene: =stat -c '%a %U'=
+   =~/.local/state/caddy-terminal/run/= is =700 metsatron=, and the socket
+   file is =600 metsatron= (=srw-------=). Agent users cannot traverse the
+   directory — that plus the absence of any port is the isolation property.
+   As an agent user (Bunta, outside the sandbox):
+   =sudo -u agent-vibe curl --unix-socket=
+   =/home/metsatron/.local/state/caddy-terminal/run/terminal.sock=
+   =http://localhost/= fails with permission denied.
+3. No credential: =curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7680/=
    returns 401.
-2. With credential: the ttyd index loads (200) and a websocket echo round-trips
+4. With credential: the ttyd index loads (200) and a websocket echo round-trips
    through the gate (=/token=, then =/ws= with the tty= subprotocol).
-3. =curl http://<tailnet-ip>:7681= is refused — ttyd is loopback-only.
-4. Killing the ttyd PID: the supervisor respawns it within its retry window.
+5. Token route (Logseq lane): =curl -s -o /dev/null -w '%{http_code}'=
+   =http://127.0.0.1:7680/<token>/= returns 200 with NO credential, and a
+   websocket echo round-trips through it too. A wrong token gets 401.
+6. =curl http://<tailnet-ip>:7680= is refused (=bind 127.0.0.1=).
+7. Killing the ttyd PID: the supervisor respawns it within its retry window,
+   the socket comes back 0600, and the gate is 200 again.
