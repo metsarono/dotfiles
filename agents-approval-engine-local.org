@@ -58,7 +58,7 @@ GREP_FLAGS = re.compile(r"^-[nivEFhHlLwxcoIsrR]+$")
 LS_FLAGS = re.compile(r"^-[alhtrdAF1S]+$")
 SED_PRINT = re.compile(r"^(?:\d+|\$)(?:,(?:\d+|\$))?p$")
 COUNT_VALUE = re.compile(r"^\+?\d+$")
-FILTERS = {"head", "tail", "cut", "sort", "uniq", "wc", "tr", "grep", "rg", "sed", "awk"}
+FILTERS = {"head", "tail", "cut", "sort", "uniq", "wc", "tr", "grep", "rg", "sed", "awk", "column"}
 BRANCH_OPTIONS = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--show-current", "--no-color"}
 SYSTEM_READERS = {"ps", "pgrep", "uptime", "df", "free", "ss", "date"}
 WRITE_COMMANDS = {"cp", "mv", "ln", "tee", "touch", "install", "mkdir", "rmdir", "truncate", "chmod", "chown", "rm", "unlink"}
@@ -83,6 +83,10 @@ def _protected(value):
     if ("palmcortex" in parts and "clients" in parts) or any(parts[i:i + 3] == ("logs", "telegram", "personal") for i in range(max(0, len(parts) - 2))):
         return True
     if re.search(r"secret[\W_]*vault", lowered) or "nexus/keys" in posixpath.normpath(lowered):
+        return True
+    if ".claude.json" in lowered:
+        return True
+    if re.search(r'(?<![\w])\.env(?:[.\w-]*)?(?!\w)', lowered):
         return True
     if re.search(r'(?:^|/)proc/[^/]+/environ(?:$|[\s\"\'])', lowered):
         return True
@@ -350,9 +354,16 @@ def _admiral_floor(event, manifest=None, coordinator=None, readonly_proven=None)
             or re.search(r'(?<![\w])\.env(?:[.\w-]*)?(?!\w)', normalized_scan)
             or re.search(r'keepass(?:[.\w-]*)?\.(?:kdbx?|database)', normalized_scan)):
         return True
-    if manifest is not None and _write_outside_roots(event, manifest):
-        return True
     layout = _split_approval_compound(scan)
+    # An ambiguous parse asks through the deterministic ambiguity path; it is
+    # not promoted into the true floor merely because redirects cannot be
+    # resolved. Literal credentials/protected paths were handled above.
+    if _for_loop_body_floor(event, manifest or {}):
+        return True
+    if manifest is not None and layout is not None and _write_outside_roots(event, manifest):
+        return True
+    if _plain_observation_compound(event, manifest or {}):
+        return False
     pieces = [text for _separator, text in layout] if layout is not None else [scan]
     stages = []
     for piece in pieces:
@@ -381,8 +392,13 @@ def _admiral_floor(event, manifest=None, coordinator=None, readonly_proven=None)
             nested_event = {**event, 'tool_input': {**payload, 'command': script}}
             if _admiral_floor(nested_event, manifest, coordinator, readonly_proven):
                 return True
-        if any(word in SERVICE for word in lowered) or verb in {'sudo', 'doas'}:
-            return True
+        # Listing the current crontab is an observation; all other crontab
+        # forms remain service-control floor candidates.
+        service_words = [word for word in lowered if word in SERVICE]
+        if service_words or verb in {'sudo', 'doas'}:
+            piece_event = {**event, 'tool_input': {**payload, 'command': piece}}
+            if not (verb == 'crontab' and _plain_observation_compound(piece_event, manifest or {})):
+                return True
         if verb in {'kill', 'pkill', 'killall'}:
             return True
         if (verb in PACKAGE and any(word in {'install', 'add', 'upgrade', 'update', 'remove', 'uninstall', 'sync'}
@@ -1655,6 +1671,212 @@ def _repo(raw, cwd, manifest):
         current = current.parent
 
 
+def _plain_observation_words(words, cwd, manifest, *, piped=False):
+    """Prove one read-only shell stage, including observations outside repo roots.
+
+    This grammar is intentionally smaller than a shell. It is used only after
+    the full-request floor scan and the quote/heredoc-aware segment parser.
+    """
+    words = _unwrap_words(list(words))
+    if not words:
+        return False
+    if words[0] == 'timeout':
+        if len(words) < 3 or not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?[smh]?', words[1]):
+            return False
+        return _plain_observation_words(words[2:], cwd, manifest, piped=piped)
+    if words[0] in {'true'}:
+        return len(words) == 1
+    if words[0] in {'echo', 'printf'}:
+        return not (words[0] == 'printf' and len(words) > 1 and words[1].startswith('-')) and not any(any(ch in word for ch in '$`')
+                       or re.search(r'(?i)(?:TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL)', word)
+                       for word in words[1:])
+    verb = words[0].rsplit('/', 1)[-1]
+    args = words[1:]
+    # A pipeline filter consumes stdin; it must not name files or invoke awk
+    # side effects. The existing option validator is deliberately reused.
+    if piped and verb in FILTERS:
+        return _filter_ok(words)
+    if verb in {'command', 'which', 'type'}:
+        return (len(args) == 2 and args[0] == '-v' if verb == 'command'
+                else len(args) == 1) and bool(re.fullmatch(r'[A-Za-z0-9_.+-]+', args[-1]))
+    if len(args) == 1 and args[0] in {'--help', '-h', '--version'}:
+        return verb not in REMOTE | SERVICE | PACKAGE | OPAQUE_COMMANDS | WRITE_COMMANDS
+    if verb == 'crontab':
+        return args == ['-l']
+    if verb == 'git':
+        git_args = list(args)
+        if git_args[:1] == ['-C'] and len(git_args) >= 3:
+            git_args = git_args[2:]
+        if git_args[:2] == ['apply', '--check'] and len(git_args) == 3:
+            target = _lexical(git_args[2], cwd)
+            return target is not None and not _protected(target)
+        return False
+    if verb == 'tailscale':
+        return args == ['status']
+    if verb == 'ss':
+        return args == ['-ltn']
+    if verb == 'tmux':
+        return bool(args) and (args == ['ls'] or args[0] in {'capture-pane', 'list-panes'}) and all(
+            arg in {'-p', '-e', '-t'} or (i > 0 and args[i - 1] == '-t' and not arg.startswith('-'))
+            for i, arg in enumerate(args[1:], 1))
+    if verb == 'mailcortex':
+        return bool(args) and args[0] in {'inbox', 'read'} and not any(
+            any(ch in arg for ch in '><;&|`$\\') for arg in args)
+    if verb in {'pgrep', 'ps'}:
+        return bool(args) and not any(arg in {'-o', '--signal', '-signal'} for arg in args)
+    if verb not in {'ls', 'stat', 'cat', 'grep', 'rg', 'find'}:
+        if verb not in {'head', 'tail', 'wc'}:
+            return False
+        if verb in {'head', 'tail'}:
+            operands = _strip_counts(args)
+            if operands is None or not operands:
+                return False
+        else:
+            operands = [arg for arg in args if not arg.startswith('-')]
+            if not operands or any(arg not in {'-l', '-c', '-w', '-m'} for arg in args if arg.startswith('-')):
+                return False
+        for arg in operands:
+            if '$' in arg or '`' in arg or _protected(arg) or _protected(os.path.realpath(_lexical(arg, cwd) or arg)):
+                return False
+        return True
+    if verb == 'find' and any(arg in {'-exec', '-execdir', '-delete', '-ok', '-okdir'} for arg in args):
+        return False
+    if verb in {'grep', 'rg'}:
+        if not args or any(arg in {'-e', '--exec', '--pre', '--pre-glob'} for arg in args):
+            return False
+        if any(arg.startswith('-') and arg not in READ_OPTIONS and not GREP_FLAGS.fullmatch(arg)
+               for arg in args):
+            return False
+        operands = [arg for arg in args if not arg.startswith('-')]
+    for arg in args:
+        if arg.startswith('-'):
+            continue
+        if '$' in arg or '`' in arg:
+            return False
+        if _protected(arg) or _protected(os.path.realpath(_lexical(arg, cwd) or arg)):
+            return False
+    return bool(args) or verb == 'find'
+
+
+def _plain_observation_compound(event, manifest):
+    """Check the entire quote-aware shell chain as independent safe stages."""
+    payload = event.get('tool_input') if isinstance(event, dict) else None
+    command, cwd = (payload.get('command'), event.get('cwd')) if isinstance(payload, dict) else (None, None)
+    if event.get('tool_name') != 'Bash' or not isinstance(command, str) or not isinstance(cwd, str):
+        return False
+    segments = _split_compound(command)
+    if segments is None:
+        segments = _split_approval_compound(command)
+        if segments is None:
+            return False
+        current = cwd
+        variables = {}
+        for separator, original in segments:
+            expanded = _literal_variable_expansion(original, current, manifest, variables)
+            if expanded is None:
+                return False
+            text, variables = expanded
+            assigned = _assignment_only(text, current, manifest, variables)
+            if assigned is not None:
+                variables = assigned
+                continue
+            pipeline = _split_compound(text)
+            if pipeline is not None and any(separator == '|' for separator, _part in pipeline):
+                nested = {**event, 'tool_input': {**payload, 'command': text}, 'cwd': current}
+                if not _plain_observation_compound(nested, manifest):
+                    return False
+                continue
+            targets = _redirect_targets(text)
+            if targets is None:
+                return False
+            output_targets = [(op, target) for op, target in targets if op in {'>', '>>', '>|', '&>', '&>>'}]
+            if output_targets:
+                roots = _write_roots(manifest)
+                if any(target != '/dev/null' and _write_target_outside(target, current, roots)
+                       for _op, target in output_targets):
+                    return False
+                try:
+                    words = _unwrap_words(shlex.split(_strip_heredoc_bodies(text) or text, posix=True))
+                except ValueError:
+                    return False
+                if not words or words[0].rsplit('/', 1)[-1] not in {'cat', 'echo', 'printf'}:
+                    return False
+                continue
+            try:
+                words = _unwrap_words(shlex.split(text, posix=True))
+            except ValueError:
+                return False
+            if words[:1] == ['cd'] and len(words) == 2:
+                target = _lexical(words[1], current)
+                if target is None or not os.path.isdir(target) or separator == '|':
+                    return False
+                if separator in {None, '&&', ';', '||', '\n'}:
+                    current = target
+                continue
+            if not _plain_observation_words(words, current, manifest, piped=separator == '|'):
+                return False
+        return True
+    current = cwd
+    variables = {}
+    pipe_next = False
+    for separator, original in segments:
+        pipe_next = separator == '|'
+        if _inert_environment_export(original):
+            continue
+        try:
+            expanded = _literal_variable_expansion(original, current, manifest, variables)
+            if expanded is None:
+                return False
+            text, variables = expanded
+            assigned = _assignment_only(text, current, manifest, variables)
+            if assigned is not None:
+                variables = assigned
+                continue
+            words = _unwrap_words(shlex.split(text, posix=True))
+        except (ValueError, TypeError):
+            return False
+        redirects = _redirect_targets(text)
+        if redirects is None:
+            return False
+        writable_roots = _write_roots(manifest)
+        for operator, target in redirects:
+            if operator in {'<<', '<<-', '<<<', '>&', '<&'} and target in {'&1', '&2', '1', '2'}:
+                continue
+            if operator in {'>', '>>', '>|', '&>', '&>>'}:
+                if _write_target_outside(target, current, writable_roots):
+                    return False
+            elif operator not in {'<'}:
+                return False
+        if not words:
+            continue
+        if words[0] == 'cd':
+            if len(words) != 2:
+                return False
+            target = _lexical(words[1], current)
+            if target is None or not os.path.isdir(target):
+                return False
+            current = target
+            continue
+        assignment = all(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', word) for word in words)
+        if words[0] == 'export':
+            values = words[1:]
+            if not values or any('=' not in word for word in values):
+                return False
+            if any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', word.split('=', 1)[0])
+                   or re.search(r'(?i)(?:TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL)', word.split('=', 1)[0])
+                   for word in values):
+                return False
+            continue
+        if assignment:
+            if any(re.search(r'(?i)(?:TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL)', word.split('=', 1)[0])
+                   for word in words):
+                return False
+            continue
+        if not _plain_observation_words(words, current, manifest, piped=pipe_next):
+            return False
+    return True
+
+
 def _local_match(event, manifest, words=None):
     entry = manifest["entries"].get("local_read")
     if entry is None:
@@ -2223,6 +2445,8 @@ def _filter_ok(words):
         return all(arg in {"-l", "-c", "-w", "-m"} for arg in args)
     if verb == "uniq":
         return all(arg in {"-c", "-d", "-u", "-i"} for arg in args)
+    if verb == "column":
+        return all(arg in {"-t", "-s", "-x"} for arg in args)
     if verb == "tr":
         options = [arg for arg in args if arg.startswith("-")]
         return all(arg in {"-d", "-s"} for arg in options) and 1 <= len(args) - len(options) <= 2
@@ -2254,7 +2478,7 @@ def _compound(event, manifest):
     """Approve a compound only when every stage is a cd inside the roots, an enabled
     read or git observation, or (after a pipe) a stdin-only filter."""
     segments = _split_compound(event["tool_input"]["command"])
-    roots = _policy_roots(manifest)
+    roots = _write_roots(manifest)
     cwd = _path(event.get("cwd"), event.get("cwd") or "/", roots) if isinstance(event.get("cwd"), str) else None
     if segments is None or cwd is None:
         return False, "no_match"

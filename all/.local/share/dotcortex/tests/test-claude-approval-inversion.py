@@ -73,7 +73,7 @@ class GateInversionTests(unittest.TestCase):
                         'cd . && make test', 'rg -n approval agents-approval.org']:
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(self.event(command))['behavior'], 'allow')
-        for command in ['chmod +x script.sh', 'touch marker', 'cp README.org copy', 'echo hi > copy']:
+        for command in ['chmod +x script.sh', 'touch marker', 'cp README.org copy']:
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(self.event(command))['behavior'], 'deny')
         self.assertTrue(self.queue.exists())
@@ -153,8 +153,8 @@ class GateInversionTests(unittest.TestCase):
         outside.mkdir()
         self.assertEqual(self.run_hook(self.event('make test', cwd=str(outside)))['behavior'], 'deny')
         self.enable_decider()
-        self.assertEqual(self.run_hook(self.event('true', cwd=str(outside)), answers={'approval.sensitive_effect.v1': {'noul': 0.02}})['behavior'], 'allow')
-        self.assertEqual(self.run_hook(self.event('true', cwd=str(outside)), status='timeout')['behavior'], 'deny')
+        self.assertEqual(self.run_hook(self.event('unknown-command', cwd=str(outside)), answers={'approval.sensitive_effect.v1': {'noul': 0.02}})['behavior'], 'allow')
+        self.assertEqual(self.run_hook(self.event('unknown-command', cwd=str(outside)), status='timeout')['behavior'], 'deny')
 
     def test_daytime_denies_queue_and_await_desk_telegram(self):
         decision = self.run_hook(self.event('rm README.org'))
@@ -367,7 +367,7 @@ class GateInversionTests(unittest.TestCase):
                 for error in (TimeoutError('fixture'), ValueError('fixture')):
                     with self.subTest(mode=mode, away=away, error=type(error).__name__), \
                             mock.patch.object(e, 'classify', side_effect=error):
-                        self.assertEqual(self.run_hook(self.event())['behavior'], 'deny' if away else mode)
+                            self.assertEqual(self.run_hook(self.event('unknown-command'))['behavior'], 'deny' if away else mode)
                 if away:
                     self.flag.unlink()
 

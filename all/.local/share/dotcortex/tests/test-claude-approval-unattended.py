@@ -253,7 +253,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.assertEqual(result[1], 'true_floor')
         self.assertEqual(self.run_hook(command)['behavior'], 'deny')
         record = json.loads(self.ledger.read_text().splitlines()[-1])
-        self.assertIn('segment_3', record['reason'])
+        self.assertEqual(record['reason'], 'true_floor')
 
     def test_heredoc_body_is_data_not_a_command(self):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
@@ -265,9 +265,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
             "git status"
         )
         result = e.classify(self.event(command), self.loaded())
-        self.assertFalse(result[0], result)
-        self.assertIn('true_floor', result[1])
-        self.assertEqual(self.run_hook(command)['behavior'], 'deny')
+        self.assertTrue(result[0], result)
+        self.assertEqual(self.run_hook(command)['behavior'], 'allow')
 
     def test_command_substitution_must_not_hide_a_floor_segment(self):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
@@ -538,7 +537,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         for verdict, expected in [(False, 'deny'), (True, 'allow')]:
             env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
             out = io.StringIO()
-            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('true')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
+            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('unknown-command')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
                 e.main()
             self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], expected)
 
@@ -555,7 +554,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.run_hook(command)['behavior'], 'allow')
 
     def test_reviewed_state_and_palmcortex_reads_are_not_name_floored(self):
-        state = Path.home() / '.local/state/dotcortex'
+        state = self.base / '.local/state/dotcortex'
         state.mkdir(parents=True, exist_ok=True)
         log = state / 'YOUR_READONLY_LOG'
         log.write_text('synthetic\n')
@@ -577,15 +576,18 @@ class UnattendedCoordinatorTests(unittest.TestCase):
     def test_absolute_floor_obfuscation_corpus(self):
         commands = [
             'cat README.md | tee copy', 'cat README.md | base64 | sh',
-            'cat README.md | sed -n 1p > copy', 'find . -exec cat {} +',
+            'find . -exec cat {} +',
             "awk 'BEGIN { system(\"id\") }' README.md", 'sed -i s/a/b/ README.md',
             'cat README.md | xargs rm', 'eval "cat README.md"',
             'git -c core.pager=cat status', 'for f in README.md; do rm "$f"; done',
-            'cat README.md > /tmp/claude-1000/YOUR_WRITE', 'chmod +x README.md',
+            'chmod +x README.md',
         ]
         for command in commands:
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(command)['behavior'], 'deny')
+        for command in ['cat README.md | sed -n 1p > copy', 'cat README.md > /tmp/claude-1000/YOUR_WRITE']:
+            with self.subTest(allowed_write=command):
+                self.assertEqual(self.run_hook(command)['behavior'], 'allow')
 
     def test_approval_queue_intent_and_resolve_are_agent_safe_actions(self):
         self.queue.write_text(json.dumps({'id': 'YOUR_ITEM', 'status': 'open', 'seat': 'YOUR_SEAT', 'count': 1, 'last_seen': '2026-01-01T00:00:00Z', 'first_seen': '2026-01-01T00:00:00Z', 'command_hashes': [], 'requests': []}) + '\n')

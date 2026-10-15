@@ -1002,6 +1002,26 @@ def _policy_roots(manifest):
     return tuple(dict.fromkeys([posixpath.normpath(root) for root in kept] + [os.path.realpath(root) for root in kept]))
 
 
+def _write_roots(manifest):
+    """Roots that may receive bounded redirects; broad observation roots do not grant writes."""
+    roots = tuple(manifest.get('roots') or ()) + tuple(manifest.get('scratch_roots') or ())
+    config = _coordinator_config(manifest)
+    if config is not None:
+        roots += tuple(config['repo_roots'] + config['worktree_roots'] + config['scratch_roots'])
+    roots += ('/tmp/claude-1000', '/tmp/claude-2002')
+    broad = {'/', '/tmp', '/var/tmp', '/home'}
+    kept = []
+    for root in roots:
+        if not isinstance(root, str) or not root.startswith('/'):
+            continue
+        lexical = posixpath.normpath(root)
+        resolved = os.path.realpath(root)
+        if lexical in broad or resolved in broad:
+            continue
+        kept.extend((lexical, resolved))
+    return tuple(dict.fromkeys(kept))
+
+
 def _inversion_scope(event, manifest):
     """A cwd alone cannot confer authority over an outside target or unknown tool."""
     if not _inversion_enabled(manifest) or not isinstance(event, dict):
@@ -1064,6 +1084,8 @@ def _classify_single(event, manifest):
     Decider for those."""
     if not isinstance(event, dict) or event.get("hook_event_name") != "PermissionRequest":
         return False, "not_permission_request"
+    if _plain_observation_compound(event, manifest):
+        return True, 'local_read'
     readonly_proven = _ssh_readonly_proven(event, manifest)
     floor = _true_floor(event, manifest, readonly_proven=readonly_proven)
     coordinator = _coordinator_match(event, manifest)
@@ -1128,7 +1150,7 @@ def _classify_single(event, manifest):
 
 
 def _hard_refusal(reason):
-    return reason in {'true_floor', 'not_permission_request', 'coordinator_refused'} or reason.startswith(('compound_refused:', 'substitution_refused:'))
+    return reason in {'true_floor', 'not_permission_request', 'coordinator_refused', 'ambiguous_shell'} or reason.startswith(('compound_refused:', 'substitution_refused:'))
 
 
 def _compound_segment_reason(index, text, reason):
@@ -1184,7 +1206,9 @@ def _compound_approval(event, manifest, judge=None):
         result = classify(stage, stage_manifest)
         allow, reason = result
         if not allow and _hard_refusal(reason):
-            return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
+            exact_floor = _admiral_floor(stage, stage_manifest, _coordinator_match(stage, stage_manifest))
+            if not judge or exact_floor:
+                return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
         try:
             raw_words = shlex.split(expanded_text, posix=True)
         except ValueError:
@@ -1196,14 +1220,18 @@ def _compound_approval(event, manifest, judge=None):
             # cd must be a simple command and its success must gate the next
             # command. Pipelines do not change the parent shell's cwd.
             target = _path(words[1], current, _policy_roots(manifest)) if len(words) == 2 else None
-            if (separator not in {None, '&&'} or target is None or not os.path.isdir(target)
-                    or index < len(segments) and segments[index][0] != '&&'):
+            write_roots = _write_roots(stage_manifest)
+            current_is_write_root = any(_inside(os.path.realpath(current), root) for root in write_roots)
+            target_is_write_root = target is not None and any(
+                _inside(os.path.realpath(target), root) for root in write_roots)
+            if (separator not in {None, '&&', ';', '\n', '||'} or target is None or not os.path.isdir(target)
+                    or not current_is_write_root or not target_is_write_root):
                 reason = 'true_floor'
                 return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
             current = target
         stages.append((index, expanded_text, stage, stage_manifest, cd, assignment))
         output = _heredoc_scratch_output(stage, stage_manifest)
-        if output is not None:
+        if output is not None and os.path.isfile(output):
             created.add(output)
         elif allow and reason == 'coordinator_scratch_scp':
             try:
@@ -1260,6 +1288,8 @@ def classify(event, manifest):
         return False, 'true_floor'
     if _for_loop_candidate(event) is not None:
         return False, 'true_floor'
+    if _plain_observation_compound(event, manifest):
+        return True, 'local_read'
     compound = _compound_approval(event, manifest)
     if compound is not None:
         return compound
@@ -1281,19 +1311,72 @@ def _decide_request(event, manifest):
     allow, and any refusal it cannot prove safe goes to the Decider judge with
     the full command and cwd. Judge disabled, down, slow or unsure means ask.
     The ledger records which path decided (floor, judge or deterministic)."""
+    if not isinstance(event, dict) or event.get('hook_event_name') != 'PermissionRequest':
+        _log_decision.extras = {'decision_path': 'floor', 'judge_verdict': 'not_consulted'}
+        return False, 'not_permission_request'
+    payload = event.get('tool_input') if isinstance(event, dict) else None
+    command = payload.get('command') if isinstance(payload, dict) else None
+    safe_observation = (event.get('tool_name') == 'Bash' and isinstance(command, str)
+                        and not _protected(command) and not _credential_content(payload)
+                        and _plain_observation_compound(event, manifest))
     floored = (not isinstance(event, dict) or not isinstance(manifest, dict)
-               or _admiral_floor(event, manifest, _coordinator_match(event, manifest)))
+               or (not safe_observation
+                   and _admiral_floor(event, manifest, _coordinator_match(event, manifest))))
     if floored and isinstance(manifest, dict) and isinstance(manifest.get('decider'), dict):
         # An exact floor match never reaches the judge, not even through the
         # deterministic gate's own grey-zone Decider call.
         manifest = {**manifest, 'decider': {**manifest['decider'], 'enabled': False}}
-    allow, reason = _decide_deterministic(event, manifest)
     extras = getattr(_log_decision, 'extras', None)
     if not isinstance(extras, dict):
         extras = _log_decision.extras = {}
-    if floored and not (allow and str(reason).startswith('coordinator_')):
+    if floored and _coordinator_match(event, manifest) is None:
         extras.update(decision_path='floor', judge_verdict='not_consulted')
-        return False, reason if not allow and _hard_refusal(reason) else 'true_floor'
+        return False, 'true_floor'
+    if safe_observation:
+        extras.update(decision_path='deterministic', judge_verdict='not_needed')
+        return True, 'local_read'
+    if (event.get('tool_name') == 'Bash' and isinstance(command, str)
+            and (not isinstance(payload, dict) or not set(payload) <= TOOL_INPUT_KEYS)):
+        extras.update(decision_path='ambiguous', judge_verdict='not_consulted')
+        return False, 'ambiguous_shell'
+    stripped_command = _strip_heredoc_bodies(command) if isinstance(command, str) else None
+    if (event.get('tool_name') == 'Bash' and isinstance(command, str)
+            and _split_approval_compound(command) is None
+            and (stripped_command is None or _shell_substitutions(stripped_command) is None)):
+        extras.update(decision_path='ambiguous', judge_verdict='not_consulted')
+        return False, 'ambiguous_shell'
+    if event.get('tool_name') == 'Bash' and isinstance(command, str) and _for_loop_candidate(event) is not None:
+        if _for_loop_body_floor(event, manifest):
+            extras.update(decision_path='floor', judge_verdict='not_consulted')
+            return False, 'true_floor'
+        if _for_readonly(event, manifest):
+            extras.update(decision_path='deterministic', judge_verdict='not_needed')
+            return True, 'local_read'
+        extras.update(decision_path='ambiguous', judge_verdict='not_consulted')
+        return False, 'ambiguous_shell'
+    if event.get('tool_name') == 'Bash' and isinstance(command, str):
+        compound = _compound_approval(event, manifest, judge=_decide_request)
+        if compound is not None:
+            allow, reason = compound
+            if allow:
+                extras.update(decision_path='deterministic', judge_verdict='not_needed')
+            elif reason.startswith('compound_refused:'):
+                if 'decider_' in reason or 'no_match_decider' in reason:
+                    extras.update(decision_path='judge', judge_verdict=extras.get('verdict', 'ask'))
+                else:
+                    extras.update(decision_path='deterministic', judge_verdict='not_consulted')
+            return allow, reason
+    if event.get('tool_name') == 'Bash' and isinstance(command, str):
+        nested = _substitutions_approval(event, manifest, _decide_request)
+        if nested is not None:
+            if not nested[0]:
+                current_extras = getattr(_log_decision, 'extras', {})
+                if not isinstance(current_extras, dict):
+                    current_extras = _log_decision.extras = {}
+                current_extras.update(decision_path='judge',
+                                      judge_verdict=current_extras.get('verdict', 'ask'))
+            return nested
+    allow, reason = _decide_deterministic(event, manifest)
     if allow:
         if reason == 'decider_allow':
             extras.update(decision_path='judge', judge_verdict=extras.get('verdict', 'allow'))
@@ -1355,6 +1438,8 @@ def _decide_deterministic(event, manifest):
         return False, 'true_floor'
     if _for_loop_candidate(event) is not None:
         return False, 'true_floor'
+    if _plain_observation_compound(event, manifest):
+        return True, 'local_read'
     compound = _compound_approval(event, manifest, judge=_decide_deterministic)
     if compound is not None:
         return compound
