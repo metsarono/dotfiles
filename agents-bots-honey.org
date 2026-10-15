@@ -838,6 +838,7 @@ Everything else the bots call comes from the host or =agent-claude='s own profil
 /all/.local/lib/dotcortex/claude_approval_kikin.py
 /all/.local/lib/dotcortex/claude_approval_runtime.py
 /all/.local/lib/dotcortex/approval_hold_pty.py
+/all/.local/lib/dotcortex/telegram_permission_recall.py
 #+END_SRC
 
 ** Installer

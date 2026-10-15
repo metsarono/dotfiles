@@ -63,7 +63,7 @@ class KikinApprovalHookTests(unittest.TestCase):
 
     def test_permission_wrapper_preserves_cli_prefixes_for_dispatch(self):
         text = HOOK.read_text()
-        self.assertIn("os.execve", text)
+        self.assertIn("env=env", text)  # the engine child gets the widened PATH
         self.assertIn(".bun/bin", text)
         self.assertIn("env[\"PATH\"]", text)
 
