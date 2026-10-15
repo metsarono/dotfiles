@@ -17,11 +17,12 @@ SHELL_META_RE = re.compile(r"[`$\\<>;&\n]")
 PYTEST_RE = re.compile(r"^pytest\s+(?:-{1,2}[\w=]+\s+)*([\w./\-]+)$")
 UNITTEST_RE = re.compile(r"^/usr/bin/python3(?:\.\d+)?\s+-m\s+unittest\s+[\w.]+$")
 REMOTE_REALPATH_TIMEOUT_SECONDS = 2.5
-GIT_READERS = {"status", "log", "diff", "show", "branch", "ls-files", "remote", "tag"}
+GIT_READERS = {"status", "log", "diff", "show", "merge-base", "branch", "ls-files", "remote", "tag"}
 GIT_UNSAFE_READ_OPTIONS = {"-C", "--output", "--exec", "--ext-diff", "--textconv", "--paginate", "--exec-path"}
 READERS = {"cat", "head", "tail", "grep", "rg", "find", "ls", "stat", "wc", "pgrep", "ps", "date", "mailcortex", "tmux", "awk", "sed", "jq", "sort", "uniq", "cut", "tr", "ss"}
 FIND_WRITE_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 REMOTE_EXCLUDED_COMPONENTS = {"private", "secrets", ".secrets", "keys", "credentials", ".git", ".ssh", ".env"}
+SSH_IDENTITY_COMMANDS = {"ssh", "scp", "sftp"}
 
 
 def _class_config(manifest, name):
@@ -88,6 +89,43 @@ def _protected_token_p3(token):
     names = {".netrc", ".authinfo", ".authinfo.gpg", "authorized_keys", "credentials",
              "credentials.json", "auth.json", "secrets.json", "id_rsa", "id_ed25519"}
     return any(part in names for part in components)
+
+
+def _ssh_identity_transport(words):
+    """Recognize identity material only in an SSH-family transport context."""
+    if not words:
+        return False
+
+    def identity_args(args):
+        for index, word in enumerate(args):
+            lowered = word.casefold()
+            if lowered in {'-i', '--identity-file'} or lowered.startswith('--identity-file='):
+                return True
+            if lowered in {'-o', '--option'} and index + 1 < len(args):
+                if args[index + 1].casefold().startswith('identityfile='):
+                    return True
+            if lowered.startswith(('-oidentityfile=', '--option=identityfile=')):
+                return True
+            if '.ssh/' in lowered or lowered.startswith('~/.ssh'):
+                return True
+        return False
+
+    verb = words[0].rsplit('/', 1)[-1].casefold()
+    if verb in SSH_IDENTITY_COMMANDS:
+        return identity_args(words[1:])
+    if verb != 'rsync':
+        return False
+    args = words[1:]
+    for index, word in enumerate(args):
+        if word == '-e' and index + 1 < len(args):
+            try:
+                transport = shlex.split(args[index + 1], posix=True)
+            except ValueError:
+                return False
+            if (transport and transport[0].rsplit('/', 1)[-1].casefold() in SSH_IDENTITY_COMMANDS
+                    and identity_args(transport[1:])):
+                return True
+    return False
 
 
 def _remote_path_p3(raw, remote_home, base=None):
@@ -694,11 +732,70 @@ def _coordinator_push(repo):
     return _coordinator_git(repo, 'merge-base', '--is-ancestor', tip, 'refs/heads/master') == ''
 
 
+def _coordinator_prefix(words):
+    """Strip only the two reviewed environment prefixes used by landing merges."""
+    words = list(words)
+    allowed = {
+        'GIT_EDITOR=true',
+        'DOTCORTEX_GUARD_ALLOW_DIRTY=1',
+    }
+    seen = set()
+    while words and words[0] in allowed:
+        if words[0] in seen:
+            return None
+        seen.add(words.pop(0))
+    return words
+
+
+def _landing_merge_words(command):
+    """Return the narrowly historical no-ff landing merge argv, if present.
+
+    Round-two's generic git-merge floor accidentally caught the old reviewed
+    landing form.  This is deliberately narrower than a coordinator grant:
+    only the known editor/dirty prefixes, an explicit -C repository, --no-ff,
+    one message and one non-canonical branch are accepted.  In particular,
+    --no-commit and arbitrary environment assignments do not pass.
+    """
+    command = re.sub(r"\s+2(?:>&1|\s+['\"]?>&['\"]?\s+1)\s*$", '', command)
+    try:
+        words = _coordinator_prefix(shlex.split(command, posix=True))
+    except ValueError:
+        return None
+    if words is None or words[:1] != ['git']:
+        return None
+    args = words[1:]
+    if args[:1] != ['-C'] or len(args) < 3:
+        return None
+    repo, args = args[1], args[2:]
+    if args[:1] != ['merge']:
+        return None
+    args = args[1:]
+    if '--no-ff' not in args or '--no-commit' in args or '--squash' in args:
+        return None
+    if args.count('--no-ff') != 1 or args.count('-m') != 1:
+        return None
+    message_index = args.index('-m')
+    if message_index + 1 >= len(args) or not args[message_index + 1]:
+        return None
+    branch = [word for index, word in enumerate(args)
+              if index not in {message_index, message_index + 1} and word != '--no-ff']
+    if len(branch) != 1 or not COORDINATOR_BRANCH.fullmatch(branch[0]) or branch[0] == 'master':
+        return None
+    return repo, branch[0]
+
+
+def _coordinator_single_command(command):
+    """Reject shell syntax while preserving quoted argument data."""
+    segments = _split_approval_compound(command)
+    return segments is not None and len(segments) == 1 and not _dynamic_shell(command)
+
+
 def _coordinator_candidate(command):
     try:
         words = shlex.split(command, posix=True)
     except ValueError:
         return False
+    words = _coordinator_prefix(words)
     if not words:
         return False
     if words[0] == 'git':
@@ -761,11 +858,18 @@ def _coordinator_match(event, manifest):
     command = tool_input.get('command')
     if not isinstance(command, str) or not command.isascii() or any(ord(c) < 32 or ord(c) == 127 for c in command):
         return None
+    landing = _landing_merge_words(command)
+    shape_command = re.sub(r'\s+2>&1\s*$', '', command)
+    if landing is not None:
+        command = shape_command
     try:
         words = shlex.split(command, posix=True)
     except ValueError:
         return None
     if not words or not any(_inside(os.path.realpath(cwd), os.path.realpath(root)) for root in config['repo_roots'] + config['worktree_roots'] + config['scratch_roots']):
+        return None
+    words = _coordinator_prefix(words)
+    if words is None:
         return None
     flags = config['classes']
     remote_grant = _peer_coordinator_match(command, words, config, manifest)
@@ -800,7 +904,7 @@ def _coordinator_match(event, manifest):
                 and _coordinator_remote_proof(config, [dest[1]], host=dest[0],copied_output=dest[1] if config.get('peer_host') else None)):
             return 'coordinator_scratch_scp'
         return None
-    if words[0] != 'git' or SHELL_META.search(command):
+    if words[0] != 'git' or not _coordinator_single_command(command):
         return None
     routing = {'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
                'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_CONFIG', 'GIT_CONFIG_COUNT',
@@ -821,6 +925,13 @@ def _coordinator_match(event, manifest):
     owner = repo if repo in canonical else next((root for root in canonical if _coordinator_git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir') == root + '/.git'), None)
     if owner is None:
         return None
+    if landing is not None and flags['integrate']:
+        landing_repo, branch = landing
+        if (landing_repo == repo and repo in canonical
+                and _coordinator_git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD') == 'master'
+                and args[:1] == ['merge'] and '--no-ff' in args
+                and branch == next((word for word in args[1:] if word == branch), None)):
+            return 'coordinator_integrate'
     if args[:2] == ['worktree', 'add'] and flags['worktree']:
         if (len(args) == 6 and args[3] == '-b' and args[5] == 'master'
                 and COORDINATOR_BRANCH.fullmatch(args[4]) and args[4] != 'master'
@@ -1650,12 +1761,6 @@ def _floor_rule_for_record(event, manifest, reason):
     if not isinstance(payload, dict):
         return 'invalid-input'
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).casefold()
-    if _credential_content(payload):
-        return 'credential'
-    if _protected(raw) or 'logs/telegram/personal' in raw:
-        if re.search(r'(?<!\S)(?:-i|--identity-file)(?:=|\s+)[^;&|]*\.ssh(?:/|\s|$)', raw):
-            return 'ssh-identity'
-        return 'protected'
     command = payload.get('command')
     if not isinstance(command, str):
         return 'protected'
@@ -1670,6 +1775,12 @@ def _floor_rule_for_record(event, manifest, reason):
         candidate_words = shlex.split(candidate, posix=True)
     except ValueError:
         candidate_words = []
+    if _credential_content(payload):
+        return 'credential'
+    if _protected(raw) or 'logs/telegram/personal' in raw:
+        if _ssh_identity_transport(candidate_words):
+            return 'ssh-identity'
+        return 'protected'
     if any(_protected(word) for word in candidate_words
            if '/' in word or word.startswith('~') or '.' in word):
         return 'protected'
@@ -1688,8 +1799,7 @@ def _floor_rule_for_record(event, manifest, reason):
     lowered = _unwrap_words(words)
     if 'kill' in lowered or 'pkill' in lowered or 'killall' in lowered:
         return 'kill'
-    if any(word in REMOTE for word in lowered) and any(
-            word in {'-i', '--identity-file'} or word.startswith('--identity-file=') for word in lowered):
+    if _ssh_identity_transport(candidate_words):
         return 'ssh-identity'
     if any(word in SERVICE for word in lowered):
         return 'service'
@@ -1846,6 +1956,8 @@ def main():
         _log_decision.extras.update(decision='deny', away_reason=away_reason, morning_queued=queued, queue_id=item_id, hold_status=hold_status, notification_status=notification)
     if not allow:
         floor_rule = _floor_rule_for_record(event, manifest, reason)
+        if floor_rule is None and _hard_refusal(reason):
+            floor_rule = 'command-shape'
         if floor_rule is not None:
             _log_decision.extras['floor_rule'] = floor_rule
     _log_decision(event, allow, reason)

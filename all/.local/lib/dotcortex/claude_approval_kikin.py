@@ -2,6 +2,7 @@
 """Root-scoped default allow with an absolute floor and a Decider danger veto."""
 
 import ast
+import glob
 import json
 import math
 import os
@@ -32,7 +33,7 @@ ALLOW_OUTPUT = {
 }
 SHELL_META = re.compile(r"(?:[\n\r;]|&&|\|\||\$\(|`|[<>]|&|\\)")
 PATH_META = re.compile(r"(?:[*?\[\]{}]|\$|`)")
-REMOTE = {"ssh", "scp", "rsync", "curl", "wget", "nc", "socat", "telnet"}
+REMOTE = {"ssh", "scp", "sftp", "rsync", "curl", "wget", "nc", "socat", "telnet"}
 SERVICE = {"sudo", "doas", "systemctl", "rc-service", "service", "sv", "s6-svc", "s6-rc", "dinitctl", "init", "telinit", "shutdown", "reboot", "poweroff", "crontab", "tailscale"}
 PACKAGE = {"apt", "apt-get", "apk", "brew", "cargo", "conda", "dnf", "guix", "gem", "mamba", "npm", "pacman", "pip", "pip3", "pipx", "pnpm", "poetry", "uv", "yarn", "yum", "zypper"}
 AUTH = {".authinfo", ".authinfo.gpg", ".netrc", "auth.json", "authorized_keys", "credentials", "credentials.json", "id_ed25519", "id_rsa", "oauth.json", "oauth_creds.json", "secrets.json", "cookies.sqlite", "cookies.jar"}
@@ -45,8 +46,8 @@ DISCARDS = (" 2>/dev/null", " 2> /dev/null", " >/dev/null", " > /dev/null", " 2>
 SEPARATORS = ("&&", "||", "|", ";")
 TOOL_INPUT_KEYS = {"command", "description", "timeout"}
 # Bundled short flags that only change how matches or listings are printed.
-# grep -r/-R stays out: recursion would walk past the per-path protected check.
-GREP_FLAGS = re.compile(r"^-[nivEFhHlLwxcoIs]+$")
+# Recursive grep is permitted only when each operand is a bounded in-root glob.
+GREP_FLAGS = re.compile(r"^-[nivEFhHlLwxcoIsrR]+$")
 LS_FLAGS = re.compile(r"^-[alhtrdAF1S]+$")
 SED_PRINT = re.compile(r"^(?:\d+|\$)(?:,(?:\d+|\$))?p$")
 COUNT_VALUE = re.compile(r"^\+?\d+$")
@@ -186,7 +187,16 @@ def _fleet_path_component(value):
         'HelmCortex/FORGE/bin', '$PATH', '${PATH}',
     }:
         return True
+    home = str(Path.home())
+    if value in {home + '/.npm-global/bin', home + '/.local/bin', home + '/HelmCortex/FORGE/bin'}:
+        return True
+    if re.fullmatch(re.escape(home) + r'/\.guix-extra-profiles/[^/:]+/[^/:]+/bin', value):
+        return True
     return bool(re.fullmatch(r'(?:~|\$HOME)/\.guix-extra-profiles/[^/:]+/[^/:]+/bin', value))
+
+
+def _expand_home_variables(command):
+    return re.sub(r'\$(?:\{HOME\}|HOME)\b', str(Path.home()), command)
 
 
 def _fleet_environment_export(command):
@@ -211,6 +221,28 @@ def _fleet_environment_export(command):
     return bool(assignments)
 
 
+def _inert_environment_export(command):
+    """Recognize reviewed environment data without permitting arbitrary exports."""
+    if _fleet_environment_export(command):
+        return True
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if len(words) < 2 or words[0] != 'export':
+        return False
+    for word in words[1:]:
+        if '=' not in word:
+            return False
+        name, value = word.split('=', 1)
+        if name == 'XDG_RUNTIME_DIR' and re.fullmatch(r'/run/user/[0-9]+', value):
+            continue
+        if name == 'PATH' and _fleet_environment_export('export ' + word):
+            continue
+        return False
+    return True
+
+
 # 2026-10-09 (Fable/SO-APPROVAL-C1 decider-in-the-loop): the old hard floor mixed
 # two very different refusals. The TRUE floor below stays absolute and the Decider
 # can NEVER override it: protected/secret paths and private logs, remote reach,
@@ -230,6 +262,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         command = _strip_heredoc_bodies(command)
         if command is None:
             return True
+        command = _expand_home_variables(command)
         floor_event = {**event, "tool_input": {**tool_input, "command": command}}
     if event.get('tool_name') in {'Write', 'Edit', 'MultiEdit', 'NotebookEdit'} and not isinstance(command, str):
         # Report prose is data, not a filesystem operand. Credential assignment
@@ -285,8 +318,13 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
     # Exact safe-commit proofs and near coordinator candidates retain their
     # historical class/refusal reasons. Generic git writes still floor below.
     commit_candidate = bool(re.match(r'^\s*git\s+(?:-C\s+\S+\s+)?commit(?:\s|$)', command))
+    landing_candidate = bool(manifest is not None and _landing_merge_words(command) is not None)
     if manifest is not None and (_safe_commit(floor_event, manifest)
                                  or (commit_candidate and '--amend' not in command and _coordinator_candidate(command))):
+        return False
+    # Preserve the exact pre-round-two landing merge form. Generic merges stay
+    # a hard floor; only the reviewed coordinator shape may use this carveout.
+    if landing_candidate:
         return False
     if (not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}
             and _split_approval_compound(tool_input['command']) is None):
@@ -298,7 +336,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         if split is None:
             if _unreviewed_home_path(raw, roots):
                 return True
-        elif any(not _fleet_environment_export(text) and _unreviewed_home_path(text, roots)
+        elif any(not _inert_environment_export(text) and _unreviewed_home_path(text, roots)
                   for _separator, text in split):
             return True
     # The floor sees every shell stage, including wrappers and redirects without
@@ -317,7 +355,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
             variables = {}
             expanded_parts = []
             for _separator, text in split:
-                if _fleet_environment_export(text):
+                if _inert_environment_export(text):
                     expanded_parts.append(text)
                     continue
                 expanded = _literal_variable_expansion(text, segment_cwd, manifest, variables)
@@ -365,7 +403,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         if stages is None:
             return True
         for stage in stages:
-            if _floor_verb(stage, coordinator):
+            if _floor_verb(stage, coordinator) and not _landing_merge_words(shlex.join(stage)):
                 return True
             staged = {**floor_event, 'tool_input': {'command': shlex.join(_unwrap_words(stage))}}
             if _opaque_interpreter(staged, manifest or {}):
@@ -414,7 +452,8 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
                     segment_words = shlex.split(line, posix=True)
                 except ValueError:
                     continue
-                if segment_words and _floor_verb([w if w in {"-C", "-F"} else w.casefold() for w in segment_words], coordinator):
+                if (segment_words and _floor_verb([w if w in {"-C", "-F"} else w.casefold() for w in segment_words], coordinator)
+                        and not _landing_merge_words(line)):
                     return True
     else:
         for line in command.replace(";", "\n").split("\n"):
@@ -422,7 +461,8 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
                 line_words = shlex.split(line, posix=True)
             except ValueError:
                 continue
-            if line_words and _floor_verb([w if w in {"-C", "-F"} else w.casefold() for w in line_words], coordinator):
+            if (line_words and _floor_verb([w if w in {"-C", "-F"} else w.casefold() for w in line_words], coordinator)
+                    and not _landing_merge_words(line)):
                 return True
     if words is None:
         # Unparseable as one shell command: the line scans above already
@@ -468,7 +508,7 @@ def _floor_verb(lowered, coordinator=None):
         return True
     if lowered[:1] == ['approval-queue'] and lowered[1:2] in (['claim'], ['approve']):
         return True
-    if lowered and lowered[0] == 'mailcortex' and lowered[1:2] not in (['inbox'], ['read']) and coordinator not in {'coordinator_mail_send', 'coordinator_remote_mail_send'}:
+    if lowered and lowered[0] == 'mailcortex' and lowered[1:2] not in (['inbox'], ['read']) and not (lowered[-1:] in (['--help'], ['--version'], ['-h']) and len(lowered) <= 3) and coordinator not in {'coordinator_mail_send', 'coordinator_remote_mail_send'}:
         return True
     if lowered[:1] in (['eval'], ['source'], ['.'], ['xargs']):
         return True  # opaque execution cannot erase the floor
@@ -539,10 +579,13 @@ def _floor_verb(lowered, coordinator=None):
             return True
         if sub in {"filter-branch", "filter-repo"}:
             return True
-        # "the canonical branch name" (review): a git subcommand that NAMES the
-        # canonical branch as a word is floor — switching, merging or moving it is
-        # the fleet's protected spine. Reads never carry it as a bare word.
-        if sub and coordinator not in {"coordinator_worktree", "coordinator_integrate"} and any(word == "master" for word in lowered[2:]):
+        # The canonical branch is protected only when a command mutates branch
+        # state. Read observations may name any branch, including master.
+        read_subcommands = {"status", "log", "diff", "show", "merge-base", "ls-files", "remote", "tag"}
+        mutating_branch = sub == "branch" and any(not word.startswith('-') for word in rest)
+        if (sub and sub not in read_subcommands and not (sub == "branch" and not mutating_branch)
+                and coordinator not in {"coordinator_worktree", "coordinator_integrate"}
+                and any(word == "master" for word in lowered[2:])):
             return True
     # Disk and permission tools (2026-10-10 review): irreversible or system-wide.
     disk_verbs = {"dd", "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mkfs.btrfs", "mkfs.xfs", "mkfs.vfat", "mkfs.fat", "mkfs.ntfs", "cryptsetup", "wipefs", "fdisk", "parted", "shred", "truncate", "mount", "umount", "crontab"}
@@ -619,7 +662,7 @@ def _inert_local_command(command, cwd='/'):
         return False
     if not words:
         return False
-    if _fleet_environment_export(command):
+    if _inert_environment_export(command):
         return True
     if re.fullmatch(r'command -v [A-Za-z0-9_.+-]+', command):
         return True
@@ -881,7 +924,7 @@ def _substitution_data_only(command, substitutions):
                 continue
             if words[index - 1] in {'>', '>>', '<', '>&', '<&', '&>', '&>>'}:
                 return False
-            if (verb not in {'echo', 'printf', 'date', 'pgrep', 'ps', 'ss', 'wc'} and not (verb in {'grep', 'rg'} and index == pattern)
+            if (verb not in {'echo', 'printf', 'date', 'pgrep', 'ps', 'ss', 'stat', 'git', 'wc', '[', 'test'} and not (verb in {'grep', 'rg'} and index == pattern)
                     and not (verb == 'readlink' and words[1:2] == ['-f'] and len(words) == 3
                              and len(substitutions) == 1 and re.fullmatch(r'command -v [A-Za-z0-9_.+-]+', substitutions[0][2]))):
                 return False
@@ -1057,7 +1100,7 @@ def _literal_variable_expansion(text, cwd, manifest, variables=None):
         words = shlex.split(text, posix=True)
     except ValueError:
         return None
-    state = dict(variables or {})
+    state = {'HOME': str(Path.home()), **dict(variables or {})}
     index = 0
     while index < len(words) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', words[index]):
         name, value = words[index].split('=', 1)
@@ -1277,8 +1320,44 @@ def _load_manifest(data=None):
     return data
 
 
+def _glob_targets(value, cwd, manifest):
+    """Expand one bounded read glob and prove every result stays in roots."""
+    if not isinstance(value, str) or not PATH_META.search(value):
+        return [value]
+    if '$' in value or '`' in value or '**' in value or _protected(value):
+        return None
+    roots = _read_roots(manifest)
+    if value == '~':
+        return None
+    pattern = str(Path.home()) + value[1:] if value.startswith('~/') else value
+    if not pattern.startswith('/'):
+        pattern = posixpath.join(cwd, pattern)
+    pattern = posixpath.normpath(pattern)
+    first_meta = re.search(r'[*?\[]', pattern)
+    prefix = pattern[:first_meta.start()] if first_meta else pattern
+    parent = prefix.rsplit('/', 1)[0] or '/'
+    if _path(parent, '/', roots, exists=False) is None:
+        return None
+    matches = glob.glob(pattern, recursive=False)
+    if not matches:
+        return None
+    checked = []
+    for match in matches:
+        resolved = _path(match, '/', roots, exists=True)
+        if resolved is None:
+            return None
+        checked.append(resolved)
+    return checked
+
+
 def _targets(values, cwd, manifest, directories=None):
-    paths = tuple(_path(value, cwd, _read_roots(manifest)) for value in values)
+    expanded = []
+    for value in values:
+        matches = _glob_targets(value, cwd, manifest)
+        if matches is None:
+            return None
+        expanded.extend(matches)
+    paths = tuple(_path(value, cwd, _read_roots(manifest)) for value in expanded)
     if not paths or any(path is None for path in paths):
         return None
     if directories is True and any(not os.path.isdir(path) for path in paths):
@@ -1417,16 +1496,37 @@ def _local_match(event, manifest, words=None):
     reviewed_verbs = set(entry.get("bash_verbs") or ()) | FILTERS | SYSTEM_READERS | {
         "cat", "find", "ls", "stat", "mailcortex", "awk", "jq"
     }
-    if not words or words[0].rsplit("/", 1)[-1] not in reviewed_verbs:
+    if not words:
         return False
     verb, args = words[0].rsplit("/", 1)[-1], words[1:]
+    if (len(words) == 2 and args[0] in {'--help', '--version', '-h'}
+            and re.fullmatch(r'[A-Za-z0-9_.+-]+', verb)
+            and verb not in REMOTE | SERVICE | PACKAGE | OPAQUE_COMMANDS | WRITE_COMMANDS):
+        return True
+    if verb not in reviewed_verbs:
+        return False
     if verb in SYSTEM_READERS:
         return _system_read_match(verb, args)
     if verb == "mailcortex":
-        return len(args) >= 1 and args[0] in {"inbox", "read"} and all(
+        return ((len(args) >= 1 and args[0] in {"inbox", "read"}) or
+                (len(args) == 2 and args[1] in {"--help", "--version", "-h"})) and all(
             not any(char in arg for char in "><;&`$\\") for arg in args[1:])
     if verb == "tmux":
-        return bool(args) and (args[0].startswith("list-") or args[0] == "capture-pane")
+        if not args:
+            return False
+        if args[0] == 'ls':
+            return len(args) == 1
+        if args[0] == 'has-session':
+            return all(not any(char in arg for char in "><;&`$\\") for arg in args[1:])
+        if args[0] == 'capture-pane':
+            return all(arg in {'-p', '-e'} or arg == '-t'
+                       or (index > 0 and args[index - 1] == '-t' and not arg.startswith('-'))
+                       for index, arg in enumerate(args[1:], 1))
+        if args[0].startswith('list-'):
+            return all(arg == '-t'
+                       or (index > 0 and args[index - 1] == '-t' and not arg.startswith('-'))
+                       for index, arg in enumerate(args[1:], 1))
+        return False
     if verb in PYTHON_READERS:
         return _python_json_read(event, manifest, words)
     if verb in {"head", "tail"}:
@@ -1467,6 +1567,9 @@ def _local_match(event, manifest, words=None):
         if len(words_only) < 2:
             return False
         operands = words_only[1:]
+        if any(re.fullmatch(r'-[A-Za-z]*[rR][A-Za-z]*', arg) for arg in args if arg.startswith('-')) \
+                and not any(PATH_META.search(operand) for operand in operands):
+            return False
         if verb == "rg":
             old_roots = manifest["roots"]
             manifest["roots"] = read_roots
@@ -1482,9 +1585,26 @@ def _local_match(event, manifest, words=None):
         if any(arg.startswith("-") and arg not in FIND_OPTIONS for arg in expression):
             return False
     elif verb in {"ls", "stat"}:
-        if any(arg.startswith("-") and not LS_FLAGS.match(arg) for arg in args):
+        if any(arg.startswith("-") and not LS_FLAGS.match(arg)
+               and not (verb == 'stat' and (arg in {'-c', '--format'} or arg.startswith(('--format=', '-c='))))
+               for arg in args):
             return False
-        operands = [arg for arg in args if not arg.startswith("-")] or ["."]
+        operands = []
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if verb == 'stat' and arg in {'-c', '--format'}:
+                if index + 1 >= len(args):
+                    return False
+                index += 2
+                continue
+            if verb == 'stat' and (arg.startswith('--format=') or arg.startswith('-c=')):
+                index += 1
+                continue
+            if not arg.startswith('-'):
+                operands.append(arg)
+            index += 1
+        operands = operands or ["."]
         return bool(_non_secret_targets(operands, cwd))
     else:
         operands = [arg for arg in args if not arg.startswith("-")]
@@ -1498,6 +1618,40 @@ def _local_match(event, manifest, words=None):
         manifest["roots"] = old_roots
 
 
+def _loop_items(literal):
+    """Return safe literal or bounded seq loop values."""
+    sequence = re.fullmatch(r'\$\(\s*seq\s+([0-9]+)(?:\s+([0-9]+))?(?:\s+([0-9]+))?\s*\)', literal.strip())
+    if sequence:
+        values = [int(value) for value in sequence.groups() if value is not None]
+        if len(values) == 1:
+            start, stop, step = 1, values[0], 1
+        elif len(values) == 2:
+            start, stop, step = values[0], values[1], 1
+        else:
+            start, stop, step = values
+        if step <= 0 or stop < start or stop - start > 1000:
+            return None
+        return [str(value) for value in range(start, stop + 1, step)]
+    try:
+        items = shlex.split(literal, posix=True)
+    except ValueError:
+        return None
+    if not items or any(not item or PATH_META.search(item) for item in items):
+        return None
+    return items
+
+
+def _read_control_command(words):
+    words = list(words)
+    if words[:1] == ['sleep']:
+        return len(words) == 2 and re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', words[1]) is not None
+    if words[:1] == ['[']:
+        return words[-1:] == [']'] and not any(word in {';', '&&', '||', '|', '>', '>>'} for word in words)
+    if words[:1] == ['test']:
+        return len(words) > 1 and not any(word in {';', '&&', '||', '|', '>', '>>'} for word in words)
+    return words[:1] in (['true'], ['continue'], ['break'])
+
+
 def _for_readonly(event, manifest):
     """Prove a literal-list loop whose every body segment is a read shape."""
     if not isinstance(event, dict):
@@ -1509,14 +1663,8 @@ def _for_readonly(event, manifest):
     if not match:
         return False
     variable, literal, body = match.groups()
-    try:
-        items = shlex.split(literal, posix=True)
-    except ValueError:
-        return False
-    if not items or any(not item or PATH_META.search(item) or '$' in item for item in items):
-        return False
-    roots = _read_roots(manifest)
-    if any(_path(item, cwd, roots) is None for item in items):
+    items = _loop_items(literal)
+    if items is None:
         return False
     used = set()
     for item in items:
@@ -1531,7 +1679,10 @@ def _for_readonly(event, manifest):
                 used.update(reason.partition(':')[2].split('+'))
         else:
             ok, reason = False, 'no_match'
-            if _local_match(stage, manifest) and manifest['entries']['local_read']['enabled']:
+            if _read_control_command(shlex.split(expanded, posix=True)):
+                ok, reason = True, 'local_read'
+                used.add(reason)
+            elif _local_match(stage, manifest) and manifest['entries']['local_read']['enabled']:
                 ok, reason = True, 'local_read'
                 used.add(reason)
             elif _git_match(stage, manifest) and manifest['entries']['git_observe']['enabled']:
@@ -1553,11 +1704,8 @@ def _for_loop_body_floor(event, manifest):
     if not match:
         return False
     variable, literal, body = match.groups()
-    try:
-        items = shlex.split(literal, posix=True)
-    except ValueError:
-        return True
-    if not items or any(not item or PATH_META.search(item) for item in items):
+    items = _loop_items(literal)
+    if items is None:
         return True
     for item in items:
         replacement = shlex.quote(item)
@@ -1912,7 +2060,7 @@ def _compound(event, manifest):
     used = []
     variables = {}
     for separator, original in segments:
-        if _fleet_environment_export(original):
+        if _inert_environment_export(original):
             continue
         expanded = _literal_variable_expansion(original, cwd, manifest, variables)
         if expanded is None:
@@ -1931,6 +2079,12 @@ def _compound(event, manifest):
         if words[0] in {"true", "echo"}:
             # No redirection can survive _split_compound, so these only print or no-op.
             continue
+        if words[0] == 'sleep' and len(words) == 2 and re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', words[1]):
+            continue
+        if words[0] in {'[', 'test'} and words[-1:] == [']' if words[0] == '[' else words[-1]]:
+            if any(word in {';', '&&', '||', '|', '>', '>>'} for word in words):
+                return False, "no_match"
+            continue
         if separator == "|":
             if not _filter_ok(words):
                 return False, "no_match"
@@ -1946,6 +2100,11 @@ def _compound(event, manifest):
             cwd = target
             continue
         stage = {**event, "cwd": cwd, "tool_input": {"command": shlex.join(words)}}
+        coordinator_match = _coordinator_match(stage, manifest)
+        if (coordinator_match is not None
+                and _landing_merge_words(shlex.join(words)) is not None):
+            used.append(coordinator_match)
+            continue
         for matcher, name in ((_local_match, "local_read"), (_git_match, "git_observe")):
             if (matcher(stage, manifest, words) if matcher is _local_match else matcher(stage, manifest)):
                 if manifest["entries"][name]["enabled"] is not True:
@@ -2767,11 +2926,12 @@ SHELL_META_RE = re.compile(r"[`$\\<>;&\n]")
 PYTEST_RE = re.compile(r"^pytest\s+(?:-{1,2}[\w=]+\s+)*([\w./\-]+)$")
 UNITTEST_RE = re.compile(r"^/usr/bin/python3(?:\.\d+)?\s+-m\s+unittest\s+[\w.]+$")
 REMOTE_REALPATH_TIMEOUT_SECONDS = 2.5
-GIT_READERS = {"status", "log", "diff", "show", "branch", "ls-files", "remote", "tag"}
+GIT_READERS = {"status", "log", "diff", "show", "merge-base", "branch", "ls-files", "remote", "tag"}
 GIT_UNSAFE_READ_OPTIONS = {"-C", "--output", "--exec", "--ext-diff", "--textconv", "--paginate", "--exec-path"}
 READERS = {"cat", "head", "tail", "grep", "rg", "find", "ls", "stat", "wc", "pgrep", "ps", "date", "mailcortex", "tmux", "awk", "sed", "jq", "sort", "uniq", "cut", "tr", "ss"}
 FIND_WRITE_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 REMOTE_EXCLUDED_COMPONENTS = {"private", "secrets", ".secrets", "keys", "credentials", ".git", ".ssh", ".env"}
+SSH_IDENTITY_COMMANDS = {"ssh", "scp", "sftp"}
 
 
 def _class_config(manifest, name):
@@ -2838,6 +2998,43 @@ def _protected_token_p3(token):
     names = {".netrc", ".authinfo", ".authinfo.gpg", "authorized_keys", "credentials",
              "credentials.json", "auth.json", "secrets.json", "id_rsa", "id_ed25519"}
     return any(part in names for part in components)
+
+
+def _ssh_identity_transport(words):
+    """Recognize identity material only in an SSH-family transport context."""
+    if not words:
+        return False
+
+    def identity_args(args):
+        for index, word in enumerate(args):
+            lowered = word.casefold()
+            if lowered in {'-i', '--identity-file'} or lowered.startswith('--identity-file='):
+                return True
+            if lowered in {'-o', '--option'} and index + 1 < len(args):
+                if args[index + 1].casefold().startswith('identityfile='):
+                    return True
+            if lowered.startswith(('-oidentityfile=', '--option=identityfile=')):
+                return True
+            if '.ssh/' in lowered or lowered.startswith('~/.ssh'):
+                return True
+        return False
+
+    verb = words[0].rsplit('/', 1)[-1].casefold()
+    if verb in SSH_IDENTITY_COMMANDS:
+        return identity_args(words[1:])
+    if verb != 'rsync':
+        return False
+    args = words[1:]
+    for index, word in enumerate(args):
+        if word == '-e' and index + 1 < len(args):
+            try:
+                transport = shlex.split(args[index + 1], posix=True)
+            except ValueError:
+                return False
+            if (transport and transport[0].rsplit('/', 1)[-1].casefold() in SSH_IDENTITY_COMMANDS
+                    and identity_args(transport[1:])):
+                return True
+    return False
 
 
 def _remote_path_p3(raw, remote_home, base=None):
@@ -3444,11 +3641,70 @@ def _coordinator_push(repo):
     return _coordinator_git(repo, 'merge-base', '--is-ancestor', tip, 'refs/heads/master') == ''
 
 
+def _coordinator_prefix(words):
+    """Strip only the two reviewed environment prefixes used by landing merges."""
+    words = list(words)
+    allowed = {
+        'GIT_EDITOR=true',
+        'DOTCORTEX_GUARD_ALLOW_DIRTY=1',
+    }
+    seen = set()
+    while words and words[0] in allowed:
+        if words[0] in seen:
+            return None
+        seen.add(words.pop(0))
+    return words
+
+
+def _landing_merge_words(command):
+    """Return the narrowly historical no-ff landing merge argv, if present.
+
+    Round-two's generic git-merge floor accidentally caught the old reviewed
+    landing form.  This is deliberately narrower than a coordinator grant:
+    only the known editor/dirty prefixes, an explicit -C repository, --no-ff,
+    one message and one non-canonical branch are accepted.  In particular,
+    --no-commit and arbitrary environment assignments do not pass.
+    """
+    command = re.sub(r"\s+2(?:>&1|\s+['\"]?>&['\"]?\s+1)\s*$", '', command)
+    try:
+        words = _coordinator_prefix(shlex.split(command, posix=True))
+    except ValueError:
+        return None
+    if words is None or words[:1] != ['git']:
+        return None
+    args = words[1:]
+    if args[:1] != ['-C'] or len(args) < 3:
+        return None
+    repo, args = args[1], args[2:]
+    if args[:1] != ['merge']:
+        return None
+    args = args[1:]
+    if '--no-ff' not in args or '--no-commit' in args or '--squash' in args:
+        return None
+    if args.count('--no-ff') != 1 or args.count('-m') != 1:
+        return None
+    message_index = args.index('-m')
+    if message_index + 1 >= len(args) or not args[message_index + 1]:
+        return None
+    branch = [word for index, word in enumerate(args)
+              if index not in {message_index, message_index + 1} and word != '--no-ff']
+    if len(branch) != 1 or not COORDINATOR_BRANCH.fullmatch(branch[0]) or branch[0] == 'master':
+        return None
+    return repo, branch[0]
+
+
+def _coordinator_single_command(command):
+    """Reject shell syntax while preserving quoted argument data."""
+    segments = _split_approval_compound(command)
+    return segments is not None and len(segments) == 1 and not _dynamic_shell(command)
+
+
 def _coordinator_candidate(command):
     try:
         words = shlex.split(command, posix=True)
     except ValueError:
         return False
+    words = _coordinator_prefix(words)
     if not words:
         return False
     if words[0] == 'git':
@@ -3511,11 +3767,18 @@ def _coordinator_match(event, manifest):
     command = tool_input.get('command')
     if not isinstance(command, str) or not command.isascii() or any(ord(c) < 32 or ord(c) == 127 for c in command):
         return None
+    landing = _landing_merge_words(command)
+    shape_command = re.sub(r'\s+2>&1\s*$', '', command)
+    if landing is not None:
+        command = shape_command
     try:
         words = shlex.split(command, posix=True)
     except ValueError:
         return None
     if not words or not any(_inside(os.path.realpath(cwd), os.path.realpath(root)) for root in config['repo_roots'] + config['worktree_roots'] + config['scratch_roots']):
+        return None
+    words = _coordinator_prefix(words)
+    if words is None:
         return None
     flags = config['classes']
     remote_grant = _peer_coordinator_match(command, words, config, manifest)
@@ -3550,7 +3813,7 @@ def _coordinator_match(event, manifest):
                 and _coordinator_remote_proof(config, [dest[1]], host=dest[0],copied_output=dest[1] if config.get('peer_host') else None)):
             return 'coordinator_scratch_scp'
         return None
-    if words[0] != 'git' or SHELL_META.search(command):
+    if words[0] != 'git' or not _coordinator_single_command(command):
         return None
     routing = {'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
                'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_CONFIG', 'GIT_CONFIG_COUNT',
@@ -3571,6 +3834,13 @@ def _coordinator_match(event, manifest):
     owner = repo if repo in canonical else next((root for root in canonical if _coordinator_git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir') == root + '/.git'), None)
     if owner is None:
         return None
+    if landing is not None and flags['integrate']:
+        landing_repo, branch = landing
+        if (landing_repo == repo and repo in canonical
+                and _coordinator_git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD') == 'master'
+                and args[:1] == ['merge'] and '--no-ff' in args
+                and branch == next((word for word in args[1:] if word == branch), None)):
+            return 'coordinator_integrate'
     if args[:2] == ['worktree', 'add'] and flags['worktree']:
         if (len(args) == 6 and args[3] == '-b' and args[5] == 'master'
                 and COORDINATOR_BRANCH.fullmatch(args[4]) and args[4] != 'master'
@@ -4400,12 +4670,6 @@ def _floor_rule_for_record(event, manifest, reason):
     if not isinstance(payload, dict):
         return 'invalid-input'
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).casefold()
-    if _credential_content(payload):
-        return 'credential'
-    if _protected(raw) or 'logs/telegram/personal' in raw:
-        if re.search(r'(?<!\S)(?:-i|--identity-file)(?:=|\s+)[^;&|]*\.ssh(?:/|\s|$)', raw):
-            return 'ssh-identity'
-        return 'protected'
     command = payload.get('command')
     if not isinstance(command, str):
         return 'protected'
@@ -4420,6 +4684,12 @@ def _floor_rule_for_record(event, manifest, reason):
         candidate_words = shlex.split(candidate, posix=True)
     except ValueError:
         candidate_words = []
+    if _credential_content(payload):
+        return 'credential'
+    if _protected(raw) or 'logs/telegram/personal' in raw:
+        if _ssh_identity_transport(candidate_words):
+            return 'ssh-identity'
+        return 'protected'
     if any(_protected(word) for word in candidate_words
            if '/' in word or word.startswith('~') or '.' in word):
         return 'protected'
@@ -4438,8 +4708,7 @@ def _floor_rule_for_record(event, manifest, reason):
     lowered = _unwrap_words(words)
     if 'kill' in lowered or 'pkill' in lowered or 'killall' in lowered:
         return 'kill'
-    if any(word in REMOTE for word in lowered) and any(
-            word in {'-i', '--identity-file'} or word.startswith('--identity-file=') for word in lowered):
+    if _ssh_identity_transport(candidate_words):
         return 'ssh-identity'
     if any(word in SERVICE for word in lowered):
         return 'service'
@@ -4596,6 +4865,8 @@ def main():
         _log_decision.extras.update(decision='deny', away_reason=away_reason, morning_queued=queued, queue_id=item_id, hold_status=hold_status, notification_status=notification)
     if not allow:
         floor_rule = _floor_rule_for_record(event, manifest, reason)
+        if floor_rule is None and _hard_refusal(reason):
+            floor_rule = 'command-shape'
         if floor_rule is not None:
             _log_decision.extras['floor_rule'] = floor_rule
     _log_decision(event, allow, reason)

@@ -68,6 +68,7 @@
         "log",
         "diff",
         "show",
+        "merge-base",
         "branch"
       ]
     },

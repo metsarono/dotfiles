@@ -103,6 +103,7 @@ authorize local Kikin reads or writes.
         "log",
         "diff",
         "show",
+        "merge-base",
         "branch"
       ]
     },
@@ -1150,6 +1151,7 @@ restart, installation, pull or push is performed by this review branch.
         "log",
         "diff",
         "show",
+        "merge-base",
         "branch"
       ]
     },
@@ -1333,6 +1335,10 @@ class DeciderWideningTests(unittest.TestCase):
         self.root.mkdir()
         (self.root / 'README.org').write_text('synthetic\n')
         (self.root / 'notes.txt').write_text('synthetic\n')
+        (self.root / 'CORE' / 'alpha').mkdir(parents=True)
+        (self.root / 'CORE' / 'alpha' / 'probe.txt').write_text('synthetic\n')
+        (self.root / 'FORGE' / 'bin').mkdir(parents=True)
+        (self.root / 'FORGE' / 'bin' / 'agent-session').write_text('synthetic\n')
         self.scratch = self.base / 'scratch'
         self.scratch.mkdir()
         self.outside = self.base / 'outside'
@@ -1405,6 +1411,70 @@ class DeciderWideningTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(command), 'allow')
 
+    def test_round_three_read_command_shapes(self):
+        self.manifest['classes'][0]['enabled'] = True
+        self.manifest['classes'][1]['enabled'] = True
+        allowed = [
+            'cd ' + str(self.root) + ' && grep -rIn -E synthetic CORE/*/ FORGE/bin',
+            'mailcortex provision --help',
+            'some-fleet-tool --version',
+            'tmux ls', 'tmux has-session -t probe',
+            'tmux capture-pane -p -t probe', 'tmux list-panes -t probe',
+            'export XDG_RUNTIME_DIR=/run/user/1000 && cat README.org',
+            'for i in $(seq 1 3); do ps -p "$i"; done',
+        ]
+        for command in allowed:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'allow')
+        denied = [
+            'tmux new-session -d probe',
+            'tmux ls && kill -TERM 123',
+            'export XDG_RUNTIME_DIR=/run/user/1000 && env -u X cat .env',
+            'for i in $(seq 1 3); do kill -TERM "$i"; done',
+            'for i in $(seq 1 3); do cat .env; done',
+            'cd ' + str(self.root) + ' && grep -rIn . .ssh/',
+        ]
+        for command in denied:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'deny')
+        escaped = self.root / 'CORE' / 'escape'
+        escaped.symlink_to(self.outside, target_is_directory=True)
+        self.assertEqual(self.run_hook('grep -rIn synthetic CORE/*/'), 'deny')
+
+    def test_git_readers_name_protected_branch_but_writes_still_floor(self):
+        self.manifest['classes'][1]['enabled'] = True
+        (self.root / '.git').mkdir()
+        allowed = [
+            'git -C ' + str(self.root) + ' status',
+            'git -C ' + str(self.root) + ' log master --oneline',
+            'git -C ' + str(self.root) + ' diff master...topic',
+            'git -C ' + str(self.root) + ' show master:README.org',
+            'git -C ' + str(self.root) + ' merge-base --is-ancestor master topic',
+        ]
+        for command in allowed:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'allow')
+        for command in [
+            'git -C ' + str(self.root) + ' merge master',
+            'git -C ' + str(self.root) + ' branch master',
+            'git -C ' + str(self.root) + ' commit -m x -- README.org',
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'deny')
+
+    def test_round_three_shapes_cannot_hide_the_absolute_floor(self):
+        cases = [
+            'cd ' + str(self.root) + ' && grep -rIn synthetic CORE/*/ && ssh -i ~/.ssh/id_ed25519 YOUR_HOST date',
+            'some-fleet-tool --help && kill -TERM 123',
+            'tmux ls && python3 -c "print(1)"',
+            'export XDG_RUNTIME_DIR=/run/user/1000 && cat README.org && rm README.org',
+            'for i in $(seq 1 3); do cat .env; done',
+            'printf "%s" "$(cat README.org)" && git add README.org',
+        ]
+        for command in cases:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'deny')
+
     def test_read_substitutions_are_proven_and_effect_limited(self):
         self.manifest['classes'][0]['enabled'] = True
         self.manifest['classes'][1]['enabled'] = True
@@ -1413,6 +1483,10 @@ class DeciderWideningTests(unittest.TestCase):
             'printf "%s" "$(ps -o ppid= -p 1)"',
             'grep -n "$(cat README.org)" README.org',
             'printf "%s" "$(git -C ' + str(self.root) + ' rev-parse --show-toplevel)"',
+            'printf "%s" "$(ss -H -ltn)"',
+            'printf "%s" "$(pgrep -f claude)"',
+            'printf "%s" "$(stat -c %s README.org)"',
+            '[ "$(stat -c %s README.org)" = 0 ]',
         ]
         for command in allowed:
             with self.subTest(command=command):
@@ -1475,6 +1549,30 @@ class DeciderWideningTests(unittest.TestCase):
                 self.assertEqual(record['floor_rule'], rule)
                 self.assertNotIn(record['floor_rule'], {'true-floor', None})
                 self.assertNotIn(command, json.dumps(record))
+
+    def test_ssh_identity_floor_is_scoped_to_ssh_family(self):
+        self.manifest['classes'][0]['enabled'] = True
+        for command in [
+            'grep -n -i "honey.badger|honeybadger" FORGE/bin/agent-session',
+            'grep -n -i "identityfile" README.org',
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'allow')
+        for command in [
+            'ssh -i ~/.ssh/id_ed25519 YOUR_HOST date',
+            'ssh -o IdentityFile=~/.ssh/id_ed25519 YOUR_HOST date',
+            'scp -i /tmp/synthetic-key README.org YOUR_HOST:/tmp/report',
+            'sftp -i /tmp/synthetic-key YOUR_HOST',
+            'rsync -e "ssh -i /tmp/synthetic-key" README.org YOUR_HOST:/tmp/report',
+            'cat ~/.ssh/config',
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command), 'deny')
+                record = json.loads(self.ledger.read_text().splitlines()[-1])
+                expected = 'protected' if command.startswith('cat ') else 'ssh-identity'
+                self.assertEqual(record['floor_rule'], expected)
+        self.assertEqual(self.run_hook('rsync -i /tmp/synthetic-key README.org YOUR_HOST:/tmp/report'), 'deny')
+        self.assertNotEqual(json.loads(self.ledger.read_text().splitlines()[-1])['floor_rule'], 'ssh-identity')
 
 
 if __name__ == '__main__':
