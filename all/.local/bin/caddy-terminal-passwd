@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# caddy-terminal-passwd — set the web terminal credential (0600 bcrypt snippet).
+# Only the hash is stored; the plaintext never reaches a command line, a file,
+# or this script's output.
+set -euo pipefail
+
+CADDY_BIN="${CADDY_TERMINAL_CADDY:-$HOME/.local/bin/caddy}"
+AUTH_FILE="${CADDY_TERMINAL_AUTH:-$HOME/.local/state/caddy-terminal/terminal-auth}"
+AUTH_USER="${CADDY_TERMINAL_USER:-metsatron}"
+
+[ -x "$CADDY_BIN" ] || { echo "caddy-terminal-passwd: missing $CADDY_BIN (app.org caddy lane)" >&2; exit 69; }
+
+echo "caddy-terminal-passwd: set the web terminal password for user '$AUTH_USER'" >&2
+# caddy hash-password prompts on the tty and reads stdin; stdout is the hash.
+HASH="$("$CADDY_BIN" hash-password)" || { echo "caddy-terminal-passwd: hashing failed" >&2; exit 1; }
+case "$HASH" in
+  '$2'*) ;;
+  *) echo "caddy-terminal-passwd: unexpected hash output" >&2; exit 1 ;;
+esac
+
+umask 077
+mkdir -p "$(dirname "$AUTH_FILE")"
+TMP="$(mktemp "$(dirname "$AUTH_FILE")/.terminal-auth.XXXXXXXX")"
+{
+  printf '# Managed by caddy-terminal-passwd. Caddy basic_auth snippet for the web terminal gate.\n'
+  printf 'basic_auth {\n\t%s %s\n}\n' "$AUTH_USER" "$HASH"
+} > "$TMP"
+chmod 600 "$TMP"
+mv "$TMP" "$AUTH_FILE"
+echo "caddy-terminal-passwd: bcrypt hash written to $AUTH_FILE (0600)" >&2
+echo "Restart the Caddy gate instance (FileBrowser front) to apply, then reload the page." >&2

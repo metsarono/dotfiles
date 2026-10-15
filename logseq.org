@@ -32,6 +32,31 @@ load_private_env() {
 
 load_private_env
 
+if ! ss -tlnp 2>/dev/null | grep -q ':7681'; then
+  TTYD_FONT_SIZE="${LOGSEQ_TTYD_FONT_SIZE:-16}"
+  TTYD_FONT_FAMILY="${LOGSEQ_TTYD_FONT_FAMILY:-SFMono Nerd Font, monospace}"
+  # logseq-ttyd-index owns the patched index (Shift+Enter + websocket tracking).
+  TTYD_INDEX="$("$HOME/.local/bin/logseq-ttyd-index")" || exit 1
+  # Loopback only (-i lo): the tailnet face is the Caddy basic_auth gate
+  # (services-web-terminal.org), never ttyd itself.
+  setsid /home/metsatron/.local/bin/ttyd -W -i lo -p 7681 -I "$TTYD_INDEX" -t "fontSize=$TTYD_FONT_SIZE" -t "fontFamily=\"$TTYD_FONT_FAMILY\"" zsh </dev/null &>/dev/null &
+  disown
+fi
+exec "$HOME/Applications/Logseq-linux-x86_64-latest.AppImage" --no-sandbox "$@"
+#+END_SRC
+
+** ttyd index builder
+
+~logseq-ttyd-index~ builds and refreshes the patched ttyd index cache and prints
+its path. It is the single owner of the index patch (Shift+Enter handling and
+websocket tracking): both the =logseq-db= launcher and the Caddy web terminal
+(=services-web-terminal.org=) call it. Never fork this logic into a second copy.
+
+#+name: logseq-ttyd-index-script
+#+BEGIN_SRC bash :tangle all/.local/bin/logseq-ttyd-index :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755) :comments no
+# Builds the patched ttyd index (see ttyd Terminal Plugin) and prints its path.
+set -euo pipefail
+
 ensure_logseq_ttyd_index() {
   local ttyd_bin cache_dir index stamp build_stamp build_port log pid
   ttyd_bin="${LOGSEQ_TTYD_BIN:-/home/metsatron/.local/bin/ttyd}"
@@ -149,14 +174,7 @@ PY
   printf '%s\n' "$index"
 }
 
-if ! ss -tlnp 2>/dev/null | grep -q ':7681'; then
-  TTYD_FONT_SIZE="${LOGSEQ_TTYD_FONT_SIZE:-16}"
-  TTYD_FONT_FAMILY="${LOGSEQ_TTYD_FONT_FAMILY:-SFMono Nerd Font, monospace}"
-  TTYD_INDEX="$(ensure_logseq_ttyd_index)"
-  setsid /home/metsatron/.local/bin/ttyd -W -p 7681 -I "$TTYD_INDEX" -t "fontSize=$TTYD_FONT_SIZE" -t "fontFamily=\"$TTYD_FONT_FAMILY\"" zsh </dev/null &>/dev/null &
-  disown
-fi
-exec "$HOME/Applications/Logseq-linux-x86_64-latest.AppImage" --no-sandbox "$@"
+ensure_logseq_ttyd_index
 #+END_SRC
 
 ** Desktop entry

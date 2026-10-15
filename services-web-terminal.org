@@ -1,0 +1,337 @@
+#+TITLE: Web Terminal
+#+DESCRIPTION: ttyd web terminal for the Caddy — supervised loopback ttyd, Caddy basic_auth gate, tailscale publication, credential helper
+#+AUTHOR: Mètsàtron — Sovereign Weaver
+#+LANGUAGE: en
+#+PROPERTY: header-args :mkdirp yes :results silent :comments no
+
+* Decision (Admiral, Telegram 2002/2005/2518)
+
+"Let's get the terminal up and running." The Admiral wants the Logseq web
+terminal published in the Caddy. Chosen security (option A): tailnet-only
+publication plus a password credential that he sets himself.
+
+The terminal is the SAME ttyd instance the Logseq side panel uses (logseq.org):
+one server on loopback 7681, one patched index (Shift+Enter handling and
+websocket tracking, owned by =logseq-ttyd-index= — never forked here). The
+Caddy reuses it; Logseq keeps it.
+
+* Wiring
+
+#+BEGIN_EXAMPLE
+browser --tailnet--> https://<tailnet-host>:7682   (tailscale serve, TLS)
+                        |
+                        v
+                    http://127.0.0.1:7680         (Caddy basic_auth gate)
+                        |   bcrypt hash in a 0600 file (caddy-terminal-passwd)
+                        v
+                    http://127.0.0.1:7681         (ttyd, zsh, patched index)
+#+END_EXAMPLE
+
+- ttyd binds loopback only (=-i lo=). Nothing but loopback and the gate ever
+  reach it; the tailnet IP never serves 7681.
+- The credential NEVER rides a command line. ttyd runs without =-c= (=-c= is
+  visible in =ps=, and agent users exist on Kikin). Authentication is Caddy
+  =basic_auth= whose bcrypt hash lives in a 0600 machine-local file written by
+  =caddy-terminal-passwd=. DotCortex carries no hash: the public repo never
+  stores secrets (same law as the obsidian-web gate in =app.org=).
+- The gate site lives in the machine-local Caddyfile of the unprivileged
+  FileBrowser Caddy instance (=$HOME/.local/state/filebrowser/caddy/.Caddyfile=,
+  =auto_https off=, =admin off=), the same lane the FileBrowser :9090 and
+  OnlyOffice :9092 fronts use. =tailscale serve= publishes the gate as
+  =https://<tailnet-host>:7682= — no new tailnet listener owned by anything but
+  tailscaled.
+- Supervision: the =filebrowser-supervise= shape (a flock-singleton supervisor
+  that respawns the daemon forever), started by the user crontab =@reboot=
+  plus a =*/2= liveness entry. No root anywhere.
+
+Residual risk, accepted with option A: any LOCAL user on Kikin can reach
+127.0.0.1:7681 without a password. That is inherent — the Logseq side panel
+needs an unauthenticated loopback ttyd — and the chosen gate covers the
+tailnet, the only network face. Flagged for Bunta's review regardless.
+
+* Launcher: caddy-terminal-serve
+
+Plain foreground =exec= for the supervisor to own, mirroring =filebrowser-serve=
+(the cron contract owns liveness, the launcher owns config/port). Reuses the
+patched index via =logseq-ttyd-index= (logseq.org) and the same theme options
+the Logseq side panel gets.
+
+#+name: caddy-terminal-serve
+#+BEGIN_SRC bash :tangle all/.local/bin/caddy-terminal-serve :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
+# caddy-terminal-serve — foreground ttyd launcher for the Caddy web terminal.
+# Same ttyd, same patched index as the Logseq side panel (logseq.org).
+# Loopback only: the tailnet face is the Caddy basic_auth gate, never ttyd.
+set -euo pipefail
+
+TTYD_BIN="${CADDY_TERMINAL_TTYD:-$HOME/.local/bin/ttyd}"
+INDEX_TOOL="${CADDY_TERMINAL_INDEX:-$HOME/.local/bin/logseq-ttyd-index}"
+PORT="${CADDY_TERMINAL_PORT:-7681}"
+FONT_SIZE="${CADDY_TERMINAL_FONT_SIZE:-16}"
+FONT_FAMILY="${CADDY_TERMINAL_FONT_FAMILY:-SFMono Nerd Font, monospace}"
+
+[ -x "$TTYD_BIN" ] || { echo "caddy-terminal-serve: missing $TTYD_BIN" >&2; exit 69; }
+[ -x "$INDEX_TOOL" ] || { echo "caddy-terminal-serve: missing $INDEX_TOOL (tangle logseq.org and stow)" >&2; exit 69; }
+
+TTYD_INDEX="$("$INDEX_TOOL")" || { echo "caddy-terminal-serve: index build failed" >&2; exit 1; }
+
+exec "$TTYD_BIN" -W -i lo -p "$PORT" -I "$TTYD_INDEX" \
+  -t "fontSize=$FONT_SIZE" -t "fontFamily=\"$FONT_FAMILY\"" zsh
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/all/.local/bin/caddy-terminal-serve
+#+END_SRC
+
+* Supervisor: caddy-terminal-supervise
+
+The =filebrowser-supervise= shape: flock singleton, host guard, respawn forever.
+One addition the filebrowser lane does not need: the Logseq launcher
+(=logseq-db=) may legitimately have started ttyd first. The supervisor adopts
+any existing listener on the port and only spawns the launcher when the port is
+free — one owner at a time, whoever got there first, and the supervisor always
+outlives a crash.
+
+#+name: caddy-terminal-supervise
+#+BEGIN_SRC bash :tangle linux/.local/bin/caddy-terminal-supervise :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
+set -euo pipefail
+
+TAG="caddy-terminal-supervise"
+EXPECTED_HOST=""
+DELAY=15
+RETRY_SECONDS=5
+ADOPT_SECONDS=30
+LAUNCHER="${CADDY_TERMINAL_SUPERVISE_LAUNCHER:-$HOME/.local/bin/caddy-terminal-serve}"
+PORT="${CADDY_TERMINAL_PORT:-7681}"
+HOSTNAME_BIN="${CADDY_TERMINAL_SUPERVISE_HOSTNAME_BIN:-hostname}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --expected-host) [ "$#" -ge 2 ] || { echo "$TAG: --expected-host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --delay) [ "$#" -ge 2 ] || { echo "$TAG: --delay requires a value" >&2; exit 2; }; DELAY="$2"; shift ;;
+    --retry-seconds) [ "$#" -ge 2 ] || { echo "$TAG: --retry-seconds requires a value" >&2; exit 2; }; RETRY_SECONDS="$2"; shift ;;
+    --adopt-seconds) [ "$#" -ge 2 ] || { echo "$TAG: --adopt-seconds requires a value" >&2; exit 2; }; ADOPT_SECONDS="$2"; shift ;;
+    -h|--help|help) echo "Usage: $TAG --expected-host HOST [--delay N] [--retry-seconds N] [--adopt-seconds N]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -n "$EXPECTED_HOST" ] || { echo "$TAG: --expected-host is required" >&2; exit 2; }
+CURRENT_HOST="$($HOSTNAME_BIN -s)"
+[ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: wrong host ($CURRENT_HOST != $EXPECTED_HOST), nothing to do" >&2; exit 1; }
+[ -x "$LAUNCHER" ] || { echo "$TAG: launcher is not executable: $LAUNCHER" >&2; exit 69; }
+
+LOG_DIR="$HOME/.local/state/caddy-terminal"
+mkdir -p "$LOG_DIR"
+exec 9>"$LOG_DIR/supervisor.lock"
+if ! flock -n 9; then
+  # Boot watchdog and liveness poll may meet; only one supervisor owns the service.
+  exit 0
+fi
+
+log() { printf '%s %s %s\n' "$(date -Is)" "$TAG" "$*" >> "$LOG_DIR/supervisor.log"; }
+
+# No pipe: under pipefail, grep -q exiting early can SIGPIPE ss and read as
+# "not listening" (same trap as caddy-serve).
+listening() { [ -n "$(ss -H -tln "( sport = :$PORT )" 2>/dev/null)" ]; }
+
+log "supervisor starting (host=$CURRENT_HOST, launcher=$LAUNCHER, port=$PORT)"
+
+# Boot path: give the machine a moment, then own the terminal forever,
+# respawning on death — filebrowser-supervise shape.
+sleep "$DELAY"
+adopted=0
+while :; do
+  if listening; then
+    if [ "$adopted" -eq 0 ]; then
+      log "port $PORT already listening; adopting existing ttyd"
+      adopted=1
+    fi
+    sleep "$ADOPT_SECONDS"
+    continue
+  fi
+  adopted=0
+  # 9>&- — never leak the lock fd to the daemon: an orphaned ttyd holding
+  # fd 9 would hold the flock and silently bar a fresh supervisor from
+  # adopting it (observed live, 2026-10-15).
+  "$LAUNCHER" 9>&- >> "$LOG_DIR/service.log" 2>&1 || true
+  log "service exited, respawning in ${RETRY_SECONDS}s"
+  sleep "$RETRY_SECONDS"
+done
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/linux/.local/bin/caddy-terminal-supervise
+#+END_SRC
+
+* Cron contract: caddy-terminal-cron-apply
+
+User crontab only — no root, unlike the /etc/cron.d filebrowser contract.
+Idempotent: replaces only its own managed block, leaves every other entry
+alone. =--remove= strips the block (and clears an otherwise empty crontab).
+
+#+name: caddy-terminal-cron-apply
+#+BEGIN_SRC bash :tangle linux/.local/bin/caddy-terminal-cron-apply :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
+set -euo pipefail
+
+TAG="caddy-terminal-cron-apply"
+EXPECTED_HOST=""
+DRY=0
+REMOVE=0
+HOSTNAME_BIN="${CADDY_TERMINAL_CRON_HOSTNAME_BIN:-hostname}"
+CRON_BIN="${CADDY_TERMINAL_CRON_BIN:-crontab}"
+BEGIN="# BEGIN dotcortex-caddy-terminal (managed by $TAG)"
+END="# END dotcortex-caddy-terminal (managed by $TAG)"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "$TAG: --host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --dry-run) DRY=1 ;;
+    --remove) REMOVE=1 ;;
+    -h|--help|help) echo "Usage: $TAG --host EXACT_HOST [--dry-run] [--remove]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ "$REMOVE" = 0 ]; then
+  [ -n "$EXPECTED_HOST" ] || { echo "$TAG: --host EXACT_HOST is required" >&2; exit 2; }
+  CURRENT_HOST="$($HOSTNAME_BIN -s)"
+  [ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: refusing installation on $CURRENT_HOST; expected $EXPECTED_HOST" >&2; exit 1; }
+fi
+
+SUPERVISOR="$HOME/.local/bin/caddy-terminal-supervise"
+[ "$DRY" = 1 ] || [ "$REMOVE" = 1 ] || [ -x "$SUPERVISOR" ] || { echo "$TAG: missing $SUPERVISOR; tangle and stow first" >&2; exit 1; }
+
+CRON_PATH="$HOME/.guix-extra-profiles/core/core/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+existing="$("$CRON_BIN" -l 2>/dev/null || true)"
+# Drop any previous managed block (literal line match, never a regex).
+stripped="$(printf '%s\n' "$existing" | awk -v begin="$BEGIN" -v end="$END" '
+  $0 == begin { skip = 1; next }
+  $0 == end { skip = 0; next }
+  !skip { print }
+')"
+
+if [ "$REMOVE" = 1 ]; then
+  if [ -z "$(printf '%s' "$stripped" | tr -d '[:space:]')" ]; then
+    if [ "$DRY" = 1 ]; then echo "remove crontab (empty)"; else "$CRON_BIN" -r; echo "$TAG: crontab removed (was only ours)"; fi
+  else
+    if [ "$DRY" = 1 ]; then printf '%s\n' "$stripped"; else printf '%s\n' "$stripped" | "$CRON_BIN" -; echo "$TAG: removed managed block"; fi
+  fi
+  exit 0
+fi
+
+desired="$(printf '%s\n' "$stripped" | cat -s)"
+[ -n "$desired" ] && desired="$desired
+"
+desired="${desired}${BEGIN}
+@reboot HOME=$HOME PATH=$CRON_PATH $SUPERVISOR --expected-host $EXPECTED_HOST --delay 15 --retry-seconds 5
+*/2 * * * * HOME=$HOME PATH=$CRON_PATH $SUPERVISOR --expected-host $EXPECTED_HOST
+${END}"
+
+if [ "$DRY" = 1 ]; then
+  printf '%s\n' "$desired"
+else
+  printf '%s\n' "$desired" | "$CRON_BIN" -
+  echo "$TAG: installed user crontab block ($SUPERVISOR)"
+fi
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/linux/.local/bin/caddy-terminal-cron-apply
+#+END_SRC
+
+* Credential helper: caddy-terminal-passwd
+
+The Admiral sets the credential himself; he never edits config by hand.
+Prompts twice on the tty (blind), hashes with =caddy hash-password= (bcrypt)
+via stdin — the plaintext never appears on any command line or in any file —
+and writes the 0600 auth snippet the gate site imports. Re-running it simply
+replaces the hash; the Caddy gate instance must be restarted to re-import
+(=admin off= means no reload API; the coordinator owns that restart).
+
+#+name: caddy-terminal-passwd
+#+BEGIN_SRC bash :tangle all/.local/bin/caddy-terminal-passwd :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
+# caddy-terminal-passwd — set the web terminal credential (0600 bcrypt snippet).
+# Only the hash is stored; the plaintext never reaches a command line, a file,
+# or this script's output.
+set -euo pipefail
+
+CADDY_BIN="${CADDY_TERMINAL_CADDY:-$HOME/.local/bin/caddy}"
+AUTH_FILE="${CADDY_TERMINAL_AUTH:-$HOME/.local/state/caddy-terminal/terminal-auth}"
+AUTH_USER="${CADDY_TERMINAL_USER:-metsatron}"
+
+[ -x "$CADDY_BIN" ] || { echo "caddy-terminal-passwd: missing $CADDY_BIN (app.org caddy lane)" >&2; exit 69; }
+
+echo "caddy-terminal-passwd: set the web terminal password for user '$AUTH_USER'" >&2
+# caddy hash-password prompts on the tty and reads stdin; stdout is the hash.
+HASH="$("$CADDY_BIN" hash-password)" || { echo "caddy-terminal-passwd: hashing failed" >&2; exit 1; }
+case "$HASH" in
+  '$2'*) ;;
+  *) echo "caddy-terminal-passwd: unexpected hash output" >&2; exit 1 ;;
+esac
+
+umask 077
+mkdir -p "$(dirname "$AUTH_FILE")"
+TMP="$(mktemp "$(dirname "$AUTH_FILE")/.terminal-auth.XXXXXXXX")"
+{
+  printf '# Managed by caddy-terminal-passwd. Caddy basic_auth snippet for the web terminal gate.\n'
+  printf 'basic_auth {\n\t%s %s\n}\n' "$AUTH_USER" "$HASH"
+} > "$TMP"
+chmod 600 "$TMP"
+mv "$TMP" "$AUTH_FILE"
+echo "caddy-terminal-passwd: bcrypt hash written to $AUTH_FILE (0600)" >&2
+echo "Restart the Caddy gate instance (FileBrowser front) to apply, then reload the page." >&2
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/all/.local/bin/caddy-terminal-passwd
+#+END_SRC
+
+* Gate site (machine-local Caddyfile, not in DotCortex)
+
+Decided ports: gate 7680 (loopback), ttyd 7681 (loopback), tailnet 7682
+(tailscale serve). The site block is appended to the unprivileged FileBrowser
+Caddy instance's machine-local =$HOME/.local/state/filebrowser/caddy/.Caddyfile=
+(back it up first; =auto_https off= and =admin off= stay), and the instance is
+restarted. The hash file is imported, never inlined.
+
+Two details verified live (2026-10-15) and load-bearing:
+
+- =bind 127.0.0.1= is REQUIRED. Without it a host-IP site address binds the
+  port on every interface — the gate briefly listened on the LAN and tailnet
+  during testing. Caddy's =bind= directive pins the listener to loopback.
+- No Host matcher (=http://:7680=). =tailscale serve= forwards its own Host
+  header; a =127.0.0.1= host matcher would miss those requests. The listener
+  is loopback-only, so wildcard Host is safe — only tailscaled can reach it.
+
+#+BEGIN_EXAMPLE
+http://:7680 {
+	bind 127.0.0.1
+	import /home/metsatron/.local/state/caddy-terminal/terminal-auth
+	reverse_proxy 127.0.0.1:7681
+}
+#+END_EXAMPLE
+
+=reverse_proxy= carries the websocket upgrade natively (ttyd's =/token= and
+=/ws= need nothing extra). Publishing over the tailnet is the tailscale
+operator's step, not DotCortex's:
+
+#+BEGIN_EXAMPLE
+tailscale serve --bg --https=7682 http://127.0.0.1:7680
+#+END_EXAMPLE
+
+The Caddy dock entry lives in HelmCortex (=FORGE/centre-dock/apps.json=), not
+here: the dock registry owns app routing, icons and window shape.
+
+* Verification
+
+Live checks (Kikin, run by the builder; recorded in the handoff report):
+
+1. No credential: =curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7680/=
+   returns 401.
+2. With credential: the ttyd index loads (200) and a websocket echo round-trips
+   through the gate (=/token=, then =/ws= with the tty= subprotocol).
+3. =curl http://<tailnet-ip>:7681= is refused — ttyd is loopback-only.
+4. Killing the ttyd PID: the supervisor respawns it within its retry window.

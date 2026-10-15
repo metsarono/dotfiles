@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TAG="caddy-terminal-cron-apply"
+EXPECTED_HOST=""
+DRY=0
+REMOVE=0
+HOSTNAME_BIN="${CADDY_TERMINAL_CRON_HOSTNAME_BIN:-hostname}"
+CRON_BIN="${CADDY_TERMINAL_CRON_BIN:-crontab}"
+BEGIN="# BEGIN dotcortex-caddy-terminal (managed by $TAG)"
+END="# END dotcortex-caddy-terminal (managed by $TAG)"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "$TAG: --host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --dry-run) DRY=1 ;;
+    --remove) REMOVE=1 ;;
+    -h|--help|help) echo "Usage: $TAG --host EXACT_HOST [--dry-run] [--remove]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ "$REMOVE" = 0 ]; then
+  [ -n "$EXPECTED_HOST" ] || { echo "$TAG: --host EXACT_HOST is required" >&2; exit 2; }
+  CURRENT_HOST="$($HOSTNAME_BIN -s)"
+  [ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: refusing installation on $CURRENT_HOST; expected $EXPECTED_HOST" >&2; exit 1; }
+fi
+
+SUPERVISOR="$HOME/.local/bin/caddy-terminal-supervise"
+[ "$DRY" = 1 ] || [ "$REMOVE" = 1 ] || [ -x "$SUPERVISOR" ] || { echo "$TAG: missing $SUPERVISOR; tangle and stow first" >&2; exit 1; }
+
+CRON_PATH="$HOME/.guix-extra-profiles/core/core/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+existing="$("$CRON_BIN" -l 2>/dev/null || true)"
+# Drop any previous managed block (literal line match, never a regex).
+stripped="$(printf '%s\n' "$existing" | awk -v begin="$BEGIN" -v end="$END" '
+  $0 == begin { skip = 1; next }
+  $0 == end { skip = 0; next }
+  !skip { print }
+')"
+
+if [ "$REMOVE" = 1 ]; then
+  if [ -z "$(printf '%s' "$stripped" | tr -d '[:space:]')" ]; then
+    if [ "$DRY" = 1 ]; then echo "remove crontab (empty)"; else "$CRON_BIN" -r; echo "$TAG: crontab removed (was only ours)"; fi
+  else
+    if [ "$DRY" = 1 ]; then printf '%s\n' "$stripped"; else printf '%s\n' "$stripped" | "$CRON_BIN" -; echo "$TAG: removed managed block"; fi
+  fi
+  exit 0
+fi
+
+desired="$(printf '%s\n' "$stripped" | cat -s)"
+[ -n "$desired" ] && desired="$desired
+"
+desired="${desired}${BEGIN}
+@reboot HOME=$HOME PATH=$CRON_PATH $SUPERVISOR --expected-host $EXPECTED_HOST --delay 15 --retry-seconds 5
+*/2 * * * * HOME=$HOME PATH=$CRON_PATH $SUPERVISOR --expected-host $EXPECTED_HOST
+${END}"
+
+if [ "$DRY" = 1 ]; then
+  printf '%s\n' "$desired"
+else
+  printf '%s\n' "$desired" | "$CRON_BIN" -
+  echo "$TAG: installed user crontab block ($SUPERVISOR)"
+fi

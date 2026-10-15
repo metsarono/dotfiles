@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# caddy-terminal-serve — foreground ttyd launcher for the Caddy web terminal.
+# Same ttyd, same patched index as the Logseq side panel (logseq.org).
+# Loopback only: the tailnet face is the Caddy basic_auth gate, never ttyd.
+set -euo pipefail
+
+TTYD_BIN="${CADDY_TERMINAL_TTYD:-$HOME/.local/bin/ttyd}"
+INDEX_TOOL="${CADDY_TERMINAL_INDEX:-$HOME/.local/bin/logseq-ttyd-index}"
+PORT="${CADDY_TERMINAL_PORT:-7681}"
+FONT_SIZE="${CADDY_TERMINAL_FONT_SIZE:-16}"
+FONT_FAMILY="${CADDY_TERMINAL_FONT_FAMILY:-SFMono Nerd Font, monospace}"
+
+[ -x "$TTYD_BIN" ] || { echo "caddy-terminal-serve: missing $TTYD_BIN" >&2; exit 69; }
+[ -x "$INDEX_TOOL" ] || { echo "caddy-terminal-serve: missing $INDEX_TOOL (tangle logseq.org and stow)" >&2; exit 69; }
+
+TTYD_INDEX="$("$INDEX_TOOL")" || { echo "caddy-terminal-serve: index build failed" >&2; exit 1; }
+
+exec "$TTYD_BIN" -W -i lo -p "$PORT" -I "$TTYD_INDEX" \
+  -t "fontSize=$FONT_SIZE" -t "fontFamily=\"$FONT_FAMILY\"" zsh

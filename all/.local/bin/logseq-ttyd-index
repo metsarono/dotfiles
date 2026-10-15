@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Builds the patched ttyd index (see ttyd Terminal Plugin) and prints its path.
+set -euo pipefail
+
+ensure_logseq_ttyd_index() {
+  local ttyd_bin cache_dir index stamp build_stamp build_port log pid
+  ttyd_bin="${LOGSEQ_TTYD_BIN:-/home/metsatron/.local/bin/ttyd}"
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/logseq-ttyd"
+  index="$cache_dir/index.html"
+  stamp="$cache_dir/ttyd.stamp"
+  build_port="${LOGSEQ_TTYD_INDEX_PORT:-17681}"
+  log="$cache_dir/index-build.log"
+
+  mkdir -p "$cache_dir"
+  build_stamp="$(stat -c '%Y:%s' "$ttyd_bin" 2>/dev/null || printf unknown)"
+  if [ -s "$index" ] && [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$build_stamp" ]; then
+    printf '%s\n' "$index"
+    return 0
+  fi
+
+  "$ttyd_bin" -p "$build_port" zsh >"$log" 2>&1 &
+  pid="$!"
+  for _ in $(seq 1 40); do
+    if curl -fsS "http://127.0.0.1:$build_port/" -o "$index.raw" 2>>"$log"; then
+      break
+    fi
+    sleep 0.1
+  done
+  kill "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+
+  if [ ! -s "$index.raw" ]; then
+    printf 'logseq-db: failed to build ttyd index; see %s\n' "$log" >&2
+    return 1
+  fi
+
+  python3 - "$index.raw" "$index.tmp" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+html = source.read_text(encoding="utf-8")
+patch = r'''<script>
+(() => {
+  const NativeWebSocket = window.WebSocket;
+  const sockets = new Set();
+  const state = {
+    shiftEnterCount: 0,
+    lastShiftEnterAt: 0,
+    lastOpenSocketCount: 0,
+  };
+
+  function track(socket) {
+    sockets.add(socket);
+    socket.addEventListener("close", () => sockets.delete(socket));
+    socket.addEventListener("error", () => sockets.delete(socket));
+    return socket;
+  }
+
+  const nativeSend = NativeWebSocket.prototype.send;
+  NativeWebSocket.prototype.send = function(data) {
+    sockets.add(this);
+    return nativeSend.call(this, data);
+  };
+
+  window.WebSocket = new Proxy(NativeWebSocket, {
+    construct(target, args) {
+      return track(new target(...args));
+    },
+    apply(target, thisArg, args) {
+      return track(target.apply(thisArg, args));
+    },
+  });
+
+  function openSockets() {
+    return Array.from(sockets).filter((socket) => socket.readyState === NativeWebSocket.OPEN);
+  }
+
+  function sendShiftEnter() {
+    const open = openSockets();
+    state.lastOpenSocketCount = open.length;
+    if (!open.length) return false;
+    state.shiftEnterCount += 1;
+    state.lastShiftEnterAt = Date.now();
+    for (const socket of open) socket.send("0\n");
+    return true;
+  }
+
+  function isShiftEnter(event) {
+    return event.shiftKey
+      && !event.ctrlKey
+      && !event.altKey
+      && !event.metaKey
+      && (event.key === "Enter" || event.code === "Enter" || event.code === "NumpadEnter");
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (!isShiftEnter(event)) return;
+    if (!sendShiftEnter()) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+
+  window.__logseqTtydShiftEnter = { sendShiftEnter, state, openSockets };
+})();
+</script>'''
+
+needle = "</head><body><script"
+if needle not in html:
+    raise SystemExit("ttyd index shape changed: missing script insertion point")
+html = html.replace(needle, patch + needle, 1)
+target.write_text(html, encoding="utf-8")
+PY
+
+  mv "$index.tmp" "$index"
+  printf '%s\n' "$build_stamp" >"$stamp"
+  rm -f "$index.raw"
+  printf '%s\n' "$index"
+}
+
+ensure_logseq_ttyd_index

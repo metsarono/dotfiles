@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TAG="caddy-terminal-supervise"
+EXPECTED_HOST=""
+DELAY=15
+RETRY_SECONDS=5
+ADOPT_SECONDS=30
+LAUNCHER="${CADDY_TERMINAL_SUPERVISE_LAUNCHER:-$HOME/.local/bin/caddy-terminal-serve}"
+PORT="${CADDY_TERMINAL_PORT:-7681}"
+HOSTNAME_BIN="${CADDY_TERMINAL_SUPERVISE_HOSTNAME_BIN:-hostname}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --expected-host) [ "$#" -ge 2 ] || { echo "$TAG: --expected-host requires a value" >&2; exit 2; }; EXPECTED_HOST="$2"; shift ;;
+    --delay) [ "$#" -ge 2 ] || { echo "$TAG: --delay requires a value" >&2; exit 2; }; DELAY="$2"; shift ;;
+    --retry-seconds) [ "$#" -ge 2 ] || { echo "$TAG: --retry-seconds requires a value" >&2; exit 2; }; RETRY_SECONDS="$2"; shift ;;
+    --adopt-seconds) [ "$#" -ge 2 ] || { echo "$TAG: --adopt-seconds requires a value" >&2; exit 2; }; ADOPT_SECONDS="$2"; shift ;;
+    -h|--help|help) echo "Usage: $TAG --expected-host HOST [--delay N] [--retry-seconds N] [--adopt-seconds N]"; exit 0 ;;
+    *) echo "$TAG: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -n "$EXPECTED_HOST" ] || { echo "$TAG: --expected-host is required" >&2; exit 2; }
+CURRENT_HOST="$($HOSTNAME_BIN -s)"
+[ "$CURRENT_HOST" = "$EXPECTED_HOST" ] || { echo "$TAG: wrong host ($CURRENT_HOST != $EXPECTED_HOST), nothing to do" >&2; exit 1; }
+[ -x "$LAUNCHER" ] || { echo "$TAG: launcher is not executable: $LAUNCHER" >&2; exit 69; }
+
+LOG_DIR="$HOME/.local/state/caddy-terminal"
+mkdir -p "$LOG_DIR"
+exec 9>"$LOG_DIR/supervisor.lock"
+if ! flock -n 9; then
+  # Boot watchdog and liveness poll may meet; only one supervisor owns the service.
+  exit 0
+fi
+
+log() { printf '%s %s %s\n' "$(date -Is)" "$TAG" "$*" >> "$LOG_DIR/supervisor.log"; }
+
+# No pipe: under pipefail, grep -q exiting early can SIGPIPE ss and read as
+# "not listening" (same trap as caddy-serve).
+listening() { [ -n "$(ss -H -tln "( sport = :$PORT )" 2>/dev/null)" ]; }
+
+log "supervisor starting (host=$CURRENT_HOST, launcher=$LAUNCHER, port=$PORT)"
+
+# Boot path: give the machine a moment, then own the terminal forever,
+# respawning on death — filebrowser-supervise shape.
+sleep "$DELAY"
+adopted=0
+while :; do
+  if listening; then
+    if [ "$adopted" -eq 0 ]; then
+      log "port $PORT already listening; adopting existing ttyd"
+      adopted=1
+    fi
+    sleep "$ADOPT_SECONDS"
+    continue
+  fi
+  adopted=0
+  # 9>&- — never leak the lock fd to the daemon: an orphaned ttyd holding
+  # fd 9 would hold the flock and silently bar a fresh supervisor from
+  # adopting it (observed live, 2026-10-15).
+  "$LAUNCHER" 9>&- >> "$LOG_DIR/service.log" 2>&1 || true
+  log "service exited, respawning in ${RETRY_SECONDS}s"
+  sleep "$RETRY_SECONDS"
+done
