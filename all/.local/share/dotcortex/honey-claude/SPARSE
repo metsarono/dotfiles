@@ -29,3 +29,4 @@
 /all/.local/bin/claude-hook-permission-request-kikin
 /all/.local/lib/dotcortex/claude_approval_kikin.py
 /all/.local/lib/dotcortex/claude_approval_runtime.py
+/all/.local/lib/dotcortex/approval_hold_pty.py
