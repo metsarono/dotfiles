@@ -166,7 +166,9 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
         self.assertEqual(self.in_process(command, tool_input=payload['tool_input'])[0]['behavior'], 'deny')
 
     def test_compound_cd_must_control_the_following_command(self):
-        self.assertEqual(self.run_hook(f'cd {self.scratch} && echo hi > relative.txt')['behavior'], 'deny')
+        # A proven scratch redirect is inert; the && still proves the cwd for
+        # the following segment. Other separators leave cd fallible.
+        self.assertEqual(self.run_hook(f'cd {self.scratch} && echo hi > relative.txt')['behavior'], 'allow')
         # A fallible cd followed by ; or a newline cannot prove a later relative target.
         for separator in ('; ', '\n', ' || '):
             command = f'cd {self.scratch}' + separator + 'echo hi > relative.txt'
@@ -247,8 +249,8 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
             return (False, 'risky', 1, 'risky') if event['tool_input']['command'] == 'make risky' else (True, 'no_risk_veto', 1, 'allow')
         result, record, _ = self.in_process('printf "%s" "$(make risky)"', verdict=decide)
         self.assertEqual(result['behavior'], 'deny')
-        self.assertIn('substitution_1', record['reason'])
-        self.assertIn('decider_risky', record['reason'])
+        self.assertEqual(record['reason'], 'true_floor')
+        self.assertEqual(record.get('floor_rule'), 'substitution')
 
     def test_substitution_unquoted_heredoc_expansion_cannot_bypass_floor(self):
         command = f'cat > {self.prompt} <<EOF\n$(rm -rf README.org)\nEOF'

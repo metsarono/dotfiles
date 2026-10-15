@@ -1533,6 +1533,20 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.git('checkout', 'topic')
         self.ask(command)
 
+    def test_historical_landing_merges_keep_the_live_allow(self):
+        commands = [
+            f'GIT_EDITOR=true DOTCORTEX_GUARD_ALLOW_DIRTY=1 git -C {self.repo} merge --no-ff -m "synthetic landing" topic',
+            f'GIT_EDITOR=true git -C {self.repo} merge --no-ff -m "merge: the Admiral\'s Desk (admirals-desk-20261011, Codex Sol; landed on master)" admirals-desk-20261011',
+            f'GIT_EDITOR=true git -C {self.repo} merge --no-ff -m "merge: Codex Telegram quota-aware repairs (quota-repairs-20261012, Codex Sol; landed on master)" quota-repairs-20261012',
+            f'GIT_EDITOR=true git -C {self.repo} merge --no-ff -m "synthetic landing" topic 2>&1 | head -12',
+            f'GIT_EDITOR=true DOTCORTEX_GUARD_ALLOW_DIRTY=1 git -C {self.repo} merge --no-ff -m "synthetic landing" topic 2>&1 | head -12',
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                result = e.classify(self.event(command), self.loaded())
+                self.assertTrue(result[0], result)
+        self.ask(f'git -C {self.repo} merge --no-ff --no-commit -m "synthetic landing" topic')
+
     def test_ff_push_uses_current_remote_tip_and_non_ff_asks(self):
         remote = self.base / 'origin.git'
         subprocess.run(['git', 'init', '--bare', str(remote)], capture_output=True, check=True)
