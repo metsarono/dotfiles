@@ -725,6 +725,11 @@ def _floor_verb(lowered, coordinator=None):
         return True
     if lowered[:1] == ['approval-queue'] and lowered[1:2] in (['claim'], ['approve']):
         return True
+    # A seat's own handling receipt is judgeable, not floor (Admiral 7086).
+    if (lowered[:2] == ['mailcortex', 'receipt'] and len(lowered) == 5
+            and lowered[4] in {'handling_completed', 'handling_deferred', 'handling_failed', 'handling_rejected'}
+            and not any(ch in word for word in lowered for ch in '`$\\')):
+        return False
     if lowered and lowered[0] == 'mailcortex' and lowered[1:2] not in (['inbox'], ['read']) and not (lowered[-1:] in (['--help'], ['--version'], ['-h']) and len(lowered) <= 3) and coordinator not in {'coordinator_mail_send', 'coordinator_remote_mail_send'}:
         return True
     if lowered[:1] in (['eval'], ['source'], ['.'], ['xargs']):
