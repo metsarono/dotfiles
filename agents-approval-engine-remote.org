@@ -533,6 +533,14 @@ def _outbound_tool_match(event, manifest):
 # Coordinator authority is a separate opt-in policy surface. A failed proof is
 # deterministic ASK; the Decider cannot repair a near-match or disabled class.
 COORDINATOR_CLASSES = ('mail_send', 'worktree', 'integrate', 'commit', 'codex_dispatch', 'scratch_scp')
+# Option A (Admiral 2204, built 2026-10-16): optional, so manifests written
+# before it still validate and keep the class off.
+OPTIONAL_COORDINATOR_CLASSES = ('ops_tool',)
+# The vetted Kikin tool's fixed verb set (bunta-ops; agents-bunta-ops.org).
+# Every argument must be shell-inert: the remote shell re-parses the argv.
+OPS_TOOL = 'bunta-ops'
+OPS_VERBS = frozenset({'mail-inbox', 'mail-read', 'mail-send', 'status', 'logs', 'git', 'x230-fetch', 'x230-push'})
+OPS_ARG = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_./:@=+,-]*$')
 COORDINATOR_ATOM = re.compile(r'^[A-Za-z0-9_./-]+$')
 COORDINATOR_BRANCH = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 DISPATCH_RE = re.compile(
@@ -549,8 +557,11 @@ def _coordinator_config(manifest):
                        'build_host', 'remote_scratch_roots', 'remote_scratch_prefixes'}:
         return None
     flags = config.get('classes')
-    if not isinstance(flags, dict) or set(flags) != set(COORDINATOR_CLASSES) or any(type(v) is not bool for v in flags.values()):
+    if (not isinstance(flags, dict) or not set(COORDINATOR_CLASSES) <= set(flags) <= set(COORDINATOR_CLASSES) | set(OPTIONAL_COORDINATOR_CLASSES)
+            or any(type(v) is not bool for v in flags.values())):
         return None
+    if 'ops_tool' not in flags:
+        config = {**config, 'classes': {**flags, 'ops_tool': False}}
     for key in ('repo_roots', 'worktree_roots', 'scratch_roots', 'remote_scratch_roots'):
         roots = config.get(key)
         if not isinstance(roots, list) or not roots or any(
@@ -833,6 +844,15 @@ def _peer_coordinator_match(command, words, config, manifest):
         remote = shlex.split(remote_text)
     except ValueError:
         return None
+    if remote[:1] == [OPS_TOOL]:
+        # Option A: exactly one vetted tool, a fixed verb, shell-inert args.
+        # The tool itself validates each verb's paths and refuses the rest.
+        if (config['classes'].get('ops_tool') is True and len(remote) >= 2 and remote[1] in OPS_VERBS
+                and not SHELL_META.search(remote_text) and not _dynamic_shell(remote_text)
+                and all(OPS_ARG.fullmatch(word) for word in remote[2:])
+                and ' '.join(remote) == remote_text.strip()):
+            return 'coordinator_ops_tool'
+        return None
     if remote[:2] == ['mailcortex','send'] and config['classes']['mail_send']:
         if (SHELL_META.search(remote_text) or _dynamic_shell(remote_text) or len(remote) != 10
                 or remote[2::2] != ['--from','--to','--subject','--body-file']
@@ -907,6 +927,15 @@ def _coordinator_match(event, manifest):
             if all(_coordinator_remote_path(path, config) for path in (prompt, log)) and _coordinator_remote_proof(config, [prompt, log], regular_input=prompt):
                 return 'coordinator_codex_dispatch'
         return None
+    fetch = [word for word in words[1:] if word != '-q'] if words[:1] == ['scp'] and words.count('-q') <= 1 else None
+    if fetch is not None and flags.get('ops_tool') is True and len(fetch) == 2 and not SHELL_META.search(command):
+        # Option A fetch: one named file from the peer's scratch into local
+        # scratch, never a glob, a directory target or a symlink.
+        source = fetch[0].split(':', 1)
+        if (len(source) == 2 and source[0] == config.get('peer_host') and _coordinator_remote_path(source[1], config)
+                and _coordinator_path(fetch[1], config['scratch_roots'], exists=False)
+                and not os.path.islink(fetch[1]) and not os.path.isdir(fetch[1])):
+            return 'coordinator_peer_fetch'
     if words[:1] == ['scp'] and flags['scratch_scp'] and len(words) == 3 and not SHELL_META.search(command):
         dest = words[2].split(':', 1)
         if (len(dest) == 2 and dest[0] == config.get('peer_host', config['build_host'])

@@ -506,7 +506,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
     if manifest is not None and _for_loop_body_floor(floor_event, manifest):
         return True
     split = _split_approval_compound(command)
-    if coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}:
+    if coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send', 'coordinator_ops_tool', 'coordinator_peer_fetch'}:
         if split is None:
             if _unsafe_redirect(command):
                 return True
@@ -536,7 +536,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
     # a hard floor; only the reviewed coordinator shape may use this carveout.
     if landing_candidate:
         return False
-    if (not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}
+    if (not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send', 'coordinator_ops_tool', 'coordinator_peer_fetch'}
             and _split_approval_compound(tool_input['command']) is None):
         substitutions = _shell_substitutions(command)
         if (not substitutions or not _substitution_data_only(command, substitutions)
@@ -555,7 +555,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         return False
     if manifest is not None and _for_readonly(floor_event, manifest):
         return False
-    if not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}:
+    if not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send', 'coordinator_ops_tool', 'coordinator_peer_fetch'}:
         residual = command
         if split is not None:
             # A proven split gets one shell-effect decision per segment. The
@@ -679,7 +679,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         # checked every parseable line; anything left unparsed is floor.
         return True
     lowered = [word if word in {"-C", "-F"} else word.casefold() for word in words]
-    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send", "coordinator_ops_tool", "coordinator_peer_fetch"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         # 2026-10-10 shared-engine carve-out: the ssh_readonly class (p3 port)
         # may allow a parser-PROVEN readonly ssh command to the reviewed host.
         # The proof runs here, inside the floor, so no other REMOTE shape and
@@ -750,7 +750,7 @@ def _floor_verb(lowered, coordinator=None):
     if verb == "awk" and len(lowered) > 1 and any(token in " ".join(lowered[1:]) for token in ("system(", "getline", ">", "|")):
         return True
     # Remote and service control also floor per segment ('cd X && ssh y'):
-    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send", "coordinator_ops_tool", "coordinator_peer_fetch"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         return True
     if any(word in SERVICE or word in {"pkill", "killall"} for word in lowered):
         return True
@@ -1761,6 +1761,13 @@ def _plain_observation_compound(event, manifest):
     payload = event.get('tool_input') if isinstance(event, dict) else None
     command, cwd = (payload.get('command'), event.get('cwd')) if isinstance(payload, dict) else (None, None)
     if event.get('tool_name') != 'Bash' or not isinstance(command, str) or not isinstance(cwd, str):
+        return False
+    # 2026-10-16 (Fable, r5 regression): this early read path must never reach
+    # an unreviewed home (the Honey user's home is the clinical boundary).
+    # Pre-r5 the floor caught these; keep them off the shortcut entirely.
+    roots = _policy_roots(manifest)
+    if (_unreviewed_home_path(command, roots) or _unreviewed_home_path(cwd, roots)
+            or ('~' in command and _unreviewed_home_path(command.replace('~', str(Path.home())), roots))):
         return False
     segments = _split_compound(command)
     if segments is None:
@@ -3865,6 +3872,14 @@ def _outbound_tool_match(event, manifest):
 # Coordinator authority is a separate opt-in policy surface. A failed proof is
 # deterministic ASK; the Decider cannot repair a near-match or disabled class.
 COORDINATOR_CLASSES = ('mail_send', 'worktree', 'integrate', 'commit', 'codex_dispatch', 'scratch_scp')
+# Option A (Admiral 2204, built 2026-10-16): optional, so manifests written
+# before it still validate and keep the class off.
+OPTIONAL_COORDINATOR_CLASSES = ('ops_tool',)
+# The vetted Kikin tool's fixed verb set (bunta-ops; agents-bunta-ops.org).
+# Every argument must be shell-inert: the remote shell re-parses the argv.
+OPS_TOOL = 'bunta-ops'
+OPS_VERBS = frozenset({'mail-inbox', 'mail-read', 'mail-send', 'status', 'logs', 'git', 'x230-fetch', 'x230-push'})
+OPS_ARG = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_./:@=+,-]*$')
 COORDINATOR_ATOM = re.compile(r'^[A-Za-z0-9_./-]+$')
 COORDINATOR_BRANCH = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 DISPATCH_RE = re.compile(
@@ -3881,8 +3896,11 @@ def _coordinator_config(manifest):
                        'build_host', 'remote_scratch_roots', 'remote_scratch_prefixes'}:
         return None
     flags = config.get('classes')
-    if not isinstance(flags, dict) or set(flags) != set(COORDINATOR_CLASSES) or any(type(v) is not bool for v in flags.values()):
+    if (not isinstance(flags, dict) or not set(COORDINATOR_CLASSES) <= set(flags) <= set(COORDINATOR_CLASSES) | set(OPTIONAL_COORDINATOR_CLASSES)
+            or any(type(v) is not bool for v in flags.values())):
         return None
+    if 'ops_tool' not in flags:
+        config = {**config, 'classes': {**flags, 'ops_tool': False}}
     for key in ('repo_roots', 'worktree_roots', 'scratch_roots', 'remote_scratch_roots'):
         roots = config.get(key)
         if not isinstance(roots, list) or not roots or any(
@@ -4165,6 +4183,15 @@ def _peer_coordinator_match(command, words, config, manifest):
         remote = shlex.split(remote_text)
     except ValueError:
         return None
+    if remote[:1] == [OPS_TOOL]:
+        # Option A: exactly one vetted tool, a fixed verb, shell-inert args.
+        # The tool itself validates each verb's paths and refuses the rest.
+        if (config['classes'].get('ops_tool') is True and len(remote) >= 2 and remote[1] in OPS_VERBS
+                and not SHELL_META.search(remote_text) and not _dynamic_shell(remote_text)
+                and all(OPS_ARG.fullmatch(word) for word in remote[2:])
+                and ' '.join(remote) == remote_text.strip()):
+            return 'coordinator_ops_tool'
+        return None
     if remote[:2] == ['mailcortex','send'] and config['classes']['mail_send']:
         if (SHELL_META.search(remote_text) or _dynamic_shell(remote_text) or len(remote) != 10
                 or remote[2::2] != ['--from','--to','--subject','--body-file']
@@ -4239,6 +4266,15 @@ def _coordinator_match(event, manifest):
             if all(_coordinator_remote_path(path, config) for path in (prompt, log)) and _coordinator_remote_proof(config, [prompt, log], regular_input=prompt):
                 return 'coordinator_codex_dispatch'
         return None
+    fetch = [word for word in words[1:] if word != '-q'] if words[:1] == ['scp'] and words.count('-q') <= 1 else None
+    if fetch is not None and flags.get('ops_tool') is True and len(fetch) == 2 and not SHELL_META.search(command):
+        # Option A fetch: one named file from the peer's scratch into local
+        # scratch, never a glob, a directory target or a symlink.
+        source = fetch[0].split(':', 1)
+        if (len(source) == 2 and source[0] == config.get('peer_host') and _coordinator_remote_path(source[1], config)
+                and _coordinator_path(fetch[1], config['scratch_roots'], exists=False)
+                and not os.path.islink(fetch[1]) and not os.path.isdir(fetch[1])):
+            return 'coordinator_peer_fetch'
     if words[:1] == ['scp'] and flags['scratch_scp'] and len(words) == 3 and not SHELL_META.search(command):
         dest = words[2].split(':', 1)
         if (len(dest) == 2 and dest[0] == config.get('peer_host', config['build_host'])

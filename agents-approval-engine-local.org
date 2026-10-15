@@ -513,7 +513,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
     if manifest is not None and _for_loop_body_floor(floor_event, manifest):
         return True
     split = _split_approval_compound(command)
-    if coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}:
+    if coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send', 'coordinator_ops_tool', 'coordinator_peer_fetch'}:
         if split is None:
             if _unsafe_redirect(command):
                 return True
@@ -543,7 +543,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
     # a hard floor; only the reviewed coordinator shape may use this carveout.
     if landing_candidate:
         return False
-    if (not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}
+    if (not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send', 'coordinator_ops_tool', 'coordinator_peer_fetch'}
             and _split_approval_compound(tool_input['command']) is None):
         substitutions = _shell_substitutions(command)
         if (not substitutions or not _substitution_data_only(command, substitutions)
@@ -562,7 +562,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         return False
     if manifest is not None and _for_readonly(floor_event, manifest):
         return False
-    if not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send'}:
+    if not readonly_proven and coordinator not in {'coordinator_codex_dispatch', 'coordinator_scratch_scp', 'coordinator_remote_mail_send', 'coordinator_ops_tool', 'coordinator_peer_fetch'}:
         residual = command
         if split is not None:
             # A proven split gets one shell-effect decision per segment. The
@@ -686,7 +686,7 @@ def _true_floor(event, manifest=None, coordinator=None, readonly_proven=None):
         # checked every parseable line; anything left unparsed is floor.
         return True
     lowered = [word if word in {"-C", "-F"} else word.casefold() for word in words]
-    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send", "coordinator_ops_tool", "coordinator_peer_fetch"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         # 2026-10-10 shared-engine carve-out: the ssh_readonly class (p3 port)
         # may allow a parser-PROVEN readonly ssh command to the reviewed host.
         # The proof runs here, inside the floor, so no other REMOTE shape and
@@ -757,7 +757,7 @@ def _floor_verb(lowered, coordinator=None):
     if verb == "awk" and len(lowered) > 1 and any(token in " ".join(lowered[1:]) for token in ("system(", "getline", ">", "|")):
         return True
     # Remote and service control also floor per segment ('cd X && ssh y'):
-    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
+    if coordinator not in {"coordinator_codex_dispatch", "coordinator_scratch_scp", "coordinator_remote_mail_send", "coordinator_ops_tool", "coordinator_peer_fetch"} and any(word in REMOTE or word.startswith(("http://", "https://")) for word in lowered):
         return True
     if any(word in SERVICE or word in {"pkill", "killall"} for word in lowered):
         return True
@@ -1768,6 +1768,13 @@ def _plain_observation_compound(event, manifest):
     payload = event.get('tool_input') if isinstance(event, dict) else None
     command, cwd = (payload.get('command'), event.get('cwd')) if isinstance(payload, dict) else (None, None)
     if event.get('tool_name') != 'Bash' or not isinstance(command, str) or not isinstance(cwd, str):
+        return False
+    # 2026-10-16 (Fable, r5 regression): this early read path must never reach
+    # an unreviewed home (the Honey user's home is the clinical boundary).
+    # Pre-r5 the floor caught these; keep them off the shortcut entirely.
+    roots = _policy_roots(manifest)
+    if (_unreviewed_home_path(command, roots) or _unreviewed_home_path(cwd, roots)
+            or ('~' in command and _unreviewed_home_path(command.replace('~', str(Path.home())), roots))):
         return False
     segments = _split_compound(command)
     if segments is None:
