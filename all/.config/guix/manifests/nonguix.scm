@@ -3,7 +3,7 @@
 ;; Start empty so it never breaks builds; add packages you want from Nonguix.
 (specifications->manifest
  '(
-   "hugo"                     ; static site generator — ExoCortex (tiagopires.com) build toolchain
+   "hugo@0.158.0"              ; static site generator — ExoCortex + HelmCortex wiki; pinned
    ;; Examples (uncomment IF you want them and the nonguix channel is enabled):
    ;; "signal-desktop"
    ;; "google-chrome"         ; proprietary; Nonguix

@@ -78,7 +78,7 @@ guix-dev: guix-core
 
 guix-nonguix: guix-dirs
 | mkdir -p $(EXTRA)/nonguix
-| $(GUIX) package -m $(GUIX_HOME)/manifests/nonguix.scm -p $(EXTRA)/nonguix/nonguix
+| $(GUIX) package $(GUIX_PACKAGE_FLAGS) -m $(GUIX_HOME)/manifests/nonguix.scm -p $(EXTRA)/nonguix/nonguix
 
 # CPU-tuned local inference (llama.cpp + whisper.cpp). NOT part of guix-apply: transformed
 # packages have no substitutes, so this compiles ggml, llama.cpp and whisper.cpp from source

@@ -670,6 +670,32 @@ fi
 #+END_SRC
 
 * Release-backed .deb sync
+** Pinned HelmCortex wiki Hugo fallback
+The wiki requires Hugo 0.158.0.  The Guix nonguix manifest pins that same
+version; when its store/substitute restore is unavailable, this dedicated
+release manifest lets the existing release sync apply only Hugo.  It verifies
+the upstream release asset SHA-256 before package installation.  It is not
+part of the general release set and does not trigger unrelated upgrades.
+
+#+BEGIN_SRC text :tangle debian/.nala/manifest/helmcortex-wiki.ssv :padline no :comments none
+# repo package asset_name_or_glob arch scope extra
+direct://https://github.com/gohugoio/hugo/releases/download/v0.158.0/hugo_0.158.0_linux-amd64.deb hugo hugo_0.158.0_linux-amd64.deb amd64 shared 0.158.0,568fd95865802ad67b6af59793b78a538f0816b0cbe8d397e6a55311d3cda09c
+#+END_SRC
+
+Apply with =NALA_RELEASES_SSV=$PWD/debian/.nala/manifest/helmcortex-wiki.ssv
+make -f all/.mk/nala.mk nala-release-sync= from this checkout.
+
+The first Hugo install exposed Nala's configured autoremove during an additive
+release install.  The helper now disables it explicitly.  This exact recovery
+manifest restores the unrelated library removed in that transaction; it is
+kept separately from Hugo's install manifest and is not applied by default.
+
+#+BEGIN_SRC text :tangle debian/.nala/manifest/wiki-recovery-20261014.ssv :padline no :comments none
+# repo package asset_name_or_glob arch scope extra
+direct://https://archive.ubuntu.com/ubuntu/pool/main/a/avahi/libavahi-compat-libdnssd1_0.8-13ubuntu6.2_amd64.deb libavahi-compat-libdnssd1 libavahi-compat-libdnssd1_0.8-13ubuntu6.2_amd64.deb amd64 ubuntu-only 0.8-13ubuntu6.2,7542a31f1d271187819c03f772583a0fcd6cd990a7f829159958c0266cb5ed3e
+#+END_SRC
+
+** Shared release sync implementation
 #+BEGIN_SRC bash :tangle debian/.local/bin/nala-release-sync :shebang "#!/usr/bin/env bash"
 set -euo pipefail
 
@@ -788,6 +814,12 @@ write_cache_meta() {
 install_local_deb() {
   local apt_bin="$1" bundle="$2"
   local pkg_name pkg_version installed_status installed_version
+  local install_options=(-y)
+  if [ "$apt_bin" = nala ]; then
+    install_options+=(--no-autoremove)
+  else
+    install_options+=(--no-remove -o APT::Get::AutomaticRemove=false)
+  fi
   if ! pkg_name="$(dpkg-deb --field "$bundle" Package 2>/dev/null)" || [ -z "$pkg_name" ]; then
     echo "  ! cannot extract package name from $(basename "$bundle")" >&2
     return 1
@@ -803,7 +835,7 @@ install_local_deb() {
     [ "$installed_status" = "install ok installed" ] && [ "$installed_version" = "$pkg_version" ]
   }
   echo "  -> installing $(basename "$bundle") with $apt_bin"
-  if ! sudo DEBIAN_FRONTEND=noninteractive "$apt_bin" install -y "$bundle"; then
+  if ! sudo DEBIAN_FRONTEND=noninteractive "$apt_bin" install "${install_options[@]}" "$bundle"; then
     echo "  -> $apt_bin install failed; retrying with dpkg + apt-get -f" >&2
   fi
   # Nala sometimes returns 0 but silently skips — verify the package is installed
@@ -814,7 +846,7 @@ install_local_deb() {
   if ! sudo DEBIAN_FRONTEND=noninteractive dpkg -i "$bundle"; then
     echo "  -> dpkg dependency setup incomplete; running apt-get -f" >&2
   fi
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -f -y --no-remove -o APT::Get::AutomaticRemove=false
   if package_is_exactly_installed; then
     return 0
   fi
@@ -1112,6 +1144,16 @@ NALA_INSTALL_PROBE=1 NALA_TEST_APT_BIN="$stubbin/fake-apt" NALA_TEST_BUNDLE="$tm
 grep -q apt-called "$tmp/install.log"
 grep -q dpkg-called "$tmp/install.log"
 grep -q apt-get-f-called "$tmp/install.log"
+
+# Nala must never apply its configured autoremove during a release install.
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > "$NALA_TEST_ARGV_LOG"' 'exit 1' > "$stubbin/nala"
+chmod +x "$stubbin/nala"
+NALA_INSTALL_PROBE=1 NALA_TEST_APT_BIN=nala NALA_TEST_BUNDLE="$tmp/fake.deb" \
+  NALA_TEST_LOG="$tmp/nala-install.log" NALA_TEST_ARGV_LOG="$tmp/nala-argv.log" \
+  NALA_TEST_STATE="$tmp/nala-install.state" NALA_TEST_REPAIR=1 \
+  NALA_RELEASES_SSV="$ROOT/debian/.nala/manifest/releases.ssv" \
+  HOME="$tmp/home" PATH="$stubbin:$PATH" "$HELPER" >/dev/null
+grep -qx -- '--no-autoremove' "$tmp/nala-argv.log"
 
 printf 'half-installed\t1\n' > "$tmp/install.state"
 if NALA_INSTALL_PROBE=1 NALA_TEST_APT_BIN="$stubbin/fake-apt" NALA_TEST_BUNDLE="$tmp/fake.deb" \

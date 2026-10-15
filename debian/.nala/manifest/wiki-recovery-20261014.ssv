@@ -1,0 +1,2 @@
+# repo package asset_name_or_glob arch scope extra
+direct://https://archive.ubuntu.com/ubuntu/pool/main/a/avahi/libavahi-compat-libdnssd1_0.8-13ubuntu6.2_amd64.deb libavahi-compat-libdnssd1 libavahi-compat-libdnssd1_0.8-13ubuntu6.2_amd64.deb amd64 ubuntu-only 0.8-13ubuntu6.2,7542a31f1d271187819c03f772583a0fcd6cd990a7f829159958c0266cb5ed3e
