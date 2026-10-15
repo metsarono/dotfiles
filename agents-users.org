@@ -20,7 +20,7 @@ provisioned agent users; kikin-kushi carries none yet.
 *** Naming scheme
 - Personal-mesh agent users: =agent-<tool>= — =agent-codex=, =agent-claude=,
   =agent-gemini=, =agent-antigravity=, =agent-opencode=, =agent-hermes=, =agent-pi=,
-  =agent-deepseek=.
+  =agent-deepseek=, =agent-vibe=.
 - Client-environment service users: =agent-client-<slug>= — created only on that
   client's machines, never on the personal mesh.
 - One tool, one user. No shared =agent= account: a shared account destroys the audit
@@ -42,6 +42,7 @@ with the =fuse= group on X230 — corrected same day).
 | =agent-hermes= | 2010 |
 | =agent-pi= | 2011 |
 | =agent-deepseek= | 2012 |
+| =agent-vibe= | 2013 |
 
 Each agent's primary group is its own (same number as uid); =cortex= is
 supplementary. The human operator is also a =cortex= member.
@@ -62,6 +63,7 @@ opencode       2005   yes
 hermes         2010   no
 pi             2011   yes
 deepseek       2012   yes
+vibe           2013   yes
 #+END_SRC
 
 *** Clearance groups — who may read what (FLEET LAW)
@@ -78,8 +80,12 @@ clients have chosen to trust with it. Which paths carry the group is private
 data kept beside the private repo (HelmCortex =ROOTS/JSON/agent-boundaries/=),
 applied by =agent-restrict=.
 
+=agent-vibe= is cleared only for the shared =cortex= worktree group. It is not
+cleared for any named vendor group such as =palm=.
+
 #+BEGIN_SRC text :tangle all/.config/agent-cli/groups.ssv :mkdirp yes :comments no :noweb no
 # group        gid    cleared tools (comma list)
+cortex         2000   codex,claude,gemini,opencode,pi,deepseek,vibe
 palm           2020   claude,hermes
 #+END_SRC
 
@@ -91,8 +97,9 @@ SSH aliases; =local= marks the row matched by =hostname=.
 Excluded on purpose: =s24= (Termux, no multi-user Unix). Add a host here only
 when it joins the personal mesh. =honey= (Gillean's Beelink, 2026-09-25) is her
 box, so it carries only the agents it runs: =agent-codex=, =agent-opencode=,
-and =agent-claude= (2026-09-26, the tanuki bots, =agents-bots-honey.org=; with
-=palm=). Its =warm= entries are the two compat services, still as =gille=.
+and =agent-claude= (2026-09-26, the tanuki bots, =agents-bots-honey.org=), plus
+=agent-vibe= as created by the Admiral on every Unix fleet host; with =palm=.
+Its =warm= entries are the two compat services, still as =gille=.
 
 Optional columns after =seal-reach= (missing reads as the default):
 =agents=, the =provision yes= tools the host carries (comma list, default
@@ -107,7 +114,7 @@ kikin          kikin-kushi       DotCortex,mnt,.guix-extra-profiles             
 x230           ThinkPad-X230     -                                                                                all                    -
 t480s          ThinkPad-T480s    -                                                                                all                    -
 t480           ThinkPad-T480     -                                                                                all                    -
-honey          beelink           DotCortex                                                                        claude,codex,opencode  claude-warm,codex-warm
+honey          beelink           DotCortex                                                                        claude,codex,opencode,vibe  claude-warm,codex-warm
 #+END_SRC
 
 The third column feeds =agent-home-seal= on that host. =mnt= on kikin holds the
@@ -800,6 +807,31 @@ profiles, NEXUS-stowed trees (=.hermes=, =.pi=, app configs), git credentials.
 If an agent user appears to need one of these, that is a design smell — route the
 need through its category's pattern instead.
 
+*** Mistral Vibe dispatch and login
+
+Builders dispatch Vibe as the isolated agent user, with a worktree supplied by
+the caller:
+
+#+BEGIN_EXAMPLE
+sudo -n -u agent-vibe /home/agent-vibe/.local/bin/vibe -p … --workdir <worktree>
+#+END_EXAMPLE
+
+The operator may add this narrow sudoers rule himself (for example in the
+machine-local =/etc/sudoers.d/agent-vibe= file):
+
+#+BEGIN_EXAMPLE
+metsatron ALL=(agent-vibe) NOPASSWD: /home/agent-vibe/.local/bin/vibe
+#+END_EXAMPLE
+
+Mistral authentication is an operator-only interactive step, run as the agent
+user so its credential stays in that user's private home:
+
+#+BEGIN_EXAMPLE
+sudo -u agent-vibe -i vibe
+#+END_EXAMPLE
+
+Agents and builders never handle, copy, or receive the Mistral login key.
+
 *** Guix as a fresh agent user (2026-09-26)
 The first =guix package -m= run as a brand-new agent user crashed while
 downloading substitutes (segfault, then =%null-pointer: unbound variable= in
@@ -835,7 +867,7 @@ into the private topography document, not here.
 # Read-only. Reports per-agent Unix user state on this host as a markdown table.
 set -euo pipefail
 
-AGENTS_INTERACTIVE="codex claude gemini antigravity opencode"
+AGENTS_INTERACTIVE="codex claude gemini antigravity opencode vibe"
 AGENTS_PERSISTENT="hermes pi"
 HOSTN="$(hostname)"
 
@@ -1018,7 +1050,7 @@ exit 0
 # DRY-RUN unless --apply.
 set -euo pipefail
 
-AGENTS="codex claude gemini antigravity opencode hermes pi"
+AGENTS="codex claude gemini antigravity opencode hermes pi vibe"
 EXPORT_DIR="${AGENT_PUBKEY_EXPORT:-$HOME/.local/state/agent-pubkeys}"
 HOSTN="$(hostname)"
 APPLY=0
@@ -1077,7 +1109,7 @@ exit 0
 # DRY-RUN unless --apply.
 set -euo pipefail
 
-AGENTS="codex claude gemini antigravity opencode hermes pi"
+AGENTS="codex claude gemini antigravity opencode hermes pi vibe"
 APPLY=0
 ONLY=""
 
@@ -1135,6 +1167,17 @@ Version couplings the pins used to hold, which a float can break:
 
 Non-npm agents are out of this lane: =antigravity= is a host Electron app (not per-user), =hermes= is a Python venv (Stage 7 / its own substrate), and =ductor= wraps codex/claude/gemini and installs nothing of its own. Ductor itself is a Python bot framework, not an agent CLI, and keeps =package-pip.org='s pin.
 
+Mistral Vibe is the Python agent CLI for =agent-vibe=. The =mistralai= row is
+dependency-only: Vibe's Python manager installs it inside the CLI environment,
+so the installer records it for audit but does not try to expose the SDK as a
+second standalone tool.
+
+#+BEGIN_SRC text :tangle all/.config/agent-cli/vibe.ssv :mkdirp yes :comments no :noweb no
+# MANAGER PACKAGE [VERSION] [ROLE]
+pip mistral-vibe
+pip mistralai "" dependency
+#+END_SRC
+
 #+BEGIN_SRC text :tangle all/.config/agent-cli/codex.ssv :mkdirp yes :comments no :noweb no
 # MANAGER PACKAGE [VERSION]
 npm @openai/codex
@@ -1179,8 +1222,9 @@ npm @deepseek-ai/dsh
 #+BEGIN_SRC bash :tangle all/.local/bin/agent-cli-install :shebang "#!/usr/bin/env bash"
 # ~/DotCortex/all/.local/bin/agent-cli-install
 # Installs each agent's CLI (latest; no pins, ruling 2026-10-05) from all/.config/agent-cli/<tool>.ssv into the
-# agent user's own npm prefix (needs the agent Guix profile / node first).
-# DRY-RUN unless --apply. npm only for now; extend MANAGER cases as needed.
+# agent user's own tool lane. npm uses ~/.npm-global; Python uses uv tool,
+# pipx, or python3 -m pip --user from the agent's login profile.
+# DRY-RUN unless --apply. Extend MANAGER cases as needed.
 set -euo pipefail
 
 MANIFEST_DIR="${AGENT_CLI_MANIFESTS:-$HOME/DotCortex/all/.config/agent-cli}"
@@ -1217,6 +1261,12 @@ for manifest in "$MANIFEST_DIR"/*.ssv; do
   while read -r manager pkg version _rest; do
     case "$manager" in ""|\#*) continue ;; esac
     [ -z "$pkg" ] && continue
+    version="${version//\"/}"
+    role="${_rest:-cli}"
+    if [ "$role" = dependency ]; then
+      echo "$user: dependency $pkg is pulled into the $tool CLI environment (skip standalone tool install)"
+      continue
+    fi
     case "$manager" in
       npm)
         spec="$pkg"
@@ -1232,6 +1282,30 @@ for manifest in "$MANIFEST_DIR"/*.ssv; do
         run sudo -u "$user" -H sh -c 'grep -q "npm-global/bin" ~/.profile 2>/dev/null || printf "export NPM_CONFIG_PREFIX=\"\$HOME/.npm-global\"\nexport PATH=\"\$HOME/.npm-global/bin:\$PATH\"\n" >> ~/.profile'
         run sudo -u "$user" -H sh -lc "cd /tmp && command -v npm >/dev/null || { echo '$user: no npm on the agent profile (run agent-guix-apply)' >&2; exit 1; }; mkdir -p \"\$HOME/.npm-global\"; npm uninstall -g '$pkg' 2>/dev/null; npm install -g '$spec'"
         ;;
+      pip)
+        spec="$pkg"
+        [ -n "${version:-}" ] && spec="$pkg==$version"
+        # uv tool and pipx each provide an isolated CLI environment. The
+        # final branch is the deliberate fleet fallback: system Python plus
+        # its user-site pip, never the operator's Python or home. All three
+        # branches uninstall first so --apply replaces an older install.
+        run sudo -u "$user" -H sh -lc "cd /tmp && if command -v uv >/dev/null 2>&1; then
+          echo '$user: python manager uv'
+          uv tool uninstall '$pkg' 2>/dev/null || true
+          uv tool install '$spec'
+        elif command -v pipx >/dev/null 2>&1; then
+          echo '$user: python manager pipx'
+          pipx uninstall '$pkg' 2>/dev/null || true
+          pipx install '$spec'
+        elif command -v python3 >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+          echo '$user: python manager pip'
+          python3 -m pip uninstall -y '$pkg' 2>/dev/null || true
+          python3 -m pip install --user '$spec'
+        else
+          echo '$user: no supported Python manager in the agent profile (need uv, pipx, or python3 with pip; run agent-tool-bootstrap first)' >&2
+          exit 1
+        fi"
+        ;;
       *)
         echo "$user: unknown manager '$manager' for $pkg (skip)"
         ;;
@@ -1241,6 +1315,102 @@ done
 
 [ "$APPLY" -eq 0 ] && echo "(dry-run complete — re-run with --apply after approval)"
 exit 0
+#+END_SRC
+
+#+BEGIN_SRC python :tangle linux/.local/share/dotcortex/tests/test-agent-cli-install.py :shebang "#!/usr/bin/env python3" :comments no :noweb no
+from __future__ import annotations
+
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+INSTALL = ROOT / "all/.local/bin/agent-cli-install"
+
+
+class AgentCliInstallTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.bin = base / "bin"
+        self.bin.mkdir()
+        self.manifests = base / "agent-cli"
+        self.manifests.mkdir()
+        (self.manifests / "vibe.ssv").write_text(
+            "# MANAGER PACKAGE [VERSION] [ROLE]\n"
+            "pip mistral-vibe\n"
+            "pip mistralai \"\" dependency\n"
+        )
+        (self.bin / "id").write_text("#!/bin/sh\nexit 0\n")
+        (self.bin / "sudo").write_text(
+            "#!/bin/sh\n"
+            "while [ \"$#\" -gt 0 ]; do last=\"$1\"; shift; done\n"
+            "/bin/sh -c \"$last\"\n"
+        )
+        for p in (self.bin / "id", self.bin / "sudo"):
+            p.chmod(0o755)
+        self.env = dict(
+            os.environ,
+            AGENT_CLI_MANIFESTS=str(self.manifests),
+            AGENT_CLI_HOST="testhost",
+            PATH=f"{self.bin}:/usr/bin:/bin",
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def run_cli(self, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(INSTALL), "--only", "vibe", *args],
+            env=env or self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+
+    def test_vibe_dry_run_shows_all_python_choices_and_dependency(self) -> None:
+        out = self.run_cli()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("uv tool uninstall 'mistral-vibe'", out.stdout)
+        self.assertIn("pipx uninstall 'mistral-vibe'", out.stdout)
+        self.assertIn("python3 -m pip uninstall -y 'mistral-vibe'", out.stdout)
+        self.assertIn("dependency mistralai", out.stdout)
+        self.assertNotIn("+ sudo", out.stdout, "dry-run must not execute")
+
+    def apply_with(self, manager: str) -> list[str]:
+        log = Path(self.tmp.name) / f"{manager}.log"
+        for name in ("uv", "pipx", "python3"):
+            (self.bin / name).unlink(missing_ok=True)
+        manager_path = self.bin / manager
+        manager_path.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> \"$AGENT_TEST_LOG\"\n"
+        )
+        manager_path.chmod(0o755)
+        env = dict(self.env, AGENT_TEST_LOG=str(log))
+        out = self.run_cli("--apply", env=env)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        return log.read_text().splitlines()
+
+    def test_uninstall_precedes_install_for_uv_pipx_and_pip(self) -> None:
+        for manager, uninstall, install in (
+            ("uv", "tool uninstall mistral-vibe", "tool install mistral-vibe"),
+            ("pipx", "uninstall mistral-vibe", "install mistral-vibe"),
+            ("python3", "-m pip uninstall -y mistral-vibe", "-m pip install --user mistral-vibe"),
+        ):
+            with self.subTest(manager=manager):
+                lines = self.apply_with(manager)
+                before = lines.index(uninstall)
+                after = lines.index(install)
+                self.assertLess(before, after)
+
+
+if __name__ == "__main__":
+    unittest.main()
 #+END_SRC
 
 ** Script: agent-provision (orchestrator, dry-run by default)
@@ -1532,6 +1702,7 @@ class AgentFleetTests(unittest.TestCase):
             f"ghost {free_uid()} yes\n"
             f"clash {os.getuid()} yes\n"
             "parked 2010 no\n"
+            "vibe 2013 yes\n"
         )
         self.env = dict(os.environ, AGENT_CLI_CONF=str(conf), AGENT_UIDS_FILE=str(conf / "uids.ssv"))
 
@@ -1545,6 +1716,8 @@ class AgentFleetTests(unittest.TestCase):
         out = self.run_tool(CHECK)
         self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
         self.assertIn("MISSING agent-ghost", out.stdout)
+        self.assertIn("agent-vibe", out.stdout)
+        self.assertIn("2013", out.stdout)
         self.assertIn("COLLISION agent-clash", out.stdout)
         self.assertNotIn("agent-parked", out.stdout, "provision=no agents are not gaps")
 
@@ -1566,6 +1739,12 @@ class AgentFleetTests(unittest.TestCase):
         self.assertNotIn("+ sudo", dry.stdout, "dry-run must not execute")
         bad = self.run_tool(USERS, "--only", "nosuch")
         self.assertEqual(bad.returncode, 1)
+
+    def test_vibe_uid_is_accepted_by_users_bootstrap(self) -> None:
+        dry = self.run_tool(USERS, "--only", "vibe")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("agent-vibe", dry.stdout)
+        self.assertIn("2013", dry.stdout)
 
 
 if __name__ == "__main__":

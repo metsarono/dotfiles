@@ -1,0 +1,3 @@
+# MANAGER PACKAGE [VERSION] [ROLE]
+pip mistral-vibe
+pip mistralai "" dependency

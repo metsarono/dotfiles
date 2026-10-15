@@ -1,2 +1,3 @@
 # group        gid    cleared tools (comma list)
+cortex         2000   codex,claude,gemini,opencode,pi,deepseek,vibe
 palm           2020   claude,hermes

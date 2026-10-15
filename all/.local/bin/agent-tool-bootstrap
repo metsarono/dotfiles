@@ -9,7 +9,7 @@
 # DRY-RUN unless --apply.
 set -euo pipefail
 
-AGENTS="codex claude gemini antigravity opencode hermes pi"
+AGENTS="codex claude gemini antigravity opencode hermes pi vibe"
 APPLY=0
 ONLY=""
 

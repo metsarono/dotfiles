@@ -5,8 +5,9 @@
 # [[file:../../../agents-users.org::*Script: agent-cli-install (dry-run by default)][Script: agent-cli-install (dry-run by default):1]]
 # ~/DotCortex/all/.local/bin/agent-cli-install
 # Installs each agent's CLI (latest; no pins, ruling 2026-10-05) from all/.config/agent-cli/<tool>.ssv into the
-# agent user's own npm prefix (needs the agent Guix profile / node first).
-# DRY-RUN unless --apply. npm only for now; extend MANAGER cases as needed.
+# agent user's own tool lane. npm uses ~/.npm-global; Python uses uv tool,
+# pipx, or python3 -m pip --user from the agent's login profile.
+# DRY-RUN unless --apply. Extend MANAGER cases as needed.
 set -euo pipefail
 
 MANIFEST_DIR="${AGENT_CLI_MANIFESTS:-$HOME/DotCortex/all/.config/agent-cli}"
@@ -43,6 +44,12 @@ for manifest in "$MANIFEST_DIR"/*.ssv; do
   while read -r manager pkg version _rest; do
     case "$manager" in ""|\#*) continue ;; esac
     [ -z "$pkg" ] && continue
+    version="${version//\"/}"
+    role="${_rest:-cli}"
+    if [ "$role" = dependency ]; then
+      echo "$user: dependency $pkg is pulled into the $tool CLI environment (skip standalone tool install)"
+      continue
+    fi
     case "$manager" in
       npm)
         spec="$pkg"
@@ -57,6 +64,30 @@ for manifest in "$MANIFEST_DIR"/*.ssv; do
         # caller's cwd, which a sealed operator home refuses to the agent.
         run sudo -u "$user" -H sh -c 'grep -q "npm-global/bin" ~/.profile 2>/dev/null || printf "export NPM_CONFIG_PREFIX=\"\$HOME/.npm-global\"\nexport PATH=\"\$HOME/.npm-global/bin:\$PATH\"\n" >> ~/.profile'
         run sudo -u "$user" -H sh -lc "cd /tmp && command -v npm >/dev/null || { echo '$user: no npm on the agent profile (run agent-guix-apply)' >&2; exit 1; }; mkdir -p \"\$HOME/.npm-global\"; npm uninstall -g '$pkg' 2>/dev/null; npm install -g '$spec'"
+        ;;
+      pip)
+        spec="$pkg"
+        [ -n "${version:-}" ] && spec="$pkg==$version"
+        # uv tool and pipx each provide an isolated CLI environment. The
+        # final branch is the deliberate fleet fallback: system Python plus
+        # its user-site pip, never the operator's Python or home. All three
+        # branches uninstall first so --apply replaces an older install.
+        run sudo -u "$user" -H sh -lc "cd /tmp && if command -v uv >/dev/null 2>&1; then
+          echo '$user: python manager uv'
+          uv tool uninstall '$pkg' 2>/dev/null || true
+          uv tool install '$spec'
+        elif command -v pipx >/dev/null 2>&1; then
+          echo '$user: python manager pipx'
+          pipx uninstall '$pkg' 2>/dev/null || true
+          pipx install '$spec'
+        elif command -v python3 >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+          echo '$user: python manager pip'
+          python3 -m pip uninstall -y '$pkg' 2>/dev/null || true
+          python3 -m pip install --user '$spec'
+        else
+          echo '$user: no supported Python manager in the agent profile (need uv, pipx, or python3 with pip; run agent-tool-bootstrap first)' >&2
+          exit 1
+        fi"
         ;;
       *)
         echo "$user: unknown manager '$manager' for $pkg (skip)"
