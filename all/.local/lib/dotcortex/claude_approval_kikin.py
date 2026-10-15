@@ -3880,6 +3880,11 @@ OPTIONAL_COORDINATOR_CLASSES = ('ops_tool',)
 OPS_TOOL = 'bunta-ops'
 OPS_VERBS = frozenset({'mail-inbox', 'mail-read', 'mail-send', 'status', 'logs', 'git', 'x230-fetch', 'x230-push'})
 OPS_ARG = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_./:@=+,-]*$')
+# A leading '-' only after 'git <repo> <read sub>' (Bunta's review, 2026-10-16):
+# bunta-ops checks each flag against its own allowlist; the gate keeps the
+# same inert character class.
+OPS_GIT_SUBS = frozenset({'log', 'status', 'diff', 'show', 'branch'})
+OPS_FLAG = re.compile(r'^--?[A-Za-z0-9][A-Za-z0-9_./:@=+,-]*$')
 COORDINATOR_ATOM = re.compile(r'^[A-Za-z0-9_./-]+$')
 COORDINATOR_BRANCH = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 DISPATCH_RE = re.compile(
@@ -4188,7 +4193,10 @@ def _peer_coordinator_match(command, words, config, manifest):
         # The tool itself validates each verb's paths and refuses the rest.
         if (config['classes'].get('ops_tool') is True and len(remote) >= 2 and remote[1] in OPS_VERBS
                 and not SHELL_META.search(remote_text) and not _dynamic_shell(remote_text)
-                and all(OPS_ARG.fullmatch(word) for word in remote[2:])
+                and all(OPS_ARG.fullmatch(word)
+                        or (remote[1] == 'git' and index >= 4 and len(remote) > 3 and remote[3] in OPS_GIT_SUBS
+                            and OPS_ARG.fullmatch(remote[2]) and OPS_FLAG.fullmatch(word))
+                        for index, word in enumerate(remote) if index >= 2)
                 and ' '.join(remote) == remote_text.strip()):
             return 'coordinator_ops_tool'
         return None

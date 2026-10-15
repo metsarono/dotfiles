@@ -286,6 +286,44 @@ class BuntaReplayTests(unittest.TestCase):
         self.assertEqual(reason, "true_floor")
 
     # ---- the ledger records decider_status ----
+    def test_ops_tool_git_flags_only_after_git_repo_sub(self):
+        # Bunta's conditions (2026-10-16): a leading '-' passes the gate only
+        # after 'git <repo> <log|status|diff|show|branch>'; bunta-ops then
+        # refuses any flag outside its own allowlist (test-bunta-ops.py).
+        manifest = json.loads(json.dumps(self.manifest))
+        config = manifest["coordinator_ops"]
+        config["classes"]["ops_tool"] = True
+        config["peer_host"] = "kikin"
+        config["repo_roots"] = [str(self.root)]
+        checked = self._with_entries(manifest)
+
+        def grant(command):
+            return self.engine._coordinator_match(event("Bash", {"command": command}, self.root), checked)
+
+        for command in ("ssh kikin bunta-ops git dotcortex log -5 --oneline",
+                        "ssh kikin bunta-ops git dotcortex log --output=x",
+                        "ssh kikin bunta-ops git helmcortex branch --show-current",
+                        "ssh kikin bunta-ops git dc-wt/x diff --stat",
+                        "ssh kikin bunta-ops status"):
+            with self.subTest(command=command):
+                self.assertEqual(grant(command), "coordinator_ops_tool")
+        for command in ("ssh kikin bunta-ops mail-read -x",
+                        "ssh kikin bunta-ops status -v",
+                        "ssh kikin bunta-ops logs -v",
+                        "ssh kikin bunta-ops git -5 log",
+                        "ssh kikin bunta-ops git dotcortex -5 log",
+                        "ssh kikin bunta-ops git dotcortex push -f",
+                        "ssh kikin bunta-ops git dotcortex log -",
+                        "ssh kikin bunta-ops git dotcortex log ---x",
+                        "ssh kikin bunta-ops git dotcortex log -5 $HOME",
+                        "ssh kikin bunta-ops git dotcortex log -5;id",
+                        "ssh kikin bunta-ops git dotcortex log --format=%h"):
+            with self.subTest(command=command):
+                self.assertIsNone(grant(command))
+        config["classes"]["ops_tool"] = False
+        checked = self._with_entries(manifest)
+        self.assertIsNone(grant("ssh kikin bunta-ops git dotcortex log -5"))
+
     def test_ledger_via_hook(self):
         hook = HERE.parents[3] / "bin/claude-hook-permission-request"
         if not hook.exists():
