@@ -119,6 +119,116 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.watcher.locked_scan(self.registry, adapter, now=20), 0)
         self.assertEqual(self.watcher.locked_scan(self.registry, adapter, now=42), 1)
 
+    def claude_local_fixture(self, states, admission="accepted"):
+        record = {
+            "host": "test-host", "mailbox": "seats/builder", "harness": "claude",
+            "transport": "claude-local",
+            "claude_target": {
+                "tmux_socket": str(self.base / "tmux.sock"),
+                "tmux_session": "FixtureWarmSeat",
+                "runtime_dir": str(self.base / "runtime"),
+            },
+            "rate_limit_seconds": 0,
+        }
+        self.registry["seats"]["builder"] = record
+        owner = {
+            "channel": "claude-" + "a" * 32,
+            "session_id": "fixture-session-0001",
+            "supervisor_pid": os.getpid(),
+            "supervisor_start_time": "1",
+            "epoch": 1,
+            "pane_id": "%1",
+            "pane_tty": "/dev/pts/1",
+        }
+        outcomes = iter(states)
+        calls = []
+
+        class FakeClaudeSeam:
+            PROTOCOL = "claude.mailcortex_idle.v2"
+
+            @staticmethod
+            def validate_target(target):
+                assert target == record["claude_target"]
+
+            @staticmethod
+            def valid_owner(value):
+                return value == owner
+
+            def remote_request(self, request):
+                calls.append(request)
+                status = next(outcomes) if request["operation"] == "status" else admission
+                response = {
+                    "protocol": self.PROTOCOL,
+                    "request_id": request["request_id"],
+                    "target": request["target"],
+                    "status": "busy" if status in {"busy", "permission"} else status,
+                }
+                if response["status"] in {"idle", "accepted"}:
+                    response["owner"] = owner
+                return response
+
+        return record, FakeClaudeSeam(), calls
+
+    def scan_claude_local(self, seam, now):
+        with mock.patch.object(self.watcher, "claude_wake", return_value=seam):
+            return self.watcher.locked_scan(
+                self.registry, self.watcher.TransportAdapters(), now=now
+            )
+
+    def test_claude_local_idle_seat_wakes_once_with_one_bounded_provenance_line(self):
+        mid = "<local-idle@node.helm>"
+        self.mail(mid, "idle")
+        _record, seam, calls = self.claude_local_fixture(["idle"])
+        self.assertEqual(self.scan_claude_local(seam, 10), 1)
+        self.assertEqual(self.scan_claude_local(seam, 11), 0)
+        admissions = [call for call in calls if call["operation"] == "admit"]
+        self.assertEqual(len(admissions), 1)
+        prompt = admissions[0]["text"]
+        self.assertEqual(len(prompt.splitlines()), 1)
+        self.assertLessEqual(len(prompt), 1024)
+        self.assertIn("Sender: sender@node.helm", prompt)
+        self.assertIn("Subject: wake", prompt)
+        self.assertIn(f"Message-ID: {mid}", prompt)
+        self.assertEqual(self.receipt(mid)["wake_state"], "injected")
+
+    def test_claude_local_mid_turn_is_queued_without_admission(self):
+        mid = "<local-busy@node.helm>"
+        self.mail(mid, "busy")
+        _record, seam, calls = self.claude_local_fixture(["busy"])
+        self.assertEqual(self.scan_claude_local(seam, 10), 0)
+        self.assertEqual(self.receipt(mid)["wake_state"], "queued")
+        self.assertEqual(self.receipt(mid)["reason"], "busy")
+        self.assertFalse(any(call["operation"] == "admit" for call in calls))
+
+    def test_claude_local_permission_prompt_is_queued_without_admission(self):
+        mid = "<local-permission@node.helm>"
+        self.mail(mid, "permission")
+        _record, seam, calls = self.claude_local_fixture(["permission"])
+        self.assertEqual(self.scan_claude_local(seam, 10), 0)
+        self.assertEqual(self.receipt(mid)["wake_state"], "queued")
+        self.assertEqual(self.receipt(mid)["reason"], "busy")
+        self.assertFalse(any(call["operation"] == "admit" for call in calls))
+
+    def test_claude_local_queued_mail_replays_once_after_idle(self):
+        mid = "<local-replay@node.helm>"
+        self.mail(mid, "replay")
+        _record, seam, calls = self.claude_local_fixture(["busy", "idle"])
+        self.assertEqual(self.scan_claude_local(seam, 10), 0)
+        self.assertEqual(self.receipt(mid)["wake_state"], "queued")
+        self.assertEqual(self.scan_claude_local(seam, 11), 1)
+        self.assertEqual(self.scan_claude_local(seam, 12), 0)
+        self.assertEqual(self.receipt(mid)["wake_state"], "injected")
+        self.assertEqual(sum(call["operation"] == "admit" for call in calls), 1)
+
+    def test_claude_local_ambiguous_admission_is_never_retried(self):
+        mid = "<local-unknown@node.helm>"
+        self.mail(mid, "unknown")
+        _record, seam, calls = self.claude_local_fixture(["idle"], admission="unknown")
+        self.assertEqual(self.scan_claude_local(seam, 10), 0)
+        self.assertEqual(self.receipt(mid)["wake_state"], "delivery_unknown")
+        self.assertEqual(self.scan_claude_local(seam, 11), 0)
+        self.assertEqual(sum(call["operation"] == "admit" for call in calls), 1)
+
     def test_handling_state_preserves_wake_and_does_not_reinject(self):
         mid = "<deferred@node.helm>"
         self.mail(mid, "a")
@@ -205,11 +315,15 @@ class WatcherTests(unittest.TestCase):
                 "rate_limit_seconds": 0,
             },
         }
+        local_record, local_seam, _calls = self.claude_local_fixture([])
+        records["localclaude"] = dict(local_record, mailbox="consorts/localclaude")
         registry_path = self.base / "registry.json"
         registry_path.write_text(json.dumps({"schema": "mailcortex.seats.v1", "host": "test-host", "seats": records}))
         registry_path.chmod(0o600)
-        loaded = self.watcher.load_registry(registry_path, "test-host")
+        with mock.patch.object(self.watcher, "claude_wake", return_value=local_seam):
+            loaded = self.watcher.load_registry(registry_path, "test-host")
         self.assertEqual(loaded["seats"]["ductbot"]["mailbox"], "consorts/ductbot")
+        self.assertEqual(loaded["seats"]["localclaude"]["transport"], "claude-local")
         hidden = dict(records["deepbot"], deepseek_session="YOUR_HIDDEN_DEEPSEEK_SESSION")
         registry_path.write_text(json.dumps({"schema": "mailcortex.seats.v1", "host": "test-host",
                                              "seats": {"deepbot": hidden}}))

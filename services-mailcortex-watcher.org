@@ -33,6 +33,13 @@ deliveries remain queued and are replayed on the next scan; an injection
 already started is never retried automatically because its delivery outcome
 may be ambiguous.
 
+Warm Claude seats owned by this same user use =claude-local=, which calls the
+existing guarded supervisor control protocol directly. Its status and
+admission requests share the supervisor lock, PTY classifier, input barrier
+and exact owner identity. It sends one bounded, single-line wake with sender,
+subject and Message-ID. Herdr's separate rest check and pane run are not used
+for this lane because that gap cannot close a busy-screen race.
+
 DeepSeek mail-back correlates the persisted prompt request ID with durable
 =user/message= and =turn/end= events. Only a completed, single-request turn's
 last committed assistant text is returned to the original From address, with
@@ -130,6 +137,18 @@ changes; older observation-only installations still queue and report refusal.
       "harness": "ductor",
       "transport": "ductor",
       "ductor_config": "YOUR_DUCTOR_CONFIG",
+      "rate_limit_seconds": 0
+    },
+    "YOUR_LOCAL_CLAUDE_SEAT": {
+      "host": "YOUR_HOST",
+      "mailbox": "consorts/YOUR_LOCAL_CLAUDE_SEAT",
+      "harness": "claude",
+      "transport": "claude-local",
+      "claude_target": {
+        "tmux_socket": "/tmp/YOUR_TMUX_SOCKET",
+        "tmux_session": "YOUR_TMUX_SESSION",
+        "runtime_dir": "/run/user/YOUR_UID"
+      },
       "rate_limit_seconds": 0
     }
   }
@@ -715,7 +734,7 @@ SPEC.loader.exec_module(MAILCORTEX)
 
 SAFE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 PANE = re.compile(r"w[0-9A-Za-z]+:p[0-9A-Za-z]+\Z")
-TRANSPORTS = {"herdr", "hermes", "nanobot", "ductor", "deepseek", "claude-ssh"}
+TRANSPORTS = {"herdr", "hermes", "nanobot", "ductor", "deepseek", "claude-ssh", "claude-local"}
 
 
 class WatcherError(Exception):
@@ -739,6 +758,47 @@ def claude_wake():
         return mailcortex_claude
     except ImportError as error:
         raise WatcherError("Claude wake seam is not installed") from error
+
+
+class ClaudeLocalAdapter:
+    """Use the guarded Claude supervisor control socket for a same-user warm seat."""
+
+    PROTOCOL = "claude.mailcortex_idle.v2"
+
+    def _request(self, record: dict, operation: str, **fields) -> dict:
+        request = {
+            "protocol": self.PROTOCOL,
+            "request_id": uuid.uuid4().hex,
+            "operation": operation,
+            "target": record["claude_target"],
+            **fields,
+        }
+        try:
+            value = claude_wake().remote_request(request)
+        except Exception as error:
+            raise WatcherError("Claude local authority unavailable or delivery outcome unknown") from error
+        if (not isinstance(value, dict)
+                or value.get("protocol") != self.PROTOCOL
+                or value.get("request_id") != request["request_id"]
+                or value.get("target") != request["target"]
+                or value.get("status") not in {"idle", "busy", "accepted", "unavailable", "invalid", "unknown"}):
+            raise WatcherError("Claude local authority returned an invalid acknowledgement")
+        return value
+
+    def resolve_idle_pane(self, record: dict) -> dict | None:
+        value = self._request(record, "status")
+        if value["status"] == "busy":
+            return None
+        if value["status"] != "idle" or not claude_wake().valid_owner(value.get("owner")):
+            raise WatcherError("Claude local conditional idle authority unavailable")
+        return value["owner"]
+
+    def deliver(self, record: dict, owner: dict, prompt: str) -> None:
+        value = self._request(record, "admit", owner=owner, text=prompt)
+        if value["status"] in {"busy", "unavailable", "invalid"}:
+            raise PromptNotAdmittedError(value["status"])
+        if value["status"] != "accepted" or value.get("owner") != owner:
+            raise WatcherError("Claude local admission outcome unknown")
 
 
 def load_registry(path: Path, host: str) -> dict:
@@ -768,6 +828,7 @@ def load_registry(path: Path, host: str) -> dict:
             "ductor": {"ductor_config"},
             "deepseek": {"deepseek_url", "deepseek_cookie_file", "deepseek_session"},
             "claude-ssh": {"ssh_target", "remote_user", "claude_target", "coalesce_seconds"},
+            "claude-local": {"claude_target"},
         }[transport]
         if set(record) != required:
             raise WatcherError("seat registry fields are not exact")
@@ -788,6 +849,13 @@ def load_registry(path: Path, host: str) -> dict:
                 claude_wake().validate_record(record)
             except (ValueError, TypeError, KeyError) as error:
                 raise WatcherError("invalid Claude SSH target") from error
+        elif transport == "claude-local":
+            if record["harness"] != "claude":
+                raise WatcherError("Claude local transport requires Claude harness")
+            try:
+                claude_wake().validate_target(record["claude_target"])
+            except (ValueError, TypeError, KeyError) as error:
+                raise WatcherError("invalid Claude local target") from error
         elif transport == "hermes":
             if record["harness"] != "hermes":
                 raise WatcherError("seat registry ownership or transport mismatch")
@@ -865,6 +933,19 @@ def wake_prompt(record: dict, path: Path, mailback_error: str | None = None) -> 
     if record["transport"] == "claude-ssh":
         return (f"MailCortex: new mail is waiting in {record['mailbox']} on {record['host']}. "
                 "Open /inbox, read all pending mail, and handle it with your harness tools.")
+    if record["transport"] == "claude-local":
+        sender = " ".join(str(message.get("From", "(unknown)")).split())
+        subject = " ".join(str(message.get("Subject", "(no subject)")).split())
+        mid = str(message.get("Message-ID", "")).strip()
+        if not mid or len(mid) > 320:
+            raise WatcherError("Message-ID is too long for a bounded Claude wake")
+        sender = sender[:160].encode("ascii", "replace").decode("ascii")
+        subject = subject[:240].encode("ascii", "replace").decode("ascii")
+        line = (f"[mailcortex-wake] Sender: {sender} | Subject: {subject} | "
+                f"Message-ID: {mid} | Read and handle this mail from your MailCortex inbox.")
+        if len(line) > 1024 or "\n" in line or "\r" in line:
+            raise WatcherError("Claude wake exceeds its one-line bound")
+        return line
     if record["transport"] == "herdr":
         return preamble + "\nOpen the mailbox now with: /inbox"
     if record["transport"] in {"hermes", "nanobot"}:
@@ -1044,6 +1125,32 @@ def latest_injection(seat: str) -> float:
         if value.get("wake_state") == "injected":
             latest = max(latest, float(value.get("wake_updated_at", 0)))
     return latest
+
+
+def recover_local_attempts(seat: str, now: float) -> None:
+    """Freeze an interrupted local admission as unknown; never replay its key."""
+    directory = MAILCORTEX.runtime_root() / "receipts" / seat
+    if not directory.is_dir():
+        return
+    for path in directory.glob("*.json"):
+        if path.is_symlink():
+            raise WatcherError("unsafe Claude local wake receipt")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            mid = value["message_id"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            raise WatcherError("Claude local wake receipt is unreadable") from error
+        receipt = safe_receipt(seat, mid)
+        if not receipt or path != MAILCORTEX.receipt_path(seat, mid):
+            raise WatcherError("Claude local wake receipt identity mismatch")
+        if receipt["wake_state"] == "injecting":
+            MAILCORTEX.write_wake_receipt(
+                seat, mid, "delivery_unknown", reason="interrupted_attempt",
+                recovery_at=now, wake_updated_at=receipt["wake_updated_at"],
+                wake_error="Interrupted Claude local admission; operator review required; no automatic retry",
+            )
+            report_error(seat, receipt.get("filename", "message"),
+                         WatcherError("Recovered interrupted Claude local admission; review required"))
 
 
 class HerdrAdapter:
@@ -1475,6 +1582,7 @@ class TransportAdapters:
             "nanobot": NanobotAdapter(),
             "ductor": DuctorAdapter(),
             "deepseek": DeepSeekAdapter(),
+            "claude-local": ClaudeLocalAdapter(),
         }
 
     def for_record(self, record: dict) -> object:
@@ -1584,6 +1692,8 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
         if record["transport"] == "claude-ssh":
             count += claude_wake().scan_batch(globals(), seat, record, transport_adapter, now)
             continue
+        if record["transport"] == "claude-local":
+            recover_local_attempts(seat, now)
         pending_reply = (reconcile_replies(seat, record, transport_adapter, now)
                          if record["transport"] == "deepseek" else False)
         last_injected = latest_injection(seat)
@@ -1615,7 +1725,7 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
             try:
                 pane_id = transport_adapter.resolve_idle_pane(record)
             except Exception as error:
-                if record["transport"] not in {"deepseek", "ductor", "hermes", "nanobot"}:
+                if record["transport"] not in {"deepseek", "ductor", "hermes", "nanobot", "claude-local"}:
                     raise
                 MAILCORTEX.write_wake_receipt(seat, mid, "queued", reason="transport_unavailable",
                                               wake_error=diagnostic(error), wake_updated_at=now)
@@ -1639,14 +1749,17 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
                     report_error(seat, path.name, error)
                     extra = {"reply_state": "failed", "reply_reason": "return_path_unavailable",
                              "reply_error": mailback_error, "reply_error_at": now}
+            prompt = wake_prompt(record, path, mailback_error)
+            attempt = {"attempt_id": uuid.uuid4().hex} if record["transport"] == "claude-local" else {}
             MAILCORTEX.write_wake_receipt(seat, mid, "injecting", filename=path.name,
-                                          pane_id=pane_id, wake_updated_at=now, **extra)
+                                          pane_id=pane_id, wake_updated_at=now,
+                                          **attempt, **extra)
             try:
                 if extra:
-                    transport_adapter.deliver(record, pane_id, wake_prompt(record, path, mailback_error),
+                    transport_adapter.deliver(record, pane_id, prompt,
                                               request_id=request_id)
                 else:
-                    transport_adapter.deliver(record, pane_id, wake_prompt(record, path))
+                    transport_adapter.deliver(record, pane_id, prompt)
             except PromptNotAdmittedError as error:
                 MAILCORTEX.write_wake_receipt(
                     seat, mid, "queued", filename=path.name, pane_id=pane_id,
@@ -1658,7 +1771,7 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
                     seat, mid, "delivery_unknown", filename=path.name,
                     pane_id=pane_id, reason="delivery_error", wake_updated_at=now,
                 )
-                if record["transport"] in {"deepseek", "ductor", "hermes", "nanobot"}:
+                if record["transport"] in {"deepseek", "ductor", "hermes", "nanobot", "claude-local"}:
                     report_error(seat, path.name, error)
                     continue
                 if isinstance(error, WatcherError):
@@ -1678,7 +1791,7 @@ def scan_once(registry: dict, adapter: object, now: float | None = None) -> int:
         try:
             count += scan_seats({"seats": {seat: record}}, adapter, now=now)
         except Exception as error:
-            if record.get("transport") not in {"deepseek", "ductor", "hermes", "nanobot", "claude-ssh"}:
+            if record.get("transport") not in {"deepseek", "ductor", "hermes", "nanobot", "claude-ssh", "claude-local"}:
                 raise
             report_error(seat, "scan", error)
     return count
