@@ -1043,7 +1043,24 @@ def defer(raw):
     return {'hookSpecificOutput':{'hookEventName':'PermissionRequest','decision':{'behavior':'deny','message':note+'; '+_runtime.DEFERRED_ACTION,'interrupt':False}}}
 
 
+def recall_prompt(raw, started):
+    # The plugin posts a Telegram prompt for every PermissionRequest at once;
+    # retract it after an allow (agents-approval-telegram-recall.org).
+    if not os.environ.get('TELEGRAM_STATE_DIR'):
+        return
+    helper = Path(__file__).resolve().parents[1] / 'lib/dotcortex/telegram_permission_recall.py'
+    try:
+        child = subprocess.Popen(['/usr/bin/python3', str(helper), repr(started)], stdin=subprocess.PIPE,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, text=True)
+        child.stdin.write(raw)
+        child.stdin.close()
+    except (OSError, ValueError):
+        pass
+
+
 def main():
+    import time
+    started = time.time()
     raw = sys.stdin.read(1024*1024+1)
     here = Path(__file__).resolve()
     override = os.environ.get('DOTCORTEX_KIKIN_APPROVAL_ENGINE') or os.environ.get('DOTCORTEX_APPROVAL_ENGINE')
@@ -1064,7 +1081,9 @@ def main():
     except (StopIteration, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
         pass
     if output is None: output = defer(raw)
-    if output is not None: print(json.dumps(output,ensure_ascii=True,separators=(',',':')))
+    if output is not None: print(json.dumps(output,ensure_ascii=True,separators=(',',':')), flush=True)
+    if output is not None and output['hookSpecificOutput']['decision']['behavior'] == 'allow':
+        recall_prompt(raw, started)
     return 0
 
 

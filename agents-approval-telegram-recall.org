@@ -1,0 +1,339 @@
+#+TITLE: Approval gate — recall auto-allowed Telegram permission prompts
+#+PROPERTY: header-args :mkdirp yes
+
+* Why this exists
+
+Claude Code sends every permission dialog to the Telegram channel plugin at the same moment it runs the =PermissionRequest= hook. The plugin posts =🔐 Permission: <tool>= with Allow/Deny buttons straight away. When the Decider then allows the request, nothing retracts that message, so the Admiral gets a prompt for something that was already approved (found 2026-10-16, Telegram 7107–7113).
+
+The Admiral ruled (Telegram 7116, 7118) that these must vanish, without modifying the vendor plugin, and that the recall must remove *only* permission messages and *only* within the time window of that permission.
+
+* How it identifies a permission message
+
+- It runs only after the gate *allowed* the request. The wrapper starts it detached, so the hook's own latency is unchanged.
+- It anchors on the newest Telegram message id the session already knows: inbound =<channel … message_id="N">= tags and the reply tool's =sent (id: N)= results, read from the tail of the session transcript. Message ids in a private chat count upward, so the plugin's prompt for this request is newer than that anchor. Without an anchor it does nothing.
+- The plugin puts inline buttons on permission messages and on nothing else. For each id above the anchor it asks Telegram to strip the buttons (=editMessageReplyMarkup= with no markup). Telegram refuses this on the Admiral's own messages ("can't be edited") and on button-less bot replies ("not modified"), and a not-yet-sent id is "not found" and retried. So only a bot message that had buttons can succeed.
+- A stripped message is deleted only when its returned text starts with =🔐 Permission: = *and* its date falls inside this request's window (from the hook's start time to the end of the sweep). Anything else is left in place and logged as an anomaly.
+- It does nothing while any other tool call in this session is still unresolved in the transcript, so a real floor ask that is waiting for the Admiral can never be touched.
+- It acts only when the channel has exactly one allowlisted chat, because message ids are per chat and the anchor carries no chat for replies.
+
+The bot token is read from the session's own =$TELEGRAM_STATE_DIR/.env= (=TELEGRAM_BOT_TOKEN= only), the same file the plugin reads, and is never logged. Sessions without =TELEGRAM_STATE_DIR= are untouched. =TELEGRAM_API_BASE= exists for the tests' loopback fake.
+
+* Recall helper
+
+#+BEGIN_SRC python :tangle all/.local/lib/dotcortex/telegram_permission_recall.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""Delete Telegram permission prompts for requests the approval gate allowed.
+
+Usage: telegram_permission_recall.py <hook-start-epoch>   (hook event JSON on stdin)
+See agents-approval-telegram-recall.org for the identification rules.
+"""
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PREFIX = '\U0001f510 Permission: '
+SWEEP_SECONDS = 8.0
+PROBE_AHEAD = 12
+TAIL_BYTES = 4 * 1024 * 1024
+ANCHOR_RES = (
+    re.compile(r'message_id=\\?"(\d+)\\?"'),
+    re.compile(r'sent \(id: (\d+)\)'),
+)
+LOG = Path(os.path.expanduser('~/.local/state/dotcortex/telegram-permission-recall.jsonl'))
+
+
+def _log(**row):
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'ts': time.strftime('%Y-%m-%dT%H:%M:%S%z'), **row}) + '\n')
+    except OSError:
+        pass
+
+
+def _token(state_dir):
+    try:
+        text = (state_dir / '.env').read_text(encoding='utf-8')
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = re.fullmatch(r'\s*TELEGRAM_BOT_TOKEN\s*=\s*(\S+)\s*', line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _chat(state_dir):
+    try:
+        access = json.loads((state_dir / 'access.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    chats = access.get('allowFrom') if isinstance(access, dict) else None
+    if not isinstance(chats, list) or len(chats) != 1 or not re.fullmatch(r'-?\d+', str(chats[0])):
+        return None
+    return str(chats[0])
+
+
+def _transcript_tail(path):
+    try:
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - TAIL_BYTES))
+            data = handle.read().decode('utf-8', errors='replace')
+    except (OSError, TypeError):
+        return None
+    return data if size <= TAIL_BYTES else data.split('\n', 1)[-1]
+
+
+def _anchor(tail):
+    ids = [int(m) for regex in ANCHOR_RES for m in regex.findall(tail)]
+    return max(ids) if ids else None
+
+
+def _unresolved(tail):
+    uses, results = set(), set()
+    for line in tail.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        content = (row.get('message') or {}).get('content') if isinstance(row, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') == 'tool_use' and block.get('id'):
+                uses.add(block['id'])
+            elif block.get('type') == 'tool_result' and block.get('tool_use_id'):
+                results.add(block['tool_use_id'])
+    return uses - results
+
+
+def _call(base, token, method, payload):
+    request = urllib.request.Request(
+        f'{base}/bot{token}/{method}', data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return json.loads(response.read() or b'{}')
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read() or b'{}')
+        except ValueError:
+            return {'ok': False, 'description': f'http {exc.code}'}
+    except (OSError, ValueError):
+        return {'ok': False, 'description': 'transport'}
+
+
+def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, sweep_seconds=SWEEP_SECONDS):
+    """Return the list of deleted message ids (empty when nothing qualifies)."""
+    session = event.get('session_id', '') if isinstance(event, dict) else ''
+    token, chat = _token(state_dir), _chat(state_dir)
+    if not token or not chat:
+        _log(session=session, action='skip', why='no_token' if not token else 'chat_not_single')
+        return []
+    tail = _transcript_tail(event.get('transcript_path')) if isinstance(event, dict) else None
+    if tail is None:
+        _log(session=session, action='skip', why='no_transcript')
+        return []
+    if len(_unresolved(tail)) > 1:
+        _log(session=session, action='skip', why='other_request_pending')
+        return []
+    anchor = _anchor(tail)
+    if anchor is None:
+        _log(session=session, action='skip', why='no_anchor')
+        return []
+    done, deleted = set(), []
+    deadline = started + sweep_seconds
+    while now() < deadline:
+        for message_id in range(anchor + 1, anchor + 1 + PROBE_AHEAD):
+            if message_id in done:
+                continue
+            reply = _call(base, token, 'editMessageReplyMarkup', {'chat_id': chat, 'message_id': message_id})
+            if not reply.get('ok'):
+                description = str(reply.get('description', ''))
+                if 'not found' not in description:
+                    done.add(message_id)  # user message, button-less bot message, or other refusal
+                continue
+            done.add(message_id)
+            message = reply.get('result') if isinstance(reply.get('result'), dict) else {}
+            text, date = message.get('text', ''), message.get('date')
+            in_window = isinstance(date, int) and int(started) - 1 <= date <= deadline + 1
+            if not (isinstance(text, str) and text.startswith(PREFIX) and in_window):
+                _log(session=session, action='anomaly', message_id=message_id, why='stripped_but_not_a_windowed_permission')
+                continue
+            if _call(base, token, 'deleteMessage', {'chat_id': chat, 'message_id': message_id}).get('ok'):
+                deleted.append(message_id)
+                _log(session=session, action='deleted', message_id=message_id)
+        sleep(0.5)
+    _log(session=session, action='swept', anchor=anchor, deleted=deleted)
+    return deleted
+
+
+def main(argv):
+    state = os.environ.get('TELEGRAM_STATE_DIR')
+    if not state or len(argv) != 2:
+        _log(action='skip', why='no_state_dir' if not state else 'bad_argv')
+        return 0
+    try:
+        started = float(argv[1])
+        event = json.loads(sys.stdin.read(1024 * 1024))
+    except ValueError:
+        _log(action='skip', why='bad_input')
+        return 0
+    base = os.environ.get('TELEGRAM_API_BASE', 'https://api.telegram.org').rstrip('/')
+    sweep(event, started, state_dir=Path(state), base=base)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv))
+#+END_SRC
+
+* Tests
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/tests/test-telegram-permission-recall.py :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
+"""Recall deletes only windowed permission prompts, against a loopback fake Telegram."""
+import http.server
+import importlib.util
+import json
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+LIB = Path(__file__).resolve().parents[3] / 'lib/dotcortex/telegram_permission_recall.py'
+spec = importlib.util.spec_from_file_location('recall', LIB)
+recall = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(recall)
+
+CHAT = '111'
+PERM = '\U0001f510 Permission: Bash'
+
+
+class FakeTelegram:
+    """Messages: id -> dict(kind=user|bot, text, buttons, date)."""
+
+    def __init__(self, messages):
+        self.messages = messages
+        self.deleted = []
+        self.stripped = []
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))) or b'{}')
+                method = self.path.rsplit('/', 1)[-1]
+                reply = fake.handle(method, body)
+                data = json.dumps(reply).encode()
+                self.send_response(200 if reply.get('ok') else 400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f'http://127.0.0.1:{self.server.server_address[1]}'
+
+    def handle(self, method, body):
+        message = self.messages.get(body.get('message_id'))
+        if str(body.get('chat_id')) != CHAT:
+            return {'ok': False, 'description': 'Bad Request: chat not found'}
+        if message is None:
+            return {'ok': False, 'description': 'Bad Request: message to edit not found'}
+        if method == 'editMessageReplyMarkup':
+            if message['kind'] == 'user':
+                return {'ok': False, 'description': "Bad Request: message can't be edited"}
+            if not message['buttons']:
+                return {'ok': False, 'description': 'Bad Request: message is not modified'}
+            message['buttons'] = False
+            self.stripped.append(body['message_id'])
+            return {'ok': True, 'result': {'message_id': body['message_id'], 'text': message['text'], 'date': message['date']}}
+        if method == 'deleteMessage':
+            self.deleted.append(body['message_id'])
+            del self.messages[body['message_id']]
+            return {'ok': True, 'result': True}
+        return {'ok': False, 'description': 'unknown method'}
+
+
+class RecallTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix='recall-test-'))
+        self.state = self.dir / 'state'
+        self.state.mkdir()
+        (self.state / '.env').write_text('TELEGRAM_BOT_TOKEN=123:abc\n')
+        (self.state / 'access.json').write_text(json.dumps({'allowFrom': [CHAT]}))
+        self.now = int(time.time())
+        recall.LOG = self.dir / 'recall.jsonl'  # never write the live log
+
+    def transcript(self, *, anchor=100, unresolved=1):
+        rows = [{'message': {'content': [{'type': 'text', 'text': f'<channel source="telegram" chat_id="{CHAT}" message_id="{anchor - 1}">hi</channel>'}]}},
+                {'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'old', 'content': f'sent (id: {anchor})'}]}},
+                {'message': {'content': [{'type': 'tool_use', 'id': 'old', 'name': 'x', 'input': {}}]}}]
+        for index in range(unresolved):
+            rows.append({'message': {'content': [{'type': 'tool_use', 'id': f'open{index}', 'name': 'Bash', 'input': {}}]}})
+        path = self.dir / 'transcript.jsonl'
+        path.write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
+        return str(path)
+
+    def run_sweep(self, fake, **kwargs):
+        event = {'session_id': 's', 'transcript_path': self.transcript(**kwargs)}
+        return recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=1.2)
+
+    def test_deletes_only_the_windowed_permission_prompt(self):
+        fake = FakeTelegram({
+            101: {'kind': 'user', 'text': 'Admiral words', 'buttons': False, 'date': self.now},
+            102: {'kind': 'bot', 'text': 'my plain reply', 'buttons': False, 'date': self.now},
+            103: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now},
+        })
+        self.assertEqual(self.run_sweep(fake), [103])
+        self.assertEqual(sorted(fake.messages), [101, 102])
+        self.assertEqual(fake.stripped, [103])
+
+    def test_never_touches_messages_at_or_below_the_anchor(self):
+        fake = FakeTelegram({100: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
+        self.assertEqual(self.run_sweep(fake), [])
+        self.assertEqual(fake.stripped, [])
+
+    def test_permission_prompt_outside_the_window_is_kept(self):
+        fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now - 600}})
+        self.assertEqual(self.run_sweep(fake), [])
+        self.assertIn(101, fake.messages)
+
+    def test_buttoned_non_permission_message_is_kept(self):
+        fake = FakeTelegram({101: {'kind': 'bot', 'text': 'something else', 'buttons': True, 'date': self.now}})
+        self.assertEqual(self.run_sweep(fake), [])
+        self.assertIn(101, fake.messages)
+
+    def test_skips_entirely_while_another_request_is_pending(self):
+        fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
+        self.assertEqual(self.run_sweep(fake, unresolved=2), [])
+        self.assertEqual(fake.stripped, [])
+
+    def test_prompt_that_arrives_late_is_still_caught(self):
+        fake = FakeTelegram({})
+        timer = threading.Timer(0.4, lambda: fake.messages.__setitem__(101, {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}))
+        timer.start()
+        self.assertEqual(self.run_sweep(fake), [101])
+
+    def test_no_state_or_ambiguous_chat_does_nothing(self):
+        fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
+        (self.state / 'access.json').write_text(json.dumps({'allowFrom': [CHAT, '222']}))
+        self.assertEqual(self.run_sweep(fake), [])
+        self.assertEqual(fake.stripped, [])
+
+
+if __name__ == '__main__':
+    unittest.main()
+#+END_SRC
