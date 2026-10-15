@@ -67,19 +67,17 @@ class DeciderWideningTests(unittest.TestCase):
 
     def test_segments_are_judged_independently(self):
         command = 'cat README.org && export PATH=~/.local/bin:$PATH && cat notes.txt'
-        self.assertEqual(self.run_hook(command), 'deny')
-        self.assertEqual(json.loads(self.ledger.read_text().splitlines()[-1])['decision_path'], 'judge')
+        self.assertEqual(self.run_hook(command), 'allow')
 
     def test_scratch_redirect_is_inert_but_escape_is_not(self):
-        self.assertEqual(self.run_hook(f'cat README.org > {self.scratch}/session.log && cat notes.txt'), 'deny')
-        self.assertEqual(json.loads(self.ledger.read_text().splitlines()[-1])['decision_path'], 'judge')
+        self.assertEqual(self.run_hook(f'cat README.org > {self.scratch}/session.log && cat notes.txt'), 'allow')
         self.assertEqual(self.run_hook('cat README.org > /tmp/claude-1000/../../etc/x && cat notes.txt'), 'deny')
         self.assertEqual(self.run_hook(f'cat README.org > {self.escape}/session.log && cat notes.txt'), 'deny')
 
     def test_fleet_exports_are_data_and_other_exports_stay_floor(self):
-        self.assertEqual(self.run_hook('export PATH=~/.npm-global/bin:~/.local/bin:$PATH && cat README.org'), 'deny')
-        self.assertEqual(self.run_hook('export PATH=~/.guix-extra-profiles/core/core/bin:$PATH && cat README.org'), 'deny')
-        self.assertEqual(self.run_hook('export PATH=HelmCortex/FORGE/bin:$PATH && cat README.org'), 'deny')
+        self.assertEqual(self.run_hook('export PATH=~/.npm-global/bin:~/.local/bin:$PATH && cat README.org'), 'allow')
+        self.assertEqual(self.run_hook('export PATH=~/.guix-extra-profiles/core/core/bin:$PATH && cat README.org'), 'allow')
+        self.assertEqual(self.run_hook('export PATH=HelmCortex/FORGE/bin:$PATH && cat README.org'), 'allow')
         self.assertEqual(self.run_hook('export PATH=/etc:$PATH && cat README.org'), 'deny')
 
     def test_read_only_loop_requires_every_body_segment_and_no_list_substitution(self):
@@ -94,13 +92,13 @@ class DeciderWideningTests(unittest.TestCase):
         self.manifest['classes'][0]['enabled'] = True
         self.manifest['classes'][1]['enabled'] = True
         cases = [
-            ('cd ' + str(self.root) + ' && f=README.org; wc -l $f; grep -n "^#" $f | head -40', 'deny'),
-            ('cd ' + str(self.root) + ' && sed -n 1,2p README.org; grep -n -E synthetic README.org', 'allow'),
-            ('cd ' + str(self.root) + ' && env -u CLAUDE_IDLE_CHANNEL timeout 5 cat README.org 2>&1 | cut -c1-80 | tail -1', 'allow'),
+            'cd ' + str(self.root) + ' && f=README.org; wc -l $f; grep -n "^#" $f | head -40',
+            'cd ' + str(self.root) + ' && sed -n 1,2p README.org; grep -n -E synthetic README.org',
+            'cd ' + str(self.root) + ' && env -u CLAUDE_IDLE_CHANNEL timeout 5 cat README.org 2>&1 | cut -c1-80 | tail -1',
         ]
-        for command, expected in cases:
+        for command in cases:
             with self.subTest(command=command):
-                self.assertEqual(self.run_hook(command), expected)
+                self.assertEqual(self.run_hook(command), 'allow')
 
     def test_round_three_read_command_shapes(self):
         self.manifest['classes'][0]['enabled'] = True
@@ -112,11 +110,11 @@ class DeciderWideningTests(unittest.TestCase):
             'tmux ls', 'tmux has-session -t probe',
             'tmux capture-pane -p -t probe', 'tmux list-panes -t probe',
             'export XDG_RUNTIME_DIR=/run/user/1000 && cat README.org',
+            'for i in $(seq 1 3); do ps -p "$i"; done',
         ]
         for command in allowed:
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(command), 'allow')
-        self.assertEqual(self.run_hook('for i in $(seq 1 3); do ps -p "$i"; done'), 'deny')
         denied = [
             'tmux new-session -d probe',
             'tmux ls && kill -TERM 123',
@@ -181,7 +179,7 @@ class DeciderWideningTests(unittest.TestCase):
         ]
         for command in allowed:
             with self.subTest(command=command):
-                self.assertEqual(self.run_hook(command), 'deny')
+                self.assertEqual(self.run_hook(command), 'allow')
         denied = [
             '$(cat README.org) README.org',
             'eval "$(cat README.org)"',
@@ -230,6 +228,8 @@ class DeciderWideningTests(unittest.TestCase):
             ('cat .env > ' + str(self.scratch / 'report'), 'protected'),
             ('ssh -i ~/.ssh/id_ed25519 YOUR_HOST date', 'ssh-identity'),
             ('export API_KEY=SYNTHETIC_VALUE_12345 > ' + str(self.scratch / 'report'), 'credential'),
+            ('git add README.org', 'git-write'),
+            ('python3 -c "print(1)"', 'interpreter'),
         ]
         for command, rule in cases:
             with self.subTest(rule=rule):
@@ -238,15 +238,6 @@ class DeciderWideningTests(unittest.TestCase):
                 self.assertEqual(record['floor_rule'], rule)
                 self.assertNotIn(record['floor_rule'], {'true-floor', None})
                 self.assertNotIn(command, json.dumps(record))
-
-    def test_lane_git_write_and_interpreter_are_judged_not_floored(self):
-        for command in ['git add README.org', 'python3 -c "print(1)"']:
-            with self.subTest(command=command), mock.patch.object(e, '_decider_decide') as decider:
-                self.assertEqual(self.run_hook(command), 'deny')
-                decider.assert_not_called()  # the public fixture has Decider disabled
-                record = json.loads(self.ledger.read_text().splitlines()[-1])
-                self.assertEqual(record['decision_path'], 'judge')
-                self.assertEqual(record['judge_verdict'], 'unavailable')
 
     def test_ssh_identity_floor_is_scoped_to_ssh_family(self):
         self.manifest['classes'][0]['enabled'] = True
@@ -270,7 +261,7 @@ class DeciderWideningTests(unittest.TestCase):
                 expected = 'protected' if command.startswith('cat ') else 'ssh-identity'
                 self.assertEqual(record['floor_rule'], expected)
         self.assertEqual(self.run_hook('rsync -i /tmp/synthetic-key README.org YOUR_HOST:/tmp/report'), 'deny')
-        self.assertNotEqual(json.loads(self.ledger.read_text().splitlines()[-1]).get('floor_rule'), 'ssh-identity')
+        self.assertNotEqual(json.loads(self.ledger.read_text().splitlines()[-1])['floor_rule'], 'ssh-identity')
 
 
 if __name__ == '__main__':

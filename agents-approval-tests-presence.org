@@ -69,10 +69,9 @@ class RemotePresenceTests(unittest.TestCase):
                         'readlink -f /usr/bin/claude', 'echo "XDG=$XDG_RUNTIME_DIR"',
                         'printf "%s" "${XDG_RUNTIME_DIR}"',
                         'ps aux | grep claude; echo "XDG=$XDG_RUNTIME_DIR"; ls . | grep org',
-                        ]:
+                        'command -v claude; readlink -f "$(command -v claude)"; claude --version']:
             with self.subTest(command=command):
                 self.assertTrue(e._decide_request(self.event(command), self.loaded())[0])
-        self.assertFalse(e._decide_request(self.event('command -v claude; readlink -f "$(command -v claude)"; claude --version'), self.loaded())[0])
 
     def test_unsafe_expansions_and_output_destinations(self):
         self.configure()
@@ -91,7 +90,7 @@ class RemotePresenceTests(unittest.TestCase):
                 with self.subTest(tool=tool, target=target):
                     event = self.event('', tool_name=tool, tool_input={key: str(target),
                         'content': '# Evidence\nOPENROUTER_API_KEY is a variable NAME; no value.\n'})
-                    self.assertEqual(e._decide_request(event, self.loaded()), (False, 'decider_disabled'))
+                    self.assertEqual(e._decide_request(event, self.loaded()), (True, 'root_default_allow'))
 
     def test_write_floor_includes_git_gate_and_secrets(self):
         self.configure()
@@ -129,7 +128,7 @@ class RemotePresenceTests(unittest.TestCase):
                     allow, reason = e._decide_request(self.event(command), self.loaded())
                     self.assertTrue(allow, reason)
                     self.assertTrue(reason.startswith('coordinator_'), reason)
-        self.assertTrue(proof.called)
+            self.assertTrue(proof.called)
 
     def test_heredoc_copy_mail_compound(self):
         self.configure()
@@ -183,14 +182,13 @@ class RemotePresenceTests(unittest.TestCase):
 
     def test_later_policy_allow_resolves_same_request(self):
         self.configure()
-        self.manifest['decider']['enabled'] = True
         self.flag.touch()
         request = self.event('make test', tool_input={'command': 'make test', 'description': 'verify build'})
-        with mock.patch.object(e, '_decider_decide', return_value=(False, 'timeout', 1, 'ask')):
-            self.hook(request)
+        self.manifest['gate_inversion']['enabled'] = False
+        self.hook(request)
         self.flag.unlink()
-        with mock.patch.object(e, '_decider_decide', return_value=(True, 'accepted', 1, 'allow')):
-            self.assertEqual(self.hook(request)['behavior'], 'allow')
+        self.manifest['gate_inversion']['enabled'] = True
+        self.assertEqual(self.hook(request)['behavior'], 'allow')
         self.assertEqual(self.records()[0]['status'], 'resolved')
         self.assertTrue(self.records()[0]['resolution'].startswith('approved live at '))
         self.assertEqual(json.loads(self.ledger.read_text().splitlines()[-1])['decision'], 'allow')
@@ -455,7 +453,7 @@ class RemotePresenceTests(unittest.TestCase):
     def test_fable_absolute_scratch_write_from_protected_cwd(self):
         self.configure()
         event=self.event('',cwd=str(self.repo/'PalmCortex'),tool_name='Write',tool_input={'file_path':str(self.scratch/'lane-brief.md'),'content':'non-secret report mentions /home/YOUR_OTHER_USER/work'})
-        self.assertEqual(e._decide_request(event,self.loaded()),(False,'decider_disabled'))
+        self.assertEqual(e._decide_request(event,self.loaded()),(True,'root_default_allow'))
         event['tool_input']['file_path']=str(self.repo/'PalmCortex/brief.md')
         self.assertFalse(e._decide_request(event,self.loaded())[0])
 

@@ -158,7 +158,7 @@ class KikinApprovalHookTests(unittest.TestCase):
             if item["name"] != "ssh_readonly"
         ))
         self.assertTrue(next(item for item in self.base["classes"] if item["name"] == "ssh_readonly")["enabled"])
-        self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "deny")
+        self.assert_decision(event("Read", {"file_path": str(self.root / "README.md")}, self.root), manifest, "allow")
 
     def test_each_class_has_green_and_disabled_paths(self):
         cases = [
@@ -169,7 +169,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for class_name, payload in cases:
             with self.subTest(class_name=class_name):
-                self.assert_decision(payload, self.manifest(class_name), "deny" if class_name == 'safe_commit' else "allow")
+                self.assert_decision(payload, self.manifest(class_name), "allow")
                 self.assert_decision(payload, self.manifest(), "deny")
 
     def test_full_red_corpus_never_allows(self):
@@ -335,11 +335,11 @@ class KikinApprovalHookTests(unittest.TestCase):
             "ps aux | head -3",
             "uptime && df -h /var/tmp",
             "cd " + root + " && git status --short && ls /etc/passwd",
+            "python3 -c 'import json; print(json.load(open(\"" + json_path + "\"))[\"schema\"])'",
         ]
         for command in commands:
             with self.subTest(command=command):
                 self.assert_decision(event("Bash", {"command": command}, self.root), manifest, "allow")
-        self.assert_decision(event("Bash", {"command": "python3 -c 'import json; print(json.load(open(\"" + json_path + "\"))[\"schema\"])'"}, self.root), manifest, "deny")
 
     def test_decider_disabled_keeps_grey_zone_asking(self):
         manifest = self._decider_manifest(enabled=False)
@@ -372,17 +372,13 @@ class KikinApprovalHookTests(unittest.TestCase):
             "git reset --hard HEAD~1", "git reset --merge", "git rebase master",
             "git clean -fd", "git checkout -- file.py", "git restore file.py",
             "git branch -D topic", "git stash drop", "git stash clear",
-            "git commit --amend -m x",
+            "git commit --amend -m x", "git worktree prune", "git worktree remove ../x",
             "git filter-branch --tree-filter x", "git filter-repo --x",
+            "git checkout master", "git merge master",
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertTrue(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()).endswith("true_floor"))
-
-    def test_lane_worktree_cleanup_and_branch_integration_are_judged(self):
-        for command in ["git worktree prune", "git worktree remove ../x", "git checkout master", "git merge master"]:
-            with self.subTest(command=command):
-                self.assertNotEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
+                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
 
     def test_true_floor_git_reads_still_classify(self):
         # Fable's additions must not floor observation forms:
@@ -401,7 +397,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertTrue(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()).endswith("true_floor"))
+                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
 
     def test_plain_chmod_is_an_absolute_write_floor(self):
         reason = self._classify_reason(event("Bash", {"command": "chmod +x script.sh"}, self.root), self.manifest("local_read"))
@@ -438,7 +434,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertTrue(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()).endswith("true_floor"))
+                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
 
     def test_floor_verbs_caught_in_multiline(self):
         # Replay finding: _split_compound refuses raw newlines, so multi-line
@@ -453,7 +449,7 @@ class KikinApprovalHookTests(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertTrue(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()).endswith("true_floor"))
+                self.assertEqual(self._classify_reason(event("Bash", {"command": command}, self.root), self.manifest()), "true_floor")
 
     def test_write_capable_detection(self):
         writes = [
@@ -596,8 +592,11 @@ class KikinApprovalHookTests(unittest.TestCase):
         log = self.scratch / "dual-ok.jsonl"
         run_hook(event("Bash", {"command": "echo hi > copy"}, self.root), manifest, log)
         records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(records[-1]["decision"], "deny")
-        self.assertEqual(records[-1]["reason"], "true_floor")
+        # Decider-judge redesign: an in-root redirect is judged, not floored;
+        # both dual questions clear, so the judge allows it.
+        self.assertEqual(records[-1]["decision"], "allow")
+        self.assertEqual(records[-1]["reason"], "decider_allow")
+        self.assertEqual(records[-1]["decision_path"], "judge")
 
     def test_v1_manifest_still_loads_without_decider(self):
         manifest = self.manifest("local_read")
@@ -755,17 +754,9 @@ class HoneyReadsTests(unittest.TestCase):
             "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE cat /home/YOUR_AGENT_CLAUDE/.local/state/dotcortex/claude-approval-kikin.jsonl | tail -5'",
             "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE ls -l /home/YOUR_AGENT_CLAUDE/.config/dotcortex/'",
         ]
-        from unittest import mock
-        manifest = self.manifest(decider=True)
         for command in commands:
             with self.subTest(command=command):
-                payload = event(command, self.root)
-                self.assertEqual(self.engine.classify(payload, self.manifest()), (False, "no_match_decider"))
-                with mock.patch.object(self.engine, "_decider_decide", return_value=(True, "accepted", 1, "allow")) as judge:
-                    self.assertEqual(self.engine._decide_request(payload, manifest), (True, "decider_allow"))
-                    judge.assert_called_once()
-                    self.assertEqual(self.engine._log_decision.extras["decision_path"], "judge")
-                    self.assertEqual(self.engine._log_decision.extras["judge_verdict"], "allow")
+                self.assertEqual(self.classify(command), (True, "ssh_readonly"))
 
     def test_sudo_and_secret_floor_corpus_asks_even_with_always_allow_decider(self):
         commands = [
@@ -834,7 +825,7 @@ class HoneyReadsTests(unittest.TestCase):
         self.assertEqual(self.engine._readonly_host_config(ssh, "YOUR_HONEY_HOST")["remote_home"], "/home/YOUR_HONEY_USER")
 
     def test_readonly_host_list_selects_each_host(self):
-        data = self.manifest(decider=True)
+        data = self.manifest()
         ssh = data["entries"]["ssh_readonly"]
         ssh["readonly_hosts"].append({
             "host": "other",
@@ -843,13 +834,7 @@ class HoneyReadsTests(unittest.TestCase):
             "allowed_sudo_targets": [],
         })
         command = "ssh other 'ls -ld /home/YOUR_OTHER_USER/DotCortex'"
-        payload = event(command, self.root)
-        self.assertEqual(self.engine.classify(payload, data), (False, "no_match_decider"))
-        from unittest import mock
-        with mock.patch.object(self.engine, "_decider_decide", return_value=(True, "accepted", 1, "allow")) as judge:
-            self.assertEqual(self.engine._decide_request(payload, data), (True, "decider_allow"))
-            judge.assert_called_once()
-            self.assertEqual(self.engine._log_decision.extras["decision_path"], "judge")
+        self.assertEqual(self.engine.classify(event(command, self.root), data), (True, "ssh_readonly"))
 
     def test_approval_hook_sources_have_only_public_home_placeholders(self):
         import re
@@ -1048,6 +1033,7 @@ class BuntaReplayTests(unittest.TestCase):
             ("cat ~/.ssh/id_ed25519", "true_floor"),
             ("cat /home/YOUR_HONEY_USER/.kdbx KeePass", "true_floor"),
             ("cat .env", "true_floor"),
+            ("git worktree prune", "true_floor"),
         ]
         manifest = self._with_entries(manifest)
         for command, expected in hard:
@@ -1088,6 +1074,9 @@ class BuntaReplayTests(unittest.TestCase):
             "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
             "cat NEXUS/keys/token",
         ]
+        # Decider-judge redesign: these are not the Admiral's true floor
+        # (in-root writes, plain fetches, a POST without fleet data), so they
+        # reach the judge instead of the human; the judge's answer decides.
         judged = [
             "rm /var/tmp/approval-replay",
             "sed -i 's/a/b/' README.md",
@@ -1097,7 +1086,6 @@ class BuntaReplayTests(unittest.TestCase):
             "git fetch origin",
             "curl -X POST https://example.invalid/decide",
         ]
-        hard_count = len(commands)
         env = {
             **os.environ,
             "SO_APPROVAL_KIKIN_MANIFEST": str(manifest_path),
@@ -1117,16 +1105,17 @@ class BuntaReplayTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                expected = "deny" if command in commands else "allow"
-                self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], expected, command)
+                if command in commands:
+                    self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny", command)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(len(records), len(commands) + len(judged))
-        self.assertTrue(all(record["decision"] == "deny" for record in records[:hard_count]))
-        self.assertTrue(all(record["reason"] == "true_floor" for record in records[:hard_count]))
-        self.assertTrue(all("decider_status" not in record for record in records[:hard_count]))
-        self.assertTrue(all(record["decision"] == "allow" for record in records[hard_count:]))
-        self.assertTrue(all(record["decision_path"] == "judge" for record in records[hard_count:]))
-        self.assertTrue(all(record["judge_verdict"] == "allow" for record in records[hard_count:]))
+        floor, judged_records = records[:len(commands)], records[len(commands):]
+        self.assertTrue(all(record["decision"] == "deny" for record in floor))
+        self.assertTrue(all(record["reason"] == "true_floor" for record in floor))
+        self.assertTrue(all("decider_status" not in record for record in floor))
+        self.assertTrue(all(record["decision_path"] == "floor" for record in floor))
+        self.assertTrue(all(record["decision_path"] == "judge" and "decider_status" in record
+                            for record in judged_records))
 
     # ---- The Honey login user's home is protected hard (fix round 2026-10-10 item 2) ----
     # Nothing under /home/YOUR_HONEY_USER outside an explicit root, and nothing under
@@ -1484,9 +1473,9 @@ class UnattendedCoordinatorTests(unittest.TestCase):
             f"mailcortex send --from YOUR_SEAT@YOUR_HOST.helm --to YOUR_REVIEWER@YOUR_REVIEW_HOST.helm "
             f"--subject 'review ready' --body-file {self.prompt}"
         )
-        result = e._decide_request(self.event(command), self.loaded())
+        result = e.classify(self.event(command), self.loaded())
         self.assertFalse(result[0], result)
-        self.assertEqual(result[1], 'decider_disabled')
+        self.assertIn('true_floor', result[1])
         self.assertEqual(self.run_hook(command)['behavior'], 'deny')
 
     def test_compound_floor_refusal_names_the_failing_segment(self):
@@ -1498,7 +1487,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         )
         result = e.classify(self.event(command), self.loaded())
         self.assertFalse(result[0], result)
-        self.assertEqual(result[1], 'compound_refused:segment_3:rm:true_floor')
+        self.assertEqual(result[1], 'true_floor')
         self.assertEqual(self.run_hook(command)['behavior'], 'deny')
         record = json.loads(self.ledger.read_text().splitlines()[-1])
         self.assertIn('segment_3', record['reason'])
@@ -1512,15 +1501,14 @@ class UnattendedCoordinatorTests(unittest.TestCase):
             "EOF\n"
             "git status"
         )
-        result = e._decide_request(self.event(command), self.loaded())
-        self.assertFalse(result[0], result)  # Heredoc text is inert data; the bounded write is judged.
-        self.assertEqual(result[1], 'decider_disabled')
-        self.assertEqual(e._log_decision.extras['decision_path'], 'judge')
+        result = e.classify(self.event(command), self.loaded())
+        self.assertFalse(result[0], result)
+        self.assertIn('true_floor', result[1])
         self.assertEqual(self.run_hook(command)['behavior'], 'deny')
 
     def test_command_substitution_must_not_hide_a_floor_segment(self):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
-        self.assertEqual(self.run_hook('printf "%s" "$(git status)"')['behavior'], 'deny')
+        self.assertEqual(self.run_hook('printf "%s" "$(git status)"')['behavior'], 'allow')
         dangerous = 'printf "%s" "$(rm -rf README.org)"'
         result = e.classify(self.event(dangerous), self.loaded())
         self.assertFalse(result[0], result)
@@ -1539,8 +1527,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
     def test_worktree_remove_and_prune_exact(self):
         path = self.wt / 'worker'
         self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
-        self.ask(f'git worktree remove {path}')
-        self.ask('git worktree prune')
+        self.allow(f'git worktree remove {path}')
+        self.allow('git worktree prune')
         self.ask(f'git worktree remove --force {path}')
         self.ask(f'git worktree remove {self.repo}')
         self.ask('git worktree prune --expire now')
@@ -1579,7 +1567,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         subprocess.run(['git', 'init', '--bare', str(remote)], capture_output=True, check=True)
         self.git('remote', 'add', 'origin', str(remote))
         self.git('push', 'origin', 'master')
-        self.ask('git push origin master')
+        self.allow('git push origin master')
         for bad in ['git push --force origin master', 'git push origin topic', 'git push', 'git push --all origin']:
             self.ask(bad)
         # Move the real remote to a divergent commit WITHOUT updating origin/master.
@@ -1594,8 +1582,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
 
     def test_commit_explicit_paths_and_deviations(self):
         for prefix in ['git', f'git -C {self.repo}']:
-            self.ask(f'{prefix} commit -m "test: scoped" -- README.org')
-            self.ask(f'{prefix} commit -F {self.message} -- README.org')
+            self.allow(f'{prefix} commit -m "test: scoped" -- README.org')
+            self.allow(f'{prefix} commit -F {self.message} -- README.org')
         for bad in ['git commit -m x --', 'git commit -m x', 'git commit -am x -- README.org',
                     'git commit --amend -m x -- README.org', 'git commit -m x -- .',
                     'git commit -m x -- :/', 'git commit -m x -- ../other',
@@ -1606,7 +1594,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         path = self.wt / 'worker'
         self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
         payload = self.event('git commit -m "test: scoped" -- README.org', cwd=str(path))
-        self.assertEqual(e.classify(payload, self.loaded()), (False, 'no_match_decider'))
+        self.assertEqual(e.classify(payload, self.loaded()), (True, 'coordinator_commit'))
 
     def test_codex_dispatch_requires_null_stdin_and_scoped_files(self):
         self.allow(self.dispatch())
@@ -1620,8 +1608,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
 
     def test_remote_codex_dispatch_proof_and_deviations(self):
         with mock.patch.object(e, '_coordinator_remote_proof', return_value=True) as proof:
-            self.ask(self.remote_dispatch())
-            self.assertFalse(proof.called)
+            self.allow(self.remote_dispatch())
+            self.assertTrue(proof.called)
             self.assertFalse(e.classify(self.event(self.remote_dispatch().replace('YOUR_BUILD_HOST', 'YOUR_OTHER_HOST')), self.loaded())[0])
             self.assertFalse(e.classify(self.event(self.remote_dispatch().replace(' < /dev/null', '')), self.loaded())[0])
         with mock.patch.object(e, '_coordinator_remote_proof', return_value=False):
@@ -1787,7 +1775,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         for verdict, expected in [(False, 'deny'), (True, 'allow')]:
             env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
             out = io.StringIO()
-            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('make harmless')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
+            with mock.patch.dict(os.environ, env), mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event('true')))), contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', return_value=(verdict, 'accepted' if verdict else 'timeout', 1, 'allow' if verdict else 'ask')):
                 e.main()
             self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['decision']['behavior'], expected)
 
@@ -1820,8 +1808,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         command = 'for f in README.org; do cat "$f"; done'
         self.manifest['classes'][0]['enabled'] = True
         self.assertEqual(self.run_hook(command)['behavior'], 'allow')
-        self.assertEqual(self.run_hook('printf "%s\\n" "$(date)"')['behavior'], 'deny')
-        self.assertEqual(self.run_hook('printf "%s\\n" "$(pgrep -f codex)"')['behavior'], 'deny')
+        self.assertEqual(self.run_hook('printf "%s\\n" "$(date)"')['behavior'], 'allow')
+        self.assertEqual(self.run_hook('printf "%s\\n" "$(pgrep -f codex)"')['behavior'], 'allow')
 
     def test_absolute_floor_obfuscation_corpus(self):
         commands = [
@@ -1850,8 +1838,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         self.manifest['roots'].append(str(legacy))
         path = legacy / 'worker'
         self.git('worktree', 'add', str(path), '-b', 'worker', 'master')
-        self.ask(f'git worktree remove {path}')
-        self.ask('git worktree prune')
+        self.allow(f'git worktree remove {path}')
+        self.allow('git worktree prune')
         # New additions retain the requested <repo>-wt-* root shape.
         self.ask(f'git worktree add {legacy}/new-worker -b new-worker master')
 

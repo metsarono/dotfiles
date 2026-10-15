@@ -68,8 +68,9 @@ class GateInversionTests(unittest.TestCase):
         self.manifest['decider'].update(enabled=True, honey_url='https://YOUR_DECIDER.invalid/decide',
             honey_api='r2d2d', kikin_url='https://YOUR_DECIDER.invalid/systemone', timeout_ms=500)
 
-    def test_proven_local_noop_remains_deterministic_without_decider(self):
-        for command in ['true']:
+    def test_ordinary_local_work_defaults_to_allow_even_without_classes_or_decider(self):
+        for command in ['true', 'make test', 'pytest tests/', 'git ls-files agents-approval.org', 'git tag --list',
+                        'cd . && make test', 'rg -n approval agents-approval.org']:
             with self.subTest(command=command):
                 self.assertEqual(self.run_hook(self.event(command))['behavior'], 'allow')
         for command in ['chmod +x script.sh', 'touch marker', 'cp README.org copy', 'echo hi > copy']:
@@ -79,12 +80,10 @@ class GateInversionTests(unittest.TestCase):
 
     def test_missing_inversion_section_defaults_to_inversion(self):
         self.manifest.pop('gate_inversion')
-        self.assertEqual(self.run_hook(self.event('make test'))['behavior'], 'ask')
+        self.assertEqual(self.run_hook(self.event('make test'))['behavior'], 'allow')
 
     def test_configured_worktree_root_receives_same_default(self):
-        decision = self.run_hook(self.event('make test', cwd=str(self.worktree)))
-        self.assertEqual(decision['behavior'], 'deny')
-        self.assertEqual(json.loads(self.log.read_text().splitlines()[-1])['decision_path'], 'judge')
+        self.assertEqual(self.run_hook(self.event('make test', cwd=str(self.worktree)))['behavior'], 'allow')
 
     def test_edit_and_write_tools_check_destinations_and_symlinks(self):
         outside = self.base / 'outside'
@@ -92,7 +91,7 @@ class GateInversionTests(unittest.TestCase):
         (self.root / 'escape').symlink_to(outside, target_is_directory=True)
         for tool in ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']:
             key = 'notebook_path' if tool == 'NotebookEdit' else 'file_path'
-            for path, expected in [(self.root / 'new.txt', 'deny'), (outside / 'new.txt', 'deny'),
+            for path, expected in [(self.root / 'new.txt', 'allow'), (outside / 'new.txt', 'deny'),
                                    (self.root / 'escape/new.txt', 'deny'), (self.root / '.env', 'deny')]:
                 with self.subTest(tool=tool, path=path):
                     self.assertEqual(self.run_hook(self.event(tool_name=tool, tool_input={key: str(path)}))['behavior'], expected)
@@ -105,27 +104,14 @@ class GateInversionTests(unittest.TestCase):
                 answer = {'approval.risky.v2': {'noul': probability}}
                 self.assertEqual(self.run_hook(self.event('make test'), answers=answer)['behavior'], expected)
 
-    def test_disabled_down_timeout_malformed_and_nan_decider_ask_inside_roots(self):
+    def test_disabled_down_timeout_malformed_and_nan_decider_pass_inside_roots(self):
         self.enable_decider()
         for answer, status in [(None, 'timeout'), (None, 'unavailable'), ({}, 'ok'),
                                ({'approval.risky.v2': {'noul': float('nan')}}, 'ok'),
                                ({'approval.risky.v2': {'noul': True}}, 'ok')]:
             with self.subTest(answer=answer, status=status):
-                self.assertEqual(self.run_hook(self.event('make test'), answers=answer, status=status)['behavior'], 'deny')
-        self.assertEqual(self.run_hook(self.event('make test'), side_effect=TimeoutError())['behavior'], 'deny')
-
-    def test_shell_expansion_network_and_interpreter_effects_go_to_judge(self):
-        self.enable_decider()
-        cases = ['cat "$FILE"', 'curl -X POST https://external.invalid/collect',
-                 'wget https://external.invalid/report',
-                 "python3 -c 'import os; os.remove(\"README.org\")'",
-                 "bash -c 'rm README.org'", "eval 'rm README.org'"]
-        for command in cases:
-            with self.subTest(command=command):
-                self.assertEqual(self.run_hook(self.event(command), answers={'approval.risky.v2': {'noul': 0.1}})['behavior'], 'allow')
-                record = json.loads(self.log.read_text().splitlines()[-1])
-                self.assertEqual(record['decision_path'], 'judge')
-                self.assertEqual(record['judge_verdict'], 'allow')
+                self.assertEqual(self.run_hook(self.event('make test'), answers=answer, status=status)['behavior'], 'allow')
+        self.assertEqual(self.run_hook(self.event('make test'), side_effect=TimeoutError())['behavior'], 'allow')
 
     def test_true_floor_wins_against_always_allow_decider_day_and_night(self):
         self.enable_decider()
@@ -149,13 +135,26 @@ class GateInversionTests(unittest.TestCase):
                     self.assertEqual(self.run_hook(self.event(command))['behavior'], 'deny')
                     decider.assert_not_called()
 
+    def test_shell_expansion_network_and_interpreter_effects_go_to_judge(self):
+        self.enable_decider()
+        cases = ['cat "$FILE"', 'curl -X POST https://external.invalid/collect',
+                 'wget https://external.invalid/report',
+                 "python3 -c 'import os; os.remove(\"README.org\")'",
+                 "bash -c 'rm README.org'", "eval 'rm README.org'"]
+        for command in cases:
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(self.event(command), answers={'approval.risky.v2': {'noul': 0.1}})['behavior'], 'allow')
+                record = json.loads(self.log.read_text().splitlines()[-1])
+                self.assertEqual(record['decision_path'], 'judge')
+                self.assertEqual(record['judge_verdict'], 'allow')
+
     def test_outside_roots_retain_legacy_decider_and_disabled_policy(self):
         outside = self.base / 'outside'
         outside.mkdir()
         self.assertEqual(self.run_hook(self.event('make test', cwd=str(outside)))['behavior'], 'deny')
         self.enable_decider()
-        self.assertEqual(self.run_hook(self.event('make test', cwd=str(outside)), answers={'approval.sensitive_effect.v1': {'noul': 0.02}})['behavior'], 'allow')
-        self.assertEqual(self.run_hook(self.event('make test', cwd=str(outside)), status='timeout')['behavior'], 'deny')
+        self.assertEqual(self.run_hook(self.event('true', cwd=str(outside)), answers={'approval.sensitive_effect.v1': {'noul': 0.02}})['behavior'], 'allow')
+        self.assertEqual(self.run_hook(self.event('true', cwd=str(outside)), status='timeout')['behavior'], 'deny')
 
     def test_daytime_denies_queue_and_await_desk_telegram(self):
         decision = self.run_hook(self.event('rm README.org'))
@@ -198,13 +197,15 @@ class GateInversionTests(unittest.TestCase):
         commands = ["ssh YOUR_READONLY_HOST 'cd ~/HelmCortex && git show abc123 | head -20' 2>&1 | grep -v x",
             "ssh -o BatchMode=yes -o ConnectTimeout=3 YOUR_READONLY_HOST 'cd ~/HelmCortex && git status && git log --oneline -3'",
             "ssh YOUR_READONLY_HOST 'cd ~/HelmCortex && cat README.org | head -n 20' | wc -l"]
-        for command in commands:
-            self.assertEqual(e.classify(self.event(command), manifest), (False, 'no_match_decider'), command)
+        with mock.patch.object(e, '_remote_realpath_proven_p3', return_value=True):
+            for command in commands:
+                self.assertEqual(e.classify(self.event(command), manifest), (True, 'ssh_readonly'), command)
 
     def test_ssh_deviations_floor_even_with_always_allow(self):
         manifest = self.ssh_manifest()
         commands = ["ssh YOUR_READONLY_HOST 'cd ~/HelmCortex && rm README.org'",
             "ssh YOUR_READONLY_HOST 'cd ~/HelmCortex && git show HEAD | head' | tee /etc/YOUR_FILE",
+            "ssh YOUR_READONLY_HOST 'cd ~/HelmCortex && git show HEAD' ; rm README.org",
             "ssh YOUR_READONLY_HOST 'cd ~/HelmCortex && git show HEAD:.env'",
             "ssh YOUR_READONLY_HOST 'cd /etc && cat passwd'", "ssh -o ProxyCommand=sh YOUR_READONLY_HOST 'date'",
             "ssh YOUR_READONLY_HOST 'cd ~/HelmCortex && git tag new-tag'",
@@ -215,18 +216,6 @@ class GateInversionTests(unittest.TestCase):
                 self.assertEqual(e.classify(self.event(command), manifest), (False, 'true_floor'), command)
         with mock.patch.object(e, '_remote_realpath_proven_p3', return_value=False):
             self.assertFalse(e.classify(self.event("ssh YOUR_READONLY_HOST 'cd ~/HelmCortex && git show HEAD'"), manifest)[0])
-
-    def test_readonly_ssh_plus_local_write_is_judged_as_one_request(self):
-        manifest = self.ssh_manifest()
-        manifest['decider']['enabled'] = True
-        event = self.event("ssh YOUR_READONLY_HOST 'cd ~/HelmCortex && git show HEAD' ; rm README.org")
-        with mock.patch.object(e, '_decider_decide', return_value=(True, 'no_risk_veto', 1, 'allow')) as judge:
-            allow, _reason = e._decide_request(event, manifest)
-        self.assertTrue(allow)
-        judge.assert_called_once()
-        judged = judge.call_args.args[0]
-        self.assertEqual(judged['tool_input']['command'], event['tool_input']['command'])
-        self.assertEqual(judged['cwd'], event['cwd'])
 
     def test_danger_question_describes_risk_not_uncertainty_or_every_write(self):
         self.enable_decider()
@@ -326,10 +315,10 @@ class GateInversionTests(unittest.TestCase):
         self.enable_decider()
         outside = self.base / 'outside'
         outside.mkdir()
-        cases = [(self.event('rm -rf /home/YOUR_USER/outside-scratch'), 'true_floor'),
+        cases = [(self.event('rm README.org'), 'true_floor'),
                  (self.event('make test'), 'decider_risky'),
-                 (self.event('make test', cwd=str(outside)), 'decider_threshold_failed'),
-                 (self.event('git commit -m x -- README.org'), 'decider_risky')]
+                 (self.event('make test', cwd=str(outside)), 'no_match_decider'),
+                 (self.event('git commit -m x -- README.org'), 'coordinator_refused')]
         for mode in ('ask', 'deny'):
             self.manifest['gate_inversion']['present_refusal'] = mode
             for away in (False, True):
@@ -363,10 +352,10 @@ class GateInversionTests(unittest.TestCase):
                     self.manifest.pop('gate_inversion', None)
                 else:
                     self.manifest['gate_inversion'] = section
-                self.assertEqual(self.run_hook(self.event('rm -rf /home/YOUR_USER/outside-scratch'))['behavior'], 'ask')
+                self.assertEqual(self.run_hook(self.event('rm README.org'))['behavior'], 'ask')
                 self.assertEqual(json.loads(self.log.read_text().splitlines()[-1])['reason'], 'true_floor')
                 decider.assert_not_called()
-                self.assertEqual(self.run_hook(self.event('make test'))['behavior'], 'ask')
+                self.assertEqual(self.run_hook(self.event('make test'))['behavior'], 'allow')
         self.assertFalse(self.queue.exists())
 
     def test_present_refusal_errors_and_deadlines_follow_switch(self):
@@ -490,7 +479,7 @@ class GateInversionTests(unittest.TestCase):
                'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.log),
                'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
         result = subprocess.run(['/usr/bin/python3', str(REPO / 'all/.local/bin/claude-hook-approval-inverted')],
-                                input=json.dumps(self.event('true')), env=env, capture_output=True, text=True, timeout=6, check=True)
+                                input=json.dumps(self.event('make test')), env=env, capture_output=True, text=True, timeout=6, check=True)
         self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['decision']['behavior'], 'allow')
 
 

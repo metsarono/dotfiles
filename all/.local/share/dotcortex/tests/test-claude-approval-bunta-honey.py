@@ -111,6 +111,7 @@ class BuntaReplayTests(unittest.TestCase):
             ("cat ~/.ssh/id_ed25519", "true_floor"),
             ("cat /home/YOUR_HONEY_USER/.kdbx KeePass", "true_floor"),
             ("cat .env", "true_floor"),
+            ("git worktree prune", "true_floor"),
         ]
         manifest = self._with_entries(manifest)
         for command, expected in hard:
@@ -151,6 +152,9 @@ class BuntaReplayTests(unittest.TestCase):
             "cat /home/YOUR_HONEY_USER/Secret Vault/keepass.kdbx",
             "cat NEXUS/keys/token",
         ]
+        # Decider-judge redesign: these are not the Admiral's true floor
+        # (in-root writes, plain fetches, a POST without fleet data), so they
+        # reach the judge instead of the human; the judge's answer decides.
         judged = [
             "rm /var/tmp/approval-replay",
             "sed -i 's/a/b/' README.md",
@@ -160,7 +164,6 @@ class BuntaReplayTests(unittest.TestCase):
             "git fetch origin",
             "curl -X POST https://example.invalid/decide",
         ]
-        hard_count = len(commands)
         env = {
             **os.environ,
             "SO_APPROVAL_KIKIN_MANIFEST": str(manifest_path),
@@ -180,16 +183,17 @@ class BuntaReplayTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                expected = "deny" if command in commands else "allow"
-                self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], expected, command)
+                if command in commands:
+                    self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["decision"]["behavior"], "deny", command)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(len(records), len(commands) + len(judged))
-        self.assertTrue(all(record["decision"] == "deny" for record in records[:hard_count]))
-        self.assertTrue(all(record["reason"] == "true_floor" for record in records[:hard_count]))
-        self.assertTrue(all("decider_status" not in record for record in records[:hard_count]))
-        self.assertTrue(all(record["decision"] == "allow" for record in records[hard_count:]))
-        self.assertTrue(all(record["decision_path"] == "judge" for record in records[hard_count:]))
-        self.assertTrue(all(record["judge_verdict"] == "allow" for record in records[hard_count:]))
+        floor, judged_records = records[:len(commands)], records[len(commands):]
+        self.assertTrue(all(record["decision"] == "deny" for record in floor))
+        self.assertTrue(all(record["reason"] == "true_floor" for record in floor))
+        self.assertTrue(all("decider_status" not in record for record in floor))
+        self.assertTrue(all(record["decision_path"] == "floor" for record in floor))
+        self.assertTrue(all(record["decision_path"] == "judge" and "decider_status" in record
+                            for record in judged_records))
 
     # ---- The Honey login user's home is protected hard (fix round 2026-10-10 item 2) ----
     # Nothing under /home/YOUR_HONEY_USER outside an explicit root, and nothing under

@@ -257,6 +257,22 @@ def _inert_environment_export(command):
 # filesystem-writing find options. SYNTAX-only refusals (heredocs, redirections
 # inside the roots, $() substitution, unparsable quoting) are now Decider-eligible
 # instead of hard-refused: they are plumbing, not substance.
+def _floor_home_roots(manifest, coordinator=None):
+    """Reviewed roots for the home floor: policy roots plus the seat's own home."""
+    if manifest is None:
+        roots = ()
+    elif _inversion_enabled(manifest):
+        roots = tuple(_policy_roots(manifest))
+    else:
+        roots = tuple(manifest.get('roots') or ()) + tuple(manifest.get('scratch_roots') or ())
+    if coordinator is not None and manifest is not None:
+        config = _coordinator_config(manifest)
+        if config is not None:
+            roots += tuple(config['repo_roots'] + config['worktree_roots'] + config['scratch_roots'])
+    # The seat's own home is judged, never floored by name; other homes floor.
+    return roots + (os.path.realpath(os.path.expanduser('~')),)
+
+
 def _admiral_floor(event, manifest=None, coordinator=None, readonly_proven=None):
     """The Admiral's non-overridable floor; uncertainty belongs to the judge.
 
@@ -298,6 +314,24 @@ def _admiral_floor(event, manifest=None, coordinator=None, readonly_proven=None)
                     nested_event = {**event, 'tool_input': {**payload, 'command': str(body)}}
                     if _admiral_floor(nested_event, manifest, coordinator, readonly_proven):
                         return True
+    # Another user's home outside the reviewed roots is a protected path (the
+    # Honey login home carries the clinical vault); so are private Telegram logs.
+    home_roots = _floor_home_roots(manifest, coordinator)
+    for key in ('file_path', 'notebook_path', 'path', 'target'):
+        value = payload.get(key)
+        if isinstance(value, str) and (_unreviewed_home_path(value, home_roots)
+                                       or 'logs/telegram/personal' in value.casefold()):
+            return True
+    if isinstance(command, str):
+        home_scan = _strip_heredoc_bodies(command)
+        home_scan = command if home_scan is None else home_scan
+        if 'logs/telegram/personal' in home_scan.casefold():
+            return True
+        home_segments = _split_approval_compound(home_scan)
+        home_texts = [text for _separator, text in home_segments] if home_segments else [home_scan]
+        if not readonly_proven and any(not _inert_environment_export(text) and _unreviewed_home_path(text, home_roots)
+                                       for text in home_texts):
+            return True
     # Protected destinations include tool writes as well as shell redirects.
     for key in ('file_path', 'notebook_path', 'path', 'target'):
         value = payload.get(key)
@@ -829,8 +863,6 @@ def _inert_local_command(command, cwd='/'):
         return False
     if not words:
         return False
-    if words == ['true'] and command.strip() == 'true':
-        return True
     if _inert_environment_export(command):
         return True
     if re.fullmatch(r'command -v [A-Za-z0-9_.+-]+', command):
@@ -988,15 +1020,6 @@ def _shell_substitutions(command):
     return spans if quote is None else None
 
 
-def _has_shell_substitution(event):
-    payload = event.get('tool_input') if isinstance(event, dict) else None
-    command = payload.get('command') if isinstance(payload, dict) else None
-    if not isinstance(command, str):
-        return False
-    parsed = _shell_substitutions(command)
-    return parsed is None or bool(parsed)
-
-
 def _remove_shell_substitutions(command, substitutions):
     output, cursor = [], 0
     for start, end, _body in substitutions:
@@ -1019,7 +1042,7 @@ def _substitution_floor(event, manifest, coordinator=None):
             nested = {**event, 'tool_input': {**event['tool_input'], 'command': text}}
             # Authority belongs to the inner exact shape, never the outer grant.
             inner_coordinator = _coordinator_match(nested, manifest) if manifest is not None else None
-            if (_admiral_floor(nested, manifest, coordinator=inner_coordinator)
+            if (_true_floor(nested, manifest, coordinator=inner_coordinator)
                     or not _read_only_proven(nested, manifest)):
                 return True
     return False
@@ -1029,7 +1052,7 @@ def _read_only_proven(event, manifest):
     """Prove a substitution producer is an existing observation shape."""
     if not isinstance(event, dict) or not isinstance(manifest, dict):
         return False
-    if _admiral_floor(event, manifest):
+    if _true_floor(event, manifest):
         return False
     command = event.get('tool_input', {}).get('command') if isinstance(event.get('tool_input'), dict) else None
     cwd = event.get('cwd')
@@ -1884,16 +1907,14 @@ def _for_loop_body_floor(event, manifest):
     variable, literal, body = match.groups()
     items = _loop_items(literal)
     if items is None:
-        nested = {**event, 'tool_input': {**payload, 'command': body}}
-        return _admiral_floor(nested, manifest)
+        return True
     for item in items:
         replacement = shlex.quote(item)
         expanded = re.sub(r'\$\{' + re.escape(variable) + r'\}|\$' + re.escape(variable) + r'\b', replacement, body)
         if '$' + variable in expanded or '${' + variable + '}' in expanded:
-            nested = {**event, 'tool_input': {**payload, 'command': body}}
-            return _admiral_floor(nested, manifest)
+            return True
         nested = {**event, 'tool_input': {**payload, 'command': expanded}}
-        if _admiral_floor(nested, manifest):
+        if _true_floor(nested, manifest):
             return True
     return False
 
@@ -1931,8 +1952,6 @@ def _git_match(event, manifest):
     try:
         words = shlex.split(tool_input["command"], posix=True)
     except ValueError:
-        return False
-    if any(any(char in word for char in ';&|<>') for word in words):
         return False
     if not words or words[0] != "git":
         return False

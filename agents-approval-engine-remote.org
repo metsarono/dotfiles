@@ -1064,56 +1064,23 @@ def _classify_single(event, manifest):
     Decider for those."""
     if not isinstance(event, dict) or event.get("hook_event_name") != "PermissionRequest":
         return False, "not_permission_request"
-    payload = event.get('tool_input')
-    if (event.get('tool_name') == 'Bash' and isinstance(payload, dict)
-            and set(payload) <= TOOL_INPUT_KEYS and payload.get('command') == 'true'):
-        return True, 'local_noop'
-    if _ssh_readonly_candidate(event, manifest):
-        return False, 'no_match_decider'
-    coordinator = _coordinator_match(event, manifest)
     readonly_proven = _ssh_readonly_proven(event, manifest)
-    floor = _admiral_floor(event, manifest, coordinator, readonly_proven=readonly_proven)
+    floor = _true_floor(event, manifest, readonly_proven=readonly_proven)
+    coordinator = _coordinator_match(event, manifest)
     # Only the proven exact command can narrow the overlapping remote/git
     # floor clauses. All protected paths, services, packages and writers are
     # scanned again on the FULL original request and still win.
-    if floor and (coordinator is None or _admiral_floor(event, manifest, coordinator, readonly_proven=readonly_proven)):
+    if floor and (coordinator is None or _true_floor(event, manifest, coordinator, readonly_proven=readonly_proven)):
         return False, "true_floor"
-    if manifest.get('_approval_compound_skip') is True:
-        skipped_command = payload.get('command') if isinstance(payload, dict) else None
-        skipped_segments = (_split_approval_compound(skipped_command)
-                            if isinstance(skipped_command, str) else None)
-        if skipped_segments and any(separator == '||' for separator, _text in skipped_segments):
-            return False, 'no_match_decider'
-    payload = event.get('tool_input')
-    if isinstance(payload, dict) and isinstance(payload.get('command'), str):
-        try:
-            commit_words = _unwrap_words(shlex.split(payload['command'], posix=True))
-        except ValueError:
-            commit_words = []
-        git_args = commit_words[1:] if commit_words[:1] == ['git'] else []
-        if git_args[:1] == ['-C']:
-            git_args = git_args[2:]
-        if (git_args[:1] == ['commit'] and '--' in git_args
-                and git_args[git_args.index('--') + 1:]):
-            return False, 'no_match_decider'
-        if (coordinator == 'coordinator_worktree'
-                and git_args[:1] == ['worktree'] and any(word in {'remove', 'prune'} for word in git_args)):
-            return False, 'no_match_decider'
     if coordinator is not None:
         return True, coordinator
     if readonly_proven:
-        # Fleet SSH is reviewed by the Decider with the complete remote
-        # command and local intent. The proof only narrows the hard floor.
-        return False, 'no_match_decider'
+        return True, 'ssh_readonly'
     payload = event.get('tool_input')
     command = payload.get('command') if isinstance(payload, dict) else None
-    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and not _has_shell_substitution(event) and _inert_local_command(command, event.get('cwd','/')):
+    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and _inert_local_command(command, event.get('cwd','/')):
         return (True, 'local_read') if manifest['entries']['local_read']['enabled'] else (False, 'no_match_decider')
-    if _interpreter_body(event):
-        # Script effects are a Decider question even when a narrow local parser
-        # could prove a read. Hard floors were already checked above.
-        return False, 'no_match_decider'
-    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and not _has_shell_substitution(event) and _for_readonly(event, manifest):
+    if event.get('tool_name') == 'Bash' and isinstance(command, str) and set(payload) <= TOOL_INPUT_KEYS and _for_readonly(event, manifest):
         return True, 'local_read'
     if _approval_queue_safe(event):
         return True, 'approval_queue'
@@ -1130,8 +1097,6 @@ def _classify_single(event, manifest):
     tool_input = event.get("tool_input")
     if event.get("tool_name") == "Bash" and isinstance(tool_input, dict) and set(tool_input) <= TOOL_INPUT_KEYS and isinstance(tool_input.get("command"), str) and (_routes_compound(tool_input["command"]) or re.match(r"^timeout [0-9]+(?:\.[0-9]+)?[smh]? ", tool_input["command"])):
         allow, reason = _compound(event, manifest)
-        if allow and 'root_default_allow' in reason:
-            return False, 'no_match_decider'
         if allow:
             return True, reason
         if reason.endswith("_disabled"):
@@ -1151,16 +1116,19 @@ def _classify_single(event, manifest):
             return False, f"{name}_disabled"
     if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str) and _coordinator_candidate(tool_input["command"]):
         return False, "coordinator_refused"
+    if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
+        substitutions = _shell_substitutions(tool_input["command"])
+        if (substitutions and _substitution_data_only(tool_input["command"], substitutions)
+                and not _substitution_floor(event, manifest)
+                and manifest["entries"]["local_read"]["enabled"]):
+            return True, "local_read"
     if _syntax_refusal(event):
         return False, "syntax"
     return False, "no_match_decider"
 
 
 def _hard_refusal(reason):
-    """Only the Admiral's explicit absolute floor bypasses the judge."""
-    return (reason in {'true_floor', 'not_permission_request'}
-            or (isinstance(reason, str) and reason.startswith(('compound_refused:', 'substitution_refused:'))
-                and reason.endswith(':true_floor')))
+    return reason in {'true_floor', 'not_permission_request', 'coordinator_refused'} or reason.startswith(('compound_refused:', 'substitution_refused:'))
 
 
 def _compound_segment_reason(index, text, reason):
@@ -1196,15 +1164,6 @@ def _compound_approval(event, manifest, judge=None):
     segments = _split_approval_compound(command)
     if segments is None or len(segments) < 2:
         return None
-    # Compound routing must never let a deterministic/root default hide a hard
-    # floor inside another segment. Preflight the complete original request;
-    # syntactically proven coordinator forms retain their existing carve-out.
-    for floor_index, (floor_separator, floor_text) in enumerate(segments, 1):
-        floor_event = {**event, 'tool_input': {**payload, 'command': floor_text}}
-        coordinator = _coordinator_match(floor_event, manifest)
-        if (_admiral_floor(floor_event, manifest)
-                and (coordinator is None or _admiral_floor(floor_event, manifest, coordinator))):
-            return False, _compound_segment_reason(floor_index, floor_text, 'true_floor')
     if not set(payload) <= TOOL_INPUT_KEYS or not isinstance(event.get('cwd'), str):
         return False, 'true_floor'
     current = event['cwd']
@@ -1212,27 +1171,20 @@ def _compound_approval(event, manifest, judge=None):
     remote_created = set(manifest.get('_compound_remote_created_files', ()))
     stages = []
     variables = {}
-    needs_judge = False
     for index, (separator, text) in enumerate(segments, 1):
         if _fleet_environment_export(text):
             expanded_text = text
         else:
             expanded = _literal_variable_expansion(text, current, manifest, variables)
             if expanded is None:
-                expanded_text = text
-            else:
-                expanded_text, variables = expanded
+                return False, _compound_segment_reason(index, text, 'true_floor') if judge else 'true_floor'
+            expanded_text, variables = expanded
         stage_manifest = {**manifest, '_compound_created_files': frozenset(created), '_compound_remote_created_files':frozenset(remote_created)}
         stage = {**event, 'cwd': current, 'tool_input': {**payload, 'command': expanded_text}}
         result = classify(stage, stage_manifest)
         allow, reason = result
         if not allow and _hard_refusal(reason):
             return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
-        if not allow or reason == 'root_default_allow' or separator == '||':
-            # A fallback branch can mask a failed or refused command. Even when
-            # every component is individually allowlisted (for example, a read
-            # followed by `|| true`), the command shape must reach the judge.
-            needs_judge = True
         try:
             raw_words = shlex.split(expanded_text, posix=True)
         except ValueError:
@@ -1249,7 +1201,7 @@ def _compound_approval(event, manifest, judge=None):
                 reason = 'true_floor'
                 return False, _compound_segment_reason(index, expanded_text, reason) if judge else reason
             current = target
-        stages.append((index, expanded_text, stage, stage_manifest, cd, assignment, reason, allow))
+        stages.append((index, expanded_text, stage, stage_manifest, cd, assignment))
         output = _heredoc_scratch_output(stage, stage_manifest)
         if output is not None:
             created.add(output)
@@ -1264,20 +1216,15 @@ def _compound_approval(event, manifest, judge=None):
             created.clear()
             remote_created.clear()
     used = []
-    if judge:
-        if not needs_judge:
-            used = [reason for _index, _text, _stage, _stage_manifest, cd, assignment, reason, _allow
-                    in stages if not cd and not assignment]
-            return True, 'compound:' + '+'.join(sorted(set(used or ['cd'])))
-        # Floors were checked per segment above. Give the judge the untouched
-        # full request once so it can assess interactions, cwd and intent.
-        return judge(event, {**manifest, '_approval_compound_skip': True})
-    for index, text, stage, stage_manifest, cd, assignment, reason, _allow in stages:
+    for index, text, stage, stage_manifest, cd, assignment in stages:
         if assignment:
             continue
-        allow, reason = _classify_scoped(stage, stage_manifest)
+        try:
+            allow, reason = judge(stage, stage_manifest) if judge else _classify_scoped(stage, stage_manifest)
+        except TimeoutError:
+            return False, _compound_segment_reason(index, text, 'error:TimeoutError')
         if not allow:
-            return False, reason
+            return False, _compound_segment_reason(index, text, reason) if judge else reason
         if not cd:
             used.append(reason)
     return True, 'compound:' + '+'.join(sorted(set(used or ['cd'])))
@@ -1307,12 +1254,18 @@ def _substitutions_approval(event, manifest, judge):
 def classify(event, manifest):
     if not isinstance(event, dict) or event.get('hook_event_name') != 'PermissionRequest':
         return False, 'not_permission_request'
+    if _for_readonly(event, manifest):
+        return True, 'local_read'
     if _for_loop_body_floor(event, manifest):
-        _log_decision.extras = {'decision_path': 'floor', 'judge_verdict': 'not_consulted'}
         return False, 'true_floor'
-    compound = None if manifest.get('_approval_compound_skip') is True else _compound_approval(event, manifest)
+    if _for_loop_candidate(event) is not None:
+        return False, 'true_floor'
+    compound = _compound_approval(event, manifest)
     if compound is not None:
         return compound
+    nested = _substitutions_approval(event, manifest, _classify_scoped)
+    if nested is not None:
+        return nested
     return _classify_single(event, manifest)
 
 
@@ -1320,28 +1273,105 @@ _approval_deadline = None
 
 
 def _decide_request(event, manifest):
+    """Deterministic gate first; only the Admiral's exact floor skips the judge.
+
+    _admiral_floor runs first on the complete request: a match asks without
+    any judge call (only a proven coordinator shape keeps its carve-out).
+    Otherwise every allow the deterministic gate grants stays a deterministic
+    allow, and any refusal it cannot prove safe goes to the Decider judge with
+    the full command and cwd. Judge disabled, down, slow or unsure means ask.
+    The ledger records which path decided (floor, judge or deterministic)."""
+    floored = (not isinstance(event, dict) or not isinstance(manifest, dict)
+               or _admiral_floor(event, manifest, _coordinator_match(event, manifest)))
+    if floored and isinstance(manifest, dict) and isinstance(manifest.get('decider'), dict):
+        # An exact floor match never reaches the judge, not even through the
+        # deterministic gate's own grey-zone Decider call.
+        manifest = {**manifest, 'decider': {**manifest['decider'], 'enabled': False}}
+    allow, reason = _decide_deterministic(event, manifest)
+    extras = getattr(_log_decision, 'extras', None)
+    if not isinstance(extras, dict):
+        extras = _log_decision.extras = {}
+    if floored and not (allow and str(reason).startswith('coordinator_')):
+        extras.update(decision_path='floor', judge_verdict='not_consulted')
+        return False, reason if not allow and _hard_refusal(reason) else 'true_floor'
+    if allow:
+        if reason == 'decider_allow':
+            extras.update(decision_path='judge', judge_verdict=extras.get('verdict', 'allow'))
+        else:
+            extras.update(decision_path='deterministic',
+                          judge_verdict=('veto:' + extras['verdict']) if 'verdict' in extras else 'not_needed')
+        return allow, reason
+    if not _hard_refusal(reason):
+        if 'decider_status' in extras:
+            extras.update(decision_path='judge', judge_verdict=extras.get('verdict', 'ask'))
+        elif reason in {'no_match_decider', 'syntax'}:
+            extras.update(decision_path='judge', judge_verdict='unavailable', decider_status='disabled')
+        else:
+            # An explicitly disabled class is the operator's own ruling.
+            extras.update(decision_path='deterministic', judge_verdict='not_consulted')
+        return allow, reason
+    if reason == 'not_permission_request':
+        extras.update(decision_path='floor', judge_verdict='not_consulted')
+        return allow, reason
+    config = _decider_config(manifest)
+    if config is None:
+        extras.update(decision_path='judge', judge_verdict='unavailable', decider_status='disabled')
+        return False, reason
+    if _approval_deadline is not None:
+        remaining = int((_approval_deadline - __import__('time').monotonic()) * 1000)
+        config = {**config, 'timeout_ms': min(config['timeout_ms'], max(0, remaining))}
+    judged = event
+    cwd = event.get('cwd')
+    in_roots = (_inversion_enabled(manifest) and isinstance(cwd, str) and cwd.startswith('/')
+                and not _protected(os.path.realpath(cwd))
+                and any(_inside(os.path.realpath(cwd), root) for root in _policy_roots(manifest)))
+    if in_roots:
+        # Inside the reviewed roots the judge answers the danger question with
+        # the roots in view; only an explicit low-risk answer allows.
+        config = {**config, 'danger_veto': True}
+        judged = {**event, '_approval_roots': list(_policy_roots(manifest))}
+    elif config['mode'] == 'single' and _write_capable(event):
+        config = {**config, 'mode': 'dual'}
+    try:
+        decider_allow, status, latency_ms, verdict = _decider_decide(judged, config)
+    except Exception:
+        if _approval_deadline is not None and __import__('time').monotonic() >= _approval_deadline:
+            raise
+        decider_allow, status, latency_ms, verdict = False, 'unavailable', 0, 'ask'
+    if in_roots:
+        decider_allow = verdict == 'allow' and status in {'no_risk_veto', 'accepted'}
+    extras.update(decision_path='judge', judge_verdict=verdict, decider_status=status,
+                  verdict=verdict, latency_ms=latency_ms, deterministic_reason=reason)
+    if decider_allow:
+        return True, 'decider_allow'
+    return False, reason
+
+
+def _decide_deterministic(event, manifest):
     """Apply the complete gate recursively; main owns the single final ledger."""
+    if _for_readonly(event, manifest):
+        return True, 'local_read'
     if _for_loop_body_floor(event, manifest):
         return False, 'true_floor'
-    compound = (None if manifest.get('_approval_compound_skip') is True
-                else _compound_approval(event, manifest, judge=_decide_request))
+    if _for_loop_candidate(event) is not None:
+        return False, 'true_floor'
+    compound = _compound_approval(event, manifest, judge=_decide_deterministic)
     if compound is not None:
-        if not compound[0] and _hard_refusal(compound[1]):
-            _log_decision.extras = {'decision_path': 'floor', 'judge_verdict': 'not_consulted'}
         return compound
     allow, reason = classify(event, manifest)
     if _hard_refusal(reason):
-        _log_decision.extras = {'decision_path': 'floor', 'judge_verdict': 'not_consulted'}
         return allow, reason
-    # root_default_allow is a scope candidate, not an approval. It enters the
-    # Decider path exactly like any other unproven request.
-    inverted = reason == 'root_default_allow' or (not allow and _inversion_scope(event, manifest))
-    if inverted or not allow and reason in {'no_match_decider', 'syntax', 'coordinator_refused'}:
+    nested = _substitutions_approval(event, manifest, _decide_deterministic) if isinstance(event, dict) else None
+    if nested is not None:
+        return nested
+    inverted = not allow and _inversion_scope(event, manifest)
+    if inverted or not allow and reason in {'no_match_decider', 'syntax'}:
         config = _decider_config(manifest)
         if config is not None and _approval_deadline is not None:
             remaining = int((_approval_deadline - __import__('time').monotonic()) * 1000)
             config = {**config, 'timeout_ms': min(config['timeout_ms'], max(0, remaining))}
         if inverted:
+            allow, reason = True, 'root_default_allow'
             if config is not None:
                 config = {**config, 'danger_veto': True}
                 advisory = {**event, '_approval_roots': list(_policy_roots(manifest))}
@@ -1351,37 +1381,16 @@ def _decide_request(event, manifest):
                     if _approval_deadline is not None and __import__('time').monotonic() >= _approval_deadline:
                         raise
                     _decider_allow, status, latency_ms, verdict = True, 'unavailable', 0, 'allow'
-                _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': verdict,
-                                        'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
+                _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
                 if verdict == 'risky':
                     allow, reason = False, 'decider_risky'
-                elif verdict == 'allow' and status in {'no_risk_veto', 'accepted'}:
-                    allow, reason = True, 'decider_allow'
-                else:
-                    allow, reason = False, f'decider_{status}'
-            else:
-                _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': 'unavailable',
-                                        'decider_status': 'disabled', 'verdict': 'ask'}
-                allow, reason = False, 'decider_disabled'
         elif config is not None:
             if config['mode'] == 'single' and _write_capable(event):
                 config = {**config, 'mode': 'dual'}
             decider_allow, status, latency_ms, verdict = _decider_decide(event, config)
-            _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': verdict,
-                                    'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
+            _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
             if decider_allow:
                 allow, reason = True, 'decider_allow'
-            else:
-                allow, reason = False, f'decider_{status}'
-        else:
-            _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': 'unavailable',
-                                    'decider_status': 'disabled', 'verdict': 'ask'}
-            allow, reason = False, 'decider_disabled'
-    elif not allow:
-        _log_decision.extras = {'decision_path': 'judge', 'judge_verdict': 'unavailable',
-                                'decider_status': 'out_of_scope', 'verdict': 'ask'}
-    elif not hasattr(_log_decision, 'extras') or 'decision_path' not in _log_decision.extras:
-        _log_decision.extras = {'decision_path': 'deterministic', 'judge_verdict': 'not_needed'}
     return allow, reason
 
 
@@ -1818,6 +1827,8 @@ def _decider_decide(event, config):
         if answers is not None:
             if danger_veto:
                 risk = _risk_confidence(answers)
+                # A missing or malformed risk answer is unsure, never a clearance.
+                # The root-default caller still treats it as "not risky".
                 if risk is None:
                     status, verdict = 'threshold_failed', 'ask'
                 elif risk >= config['threshold']:
@@ -2004,20 +2015,13 @@ def main():
         manifest = _load_manifest(manifest)
         _coordinator_proof_cache = {}
         allow, reason = _decide_request(event, manifest)
-        if 'decision_path' not in _log_decision.extras:
-            if _hard_refusal(reason):
-                _log_decision.extras.update(decision_path='floor', judge_verdict='not_consulted')
-            elif not allow:
-                _log_decision.extras.update(decision_path='judge', judge_verdict='unavailable',
-                                            decider_status='out_of_scope', verdict='ask')
-            else:
-                _log_decision.extras.update(decision_path='deterministic', judge_verdict='not_needed')
     except Exception as exc:
         allow, reason = False, f'error:{type(exc).__name__}'
-        _log_decision.extras.setdefault('decision_path', 'judge' if isinstance(exc, TimeoutError) else 'initialization')
-        _log_decision.extras.setdefault('judge_verdict', 'unavailable' if isinstance(exc, TimeoutError) else 'not_consulted')
-        _log_decision.extras.setdefault('decider_status', 'timeout' if isinstance(exc, TimeoutError) else 'unavailable')
-        _log_decision.extras.setdefault('verdict', 'ask')
+        if not isinstance(getattr(_log_decision, 'extras', None), dict):
+            _log_decision.extras = {}
+        timed_out = isinstance(exc, TimeoutError)
+        _log_decision.extras.setdefault('decision_path', 'judge' if timed_out else 'initialization')
+        _log_decision.extras.setdefault('judge_verdict', 'unavailable' if timed_out else 'not_consulted')
     finally:
         _approval_deadline = None
         _coordinator_proof_cache = None

@@ -129,17 +129,9 @@ class HoneyReadsTests(unittest.TestCase):
             "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE cat /home/YOUR_AGENT_CLAUDE/.local/state/dotcortex/claude-approval-kikin.jsonl | tail -5'",
             "ssh YOUR_HONEY_HOST 'sudo -n -u YOUR_AGENT_CLAUDE ls -l /home/YOUR_AGENT_CLAUDE/.config/dotcortex/'",
         ]
-        from unittest import mock
-        manifest = self.manifest(decider=True)
         for command in commands:
             with self.subTest(command=command):
-                payload = event(command, self.root)
-                self.assertEqual(self.engine.classify(payload, self.manifest()), (False, "no_match_decider"))
-                with mock.patch.object(self.engine, "_decider_decide", return_value=(True, "accepted", 1, "allow")) as judge:
-                    self.assertEqual(self.engine._decide_request(payload, manifest), (True, "decider_allow"))
-                    judge.assert_called_once()
-                    self.assertEqual(self.engine._log_decision.extras["decision_path"], "judge")
-                    self.assertEqual(self.engine._log_decision.extras["judge_verdict"], "allow")
+                self.assertEqual(self.classify(command), (True, "ssh_readonly"))
 
     def test_sudo_and_secret_floor_corpus_asks_even_with_always_allow_decider(self):
         commands = [
@@ -208,7 +200,7 @@ class HoneyReadsTests(unittest.TestCase):
         self.assertEqual(self.engine._readonly_host_config(ssh, "YOUR_HONEY_HOST")["remote_home"], "/home/YOUR_HONEY_USER")
 
     def test_readonly_host_list_selects_each_host(self):
-        data = self.manifest(decider=True)
+        data = self.manifest()
         ssh = data["entries"]["ssh_readonly"]
         ssh["readonly_hosts"].append({
             "host": "other",
@@ -217,13 +209,7 @@ class HoneyReadsTests(unittest.TestCase):
             "allowed_sudo_targets": [],
         })
         command = "ssh other 'ls -ld /home/YOUR_OTHER_USER/DotCortex'"
-        payload = event(command, self.root)
-        self.assertEqual(self.engine.classify(payload, data), (False, "no_match_decider"))
-        from unittest import mock
-        with mock.patch.object(self.engine, "_decider_decide", return_value=(True, "accepted", 1, "allow")) as judge:
-            self.assertEqual(self.engine._decide_request(payload, data), (True, "decider_allow"))
-            judge.assert_called_once()
-            self.assertEqual(self.engine._log_decision.extras["decision_path"], "judge")
+        self.assertEqual(self.engine.classify(event(command, self.root), data), (True, "ssh_readonly"))
 
     def test_approval_hook_sources_have_only_public_home_placeholders(self):
         import re
