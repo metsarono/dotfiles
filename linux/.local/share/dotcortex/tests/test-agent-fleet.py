@@ -34,6 +34,7 @@ class AgentFleetTests(unittest.TestCase):
             f"ghost {free_uid()} yes\n"
             f"clash {os.getuid()} yes\n"
             "parked 2010 no\n"
+            "vibe 2013 yes\n"
         )
         self.env = dict(os.environ, AGENT_CLI_CONF=str(conf), AGENT_UIDS_FILE=str(conf / "uids.ssv"))
 
@@ -47,6 +48,8 @@ class AgentFleetTests(unittest.TestCase):
         out = self.run_tool(CHECK)
         self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
         self.assertIn("MISSING agent-ghost", out.stdout)
+        self.assertIn("agent-vibe", out.stdout)
+        self.assertIn("2013", out.stdout)
         self.assertIn("COLLISION agent-clash", out.stdout)
         self.assertNotIn("agent-parked", out.stdout, "provision=no agents are not gaps")
 
@@ -68,6 +71,12 @@ class AgentFleetTests(unittest.TestCase):
         self.assertNotIn("+ sudo", dry.stdout, "dry-run must not execute")
         bad = self.run_tool(USERS, "--only", "nosuch")
         self.assertEqual(bad.returncode, 1)
+
+    def test_vibe_uid_is_accepted_by_users_bootstrap(self) -> None:
+        dry = self.run_tool(USERS, "--only", "vibe")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("agent-vibe", dry.stdout)
+        self.assertIn("2013", dry.stdout)
 
 
 if __name__ == "__main__":

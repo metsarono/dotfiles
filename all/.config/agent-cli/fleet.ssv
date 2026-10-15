@@ -3,4 +3,4 @@ kikin          kikin-kushi       DotCortex,mnt,.guix-extra-profiles             
 x230           ThinkPad-X230     -                                                                                all                    -
 t480s          ThinkPad-T480s    -                                                                                all                    -
 t480           ThinkPad-T480     -                                                                                all                    -
-honey          beelink           DotCortex                                                                        claude,codex,opencode  claude-warm,codex-warm
+honey          beelink           DotCortex                                                                        claude,codex,opencode,vibe  claude-warm,codex-warm

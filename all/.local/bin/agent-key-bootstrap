@@ -9,7 +9,7 @@
 # DRY-RUN unless --apply.
 set -euo pipefail
 
-AGENTS="codex claude gemini antigravity opencode hermes pi"
+AGENTS="codex claude gemini antigravity opencode hermes pi vibe"
 EXPORT_DIR="${AGENT_PUBKEY_EXPORT:-$HOME/.local/state/agent-pubkeys}"
 HOSTN="$(hostname)"
 APPLY=0

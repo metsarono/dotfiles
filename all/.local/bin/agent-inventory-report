@@ -7,7 +7,7 @@
 # Read-only. Reports per-agent Unix user state on this host as a markdown table.
 set -euo pipefail
 
-AGENTS_INTERACTIVE="codex claude gemini antigravity opencode"
+AGENTS_INTERACTIVE="codex claude gemini antigravity opencode vibe"
 AGENTS_PERSISTENT="hermes pi"
 HOSTN="$(hostname)"
 
