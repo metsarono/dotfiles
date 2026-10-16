@@ -286,6 +286,87 @@ class BuntaReplayTests(unittest.TestCase):
         self.assertEqual(reason, "true_floor")
 
     # ---- the ledger records decider_status ----
+    def test_ops_tool_git_flags_only_after_git_repo_sub(self):
+        # Bunta's conditions (2026-10-16): a leading '-' passes the gate only
+        # after 'git <repo> <log|status|diff|show|branch>'; bunta-ops then
+        # refuses any flag outside its own allowlist (test-bunta-ops.py).
+        manifest = json.loads(json.dumps(self.manifest))
+        config = manifest["coordinator_ops"]
+        config["classes"]["ops_tool"] = True
+        config["peer_host"] = "kikin"
+        config["repo_roots"] = [str(self.root)]
+        checked = self._with_entries(manifest)
+
+        def grant(command):
+            return self.engine._coordinator_match(event("Bash", {"command": command}, self.root), checked)
+
+        for command in ("ssh kikin bunta-ops git dotcortex log -5 --oneline",
+                        "ssh kikin bunta-ops git dotcortex log --output=x",
+                        "ssh kikin bunta-ops git helmcortex branch --show-current",
+                        "ssh kikin bunta-ops git dc-wt/x diff --stat",
+                        "ssh kikin bunta-ops status"):
+            with self.subTest(command=command):
+                self.assertEqual(grant(command), "coordinator_ops_tool")
+        for command in ("ssh kikin bunta-ops mail-read -x",
+                        "ssh kikin bunta-ops status -v",
+                        "ssh kikin bunta-ops logs -v",
+                        "ssh kikin bunta-ops git -5 log",
+                        "ssh kikin bunta-ops git dotcortex -5 log",
+                        "ssh kikin bunta-ops git dotcortex push -f",
+                        "ssh kikin bunta-ops git dotcortex log -",
+                        "ssh kikin bunta-ops git dotcortex log ---x",
+                        "ssh kikin bunta-ops git dotcortex log -5 $HOME",
+                        "ssh kikin bunta-ops git dotcortex log -5;id",
+                        "ssh kikin bunta-ops git dotcortex log --format=%h"):
+            with self.subTest(command=command):
+                self.assertIsNone(grant(command))
+        config["classes"]["ops_tool"] = False
+        checked = self._with_entries(manifest)
+        self.assertIsNone(grant("ssh kikin bunta-ops git dotcortex log -5"))
+
+    def test_ops_tool_redirect_only_into_private_scratch(self):
+        # Bunta's conditions (2026-10-16): one '>'/'>>' after a bunta-ops
+        # match, literal absolute target, no symlink on the path, parent owned
+        # by this user and not group/world-writable.
+        base = TMP / "redirect"
+        own = base / "own"
+        shared = base / "shared"
+        own.mkdir(parents=True, mode=0o700)
+        shared.mkdir(mode=0o700)
+        os.chmod(base, 0o700)
+        os.chmod(shared, 0o777)
+        (base / "linked").symlink_to(own)
+        (own / "planted").symlink_to("/etc/hostname")
+        manifest = json.loads(json.dumps(self.manifest))
+        config = manifest["coordinator_ops"]
+        config["classes"]["ops_tool"] = True
+        config["peer_host"] = "kikin"
+        config["repo_roots"] = [str(self.root)]
+        config["scratch_roots"] = [str(base)]
+        checked = self._with_entries(manifest)
+
+        def decide(command):
+            ev = event("Bash", {"command": command}, self.root)
+            return self.engine._coordinator_match(ev, checked), self.engine.classify(ev, checked)
+
+        show = "ssh kikin bunta-ops git helmcortex show 53bd6788"
+        for command in (f"{show} > {own}/x.diff", f"{show} >> {own}/x.diff", f"{show} >{own}/y.diff"):
+            with self.subTest(command=command):
+                self.assertEqual(decide(command), ("coordinator_ops_redirect", (True, "coordinator_ops_redirect")))
+        for command in (f"{show} > /tmp/x", f"{show} > {shared}/x", f"{show} > {base}/linked/x",
+                        f"{show} > {own}/planted", f"{show} > {own}/../own/x",
+                        f"{show} > $S/x", f"{show} > ~/.config/dotcortex/x", f"{show} 2> {own}/x",
+                        f"{show} > {own}/x 2>&1", f"{show} > {own}/a > {own}/b",
+                        f"{show} | tee {own}/x", f"ssh kikin bunta-ops shell > {own}/x",
+                        f"cat /etc/hostname > {own}/x", f"{show} > '{own}/x'"):
+            with self.subTest(command=command):
+                match, verdict = decide(command)
+                self.assertNotEqual(match, "coordinator_ops_redirect")
+                self.assertNotEqual(verdict, (True, "coordinator_ops_redirect"))
+        config["classes"]["ops_tool"] = False
+        checked = self._with_entries(manifest)
+        self.assertIsNone(decide(f"{show} > {own}/x.diff")[0])
+
     def test_ledger_via_hook(self):
         hook = HERE.parents[3] / "bin/claude-hook-permission-request"
         if not hook.exists():
