@@ -336,7 +336,7 @@ class RecallTests(unittest.TestCase):
 
     def run_sweep(self, fake, **kwargs):
         event = {'session_id': 's', 'transcript_path': self.transcript(**kwargs)}
-        return recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=1.2, **self.sweep_args)
+        return recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=2.2, **self.sweep_args)  # self.now is truncated to the second
 
     def test_deletes_only_the_windowed_permission_prompt(self):
         fake = FakeTelegram({
