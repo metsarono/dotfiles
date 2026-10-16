@@ -12,6 +12,9 @@ RUN_DIR="${CADDY_TERMINAL_RUN_DIR:-$STATE_DIR/run}"
 SOCKET="${CADDY_TERMINAL_SOCKET:-$RUN_DIR/terminal.sock}"
 FONT_SIZE="${CADDY_TERMINAL_FONT_SIZE:-16}"
 FONT_FAMILY="${CADDY_TERMINAL_FONT_FAMILY:-SFMono Nerd Font, monospace}"
+# Single executable, no arguments (kept one word for the ttyd command line).
+# Tests override this to keep their scratch terminals inert.
+COMMAND="${CADDY_TERMINAL_COMMAND:-zsh}"
 CURL_BIN="${CADDY_TERMINAL_CURL:-curl}"
 
 [ -x "$TTYD_BIN" ] || { echo "$TAG: missing $TTYD_BIN" >&2; exit 69; }
@@ -48,7 +51,7 @@ fi
 TTYD_INDEX="$("$INDEX_TOOL")" || { echo "$TAG: index build failed" >&2; exit 1; }
 
 "$TTYD_BIN" -W -i "$SOCKET" -I "$TTYD_INDEX" \
-  -t "fontSize=$FONT_SIZE" -t "fontFamily=\"$FONT_FAMILY\"" zsh &
+  -t "fontSize=$FONT_SIZE" -t "fontFamily=\"$FONT_FAMILY\"" "$COMMAND" &
 ttyd_pid=$!
 for _ in $(seq 1 50); do
   [ -S "$SOCKET" ] && break

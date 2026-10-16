@@ -1,5 +1,5 @@
 #+TITLE: Web Terminal
-#+DESCRIPTION: ttyd web terminal for the Caddy — supervised unix-socket ttyd, Caddy basic_auth + token gate, tailscale publication, credential helper
+#+DESCRIPTION: ttyd web terminal for the Caddy — supervised unix-socket ttyd, Caddy gate with cookie login (caddy-terminal-authd) + token route, tailscale publication, credential helper
 #+AUTHOR: Mètsàtron — Sovereign Weaver
 #+LANGUAGE: en
 #+PROPERTY: header-args :mkdirp yes :results silent :comments no
@@ -15,15 +15,31 @@ one server on a unix socket, one patched index (Shift+Enter handling and
 websocket tracking, owned by =logseq-ttyd-index= — never forked here). The
 Caddy gate fronts it; Logseq reaches it through the same gate.
 
+Fix round 2 (2026-10-16, rulings R-DOCK-16/R-DOCK-17): the Centre dock must
+open the Terminal as a direct VUE icon launcher in a floating BeOS window.
+Basic auth was the blocker twice over — an iframe subresource cannot surface a
+401 challenge, and the dock's =inspect_apps= health probe read the 401 as
+"health refused", so Terminal never earned a window. The gate now serves a
+small login page (=caddy-terminal-authd= below) that checks the SAME bcrypt
+hash =caddy-terminal-passwd= writes (the Admiral never re-sets his password)
+and grants a cookie session that works inside the Centre's iframe. The hash
+file format is unchanged, so the existing live hash survives cut-over.
+
 * Wiring
 
 #+BEGIN_EXAMPLE
 browser --tailnet--> https://<tailnet-host>:7682   (tailscale serve, TLS)
                         |
                         v
-                    http://127.0.0.1:7680         (Caddy gate: basic_auth + token route)
-                        |   bcrypt hash in a 0600 file (caddy-terminal-passwd)
+                    http://127.0.0.1:7680         (Caddy gate: /healthz, /login,
+                        |   /logout + forward_auth cookie check)
+                        |   bcrypt hash in a 0600 file (caddy-terminal-passwd,
+                        |   verified by caddy-terminal-authd on a unix socket)
                         |   bearer path token in a 0600 file (caddy-terminal-token)
+                        v
+                    unix://$HOME/.local/state/caddy-terminal/authd.sock
+                        (caddy-terminal-authd: login/logout/healthz/check)
+                        |
                         v
                     unix://$HOME/.local/state/caddy-terminal/run/terminal.sock
                         (ttyd, zsh, patched index; socket 0600 in a 0700 dir)
@@ -41,10 +57,12 @@ browser --tailnet--> https://<tailnet-host>:7682   (tailscale serve, TLS)
   needed — the process already runs as metsatron; umask 077 makes the socket
   owner-only at birth, and the launcher then forces 0600).
 - The credential NEVER rides a command line. ttyd runs without =-c= (=-c= is
-  visible in =ps=, and agent users exist on Kikin). Authentication is Caddy
-  =basic_auth= whose bcrypt hash lives in a 0600 machine-local file written by
-  =caddy-terminal-passwd=. DotCortex carries no hash: the public repo never
-  stores secrets (same law as the obsidian-web gate in =app.org=).
+  visible in =ps=, and agent users exist on Kikin). Authentication is the
+  gate's login form (=caddy-terminal-authd=), whose bcrypt hash lives in a
+  0600 machine-local file written by =caddy-terminal-passwd=. DotCortex
+  carries no hash: the public repo never stores secrets (same law as the
+  obsidian-web gate in =app.org=). The same file the old basic_auth import
+  read is what authd parses today — the Admiral's live hash survives.
 - The gate site lives in the machine-local Caddyfile of the unprivileged
   FileBrowser Caddy instance (=$HOME/.local/state/filebrowser/caddy/.Caddyfile=,
   =auto_https off=, =admin off=), the same lane the FileBrowser :9090 and
@@ -95,6 +113,9 @@ RUN_DIR="${CADDY_TERMINAL_RUN_DIR:-$STATE_DIR/run}"
 SOCKET="${CADDY_TERMINAL_SOCKET:-$RUN_DIR/terminal.sock}"
 FONT_SIZE="${CADDY_TERMINAL_FONT_SIZE:-16}"
 FONT_FAMILY="${CADDY_TERMINAL_FONT_FAMILY:-SFMono Nerd Font, monospace}"
+# Single executable, no arguments (kept one word for the ttyd command line).
+# Tests override this to keep their scratch terminals inert.
+COMMAND="${CADDY_TERMINAL_COMMAND:-zsh}"
 CURL_BIN="${CADDY_TERMINAL_CURL:-curl}"
 
 [ -x "$TTYD_BIN" ] || { echo "$TAG: missing $TTYD_BIN" >&2; exit 69; }
@@ -131,7 +152,7 @@ fi
 TTYD_INDEX="$("$INDEX_TOOL")" || { echo "$TAG: index build failed" >&2; exit 1; }
 
 "$TTYD_BIN" -W -i "$SOCKET" -I "$TTYD_INDEX" \
-  -t "fontSize=$FONT_SIZE" -t "fontFamily=\"$FONT_FAMILY\"" zsh &
+  -t "fontSize=$FONT_SIZE" -t "fontFamily=\"$FONT_FAMILY\"" "$COMMAND" &
 ttyd_pid=$!
 for _ in $(seq 1 50); do
   [ -S "$SOCKET" ] && break
@@ -164,6 +185,11 @@ duplicated); a socket FILE left by a dead ttyd is not "alive" — the probe
 connects through it, so stale files fall through to a respawn and the
 launcher clears them.
 
+Fix round 2: the same script also supervises the gate's auth verifier. A
+second instance runs with =CADDY_TERMINAL_SUPERVISE_LAUNCHER= pointed at
+=caddy-terminal-authd= and =CADDY_TERMINAL_SUPERVISE_LOCK= at its own lock
+file, so both daemons respawn independently under one script, one flock each.
+
 #+name: caddy-terminal-supervise
 #+BEGIN_SRC bash :tangle linux/.local/bin/caddy-terminal-supervise :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
 set -euo pipefail
@@ -175,6 +201,9 @@ RETRY_SECONDS=5
 ADOPT_SECONDS=30
 LAUNCHER="${CADDY_TERMINAL_SUPERVISE_LAUNCHER:-$HOME/.local/bin/caddy-terminal-serve}"
 SOCKET="${CADDY_TERMINAL_SOCKET:-$HOME/.local/state/caddy-terminal/run/terminal.sock}"
+# The lock is parameterised so the same script can supervise the gate's
+# auth verifier (caddy-terminal-authd) with its own lock file and launcher.
+LOCK_FILE="${CADDY_TERMINAL_SUPERVISE_LOCK:-}"
 HOSTNAME_BIN="${CADDY_TERMINAL_SUPERVISE_HOSTNAME_BIN:-hostname}"
 
 while [ "$#" -gt 0 ]; do
@@ -196,7 +225,7 @@ CURRENT_HOST="$($HOSTNAME_BIN -s)"
 
 LOG_DIR="${CADDY_TERMINAL_STATE:-$HOME/.local/state/caddy-terminal}"
 mkdir -p "$LOG_DIR"
-exec 9>"$LOG_DIR/supervisor.lock"
+exec 9>"${LOCK_FILE:-$LOG_DIR/supervisor.lock}"
 if ! flock -n 9; then
   # Boot watchdog and liveness poll may meet; only one supervisor owns the service.
   exit 0
@@ -274,7 +303,9 @@ if [ "$REMOVE" = 0 ]; then
 fi
 
 SUPERVISOR="$HOME/.local/bin/caddy-terminal-supervise"
+AUTHD="$HOME/.local/bin/caddy-terminal-authd"
 [ "$DRY" = 1 ] || [ "$REMOVE" = 1 ] || [ -x "$SUPERVISOR" ] || { echo "$TAG: missing $SUPERVISOR; tangle and stow first" >&2; exit 1; }
+[ "$DRY" = 1 ] || [ "$REMOVE" = 1 ] || [ -x "$AUTHD" ] || { echo "$TAG: missing $AUTHD; tangle and stow first" >&2; exit 1; }
 
 CRON_PATH="$HOME/.guix-extra-profiles/core/core/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
@@ -298,9 +329,13 @@ fi
 desired="$(printf '%s\n' "$stripped" | cat -s)"
 [ -n "$desired" ] && desired="$desired
 "
+AUTHD="$HOME/.local/bin/caddy-terminal-authd"
+AUTHD_ENV="CADDY_TERMINAL_SUPERVISE_LAUNCHER=$AUTHD CADDY_TERMINAL_SUPERVISE_LOCK=$HOME/.local/state/caddy-terminal/authd-supervisor.lock"
 desired="${desired}${BEGIN}
 @reboot HOME=$HOME PATH=$CRON_PATH $SUPERVISOR --expected-host $EXPECTED_HOST --delay 15 --retry-seconds 5
 */2 * * * * HOME=$HOME PATH=$CRON_PATH $SUPERVISOR --expected-host $EXPECTED_HOST
+@reboot HOME=$HOME PATH=$CRON_PATH $AUTHD_ENV $SUPERVISOR --expected-host $EXPECTED_HOST --delay 15 --retry-seconds 5
+*/2 * * * * HOME=$HOME PATH=$CRON_PATH $AUTHD_ENV $SUPERVISOR --expected-host $EXPECTED_HOST
 ${END}"
 
 if [ "$DRY" = 1 ]; then
@@ -320,9 +355,11 @@ chmod +x ~/DotCortex/linux/.local/bin/caddy-terminal-cron-apply
 The Admiral sets the credential himself; he never edits config by hand.
 Prompts twice on the tty (blind), hashes with =caddy hash-password= (bcrypt)
 via stdin — the plaintext never appears on any command line or in any file —
-and writes the 0600 auth snippet the gate site imports. Re-running it simply
-replaces the hash; the Caddy gate instance must be restarted to re-import
-(=admin off= means no reload API; the coordinator owns that restart).
+and writes the 0600 snippet =caddy-terminal-authd= parses (same file the
+old basic_auth import read; format unchanged, so the Admiral's live hash
+survives the round-2 cut-over). Re-running it simply replaces the hash:
+authd re-reads the file on every login attempt, so NO gate restart is needed
+for a new password — the next login uses it immediately.
 
 #+name: caddy-terminal-passwd
 #+BEGIN_SRC bash :tangle all/.local/bin/caddy-terminal-passwd :shebang "#!/usr/bin/env bash" :tangle-mode (identity #o755)
@@ -360,6 +397,369 @@ echo "Restart the Caddy gate instance (FileBrowser front) to apply, then reload 
 
 #+BEGIN_SRC sh
 chmod +x ~/DotCortex/all/.local/bin/caddy-terminal-passwd
+#+END_SRC
+
+* Session verifier: caddy-terminal-authd
+
+Fix round 2 (R-DOCK-16/R-DOCK-17): Basic auth cannot work inside the Centre's
+iframe — an iframe subresource gets a dead 401, no native prompt. The gate
+replaces =basic_auth= with a tiny login page backed by this verifier, a
+stdlib-Python HTTP server on a unix socket (0600, metsatron-only, same walls
+as the ttyd socket). Nothing new is installed: it needs only Python 3 and
+=bcrypt= (both already on the fleet core profile).
+
+It serves, through the gate:
+
+- =GET /healthz= — the dock's unauthenticated health probe. =200 ok= when the
+  ttyd socket answers, =503 down= otherwise. No other detail of any kind.
+- =GET /login= — the login page (single password field; one user, one hash).
+- =POST /login= — checks the password against the bcrypt hash
+  =caddy-terminal-passwd= writes (the SAME =terminal-auth= file the old
+  basic_auth import read — the Admiral never re-sets his password). On
+  success it mints a session and answers =303= to the gate root with a
+  =Secure; HttpOnly; SameSite=None; Partitioned= (CHIPS) cookie, so the
+  session survives inside the Centre's cross-origin iframe. On failure it
+  counts the client and, past the limit, locks the client out for a window —
+  even a correct password is refused during lockout. The password exists
+  only in the POST body: never logged, never echoed, never on a command line.
+- =GET /logout= — drops the session and expires the cookie.
+- =GET /check= — the =forward_auth= target for the terminal route: =204= with
+  a valid, unexpired session cookie; =303 /login= otherwise. The terminal
+  root therefore never 401s — without a cookie it is the login page.
+
+Sessions are random 256-bit tokens stored in a 0600 JSON file with absolute
+expiry timestamps, so a verifier restart does not log the Admiral out and a
+stolen cookie dies at the deadline even if its Max-Age were replayed. The
+cookie is host-only (no Domain attribute) — cookies cannot be port-scoped by
+spec; the session only ever validates on the gate's own socket.
+
+=caddy-terminal-authd --check= is the supervisor probe (0 = socket answers,
+3 = down), same contract as the launcher.
+
+#+name: caddy-terminal-authd
+#+BEGIN_SRC python :tangle all/.local/bin/caddy-terminal-authd :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
+#!/usr/bin/env python3
+"""caddy-terminal-authd — unix-socket login/session verifier for the web terminal gate.
+
+Checks the bcrypt hash caddy-terminal-passwd writes; issues CHIPS cookies
+that work inside the Centre iframe; throttles failed logins. The password is
+only ever in the POST body — never logged, echoed, or stored anywhere.
+"""
+import bcrypt
+import collections
+import json
+import os
+import re
+import secrets
+import socket
+import sys
+import tempfile
+import threading
+import time
+from http.cookies import CookieError, SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
+
+STATE = os.environ.get('CADDY_TERMINAL_STATE', os.path.expanduser('~/.local/state/caddy-terminal'))
+AUTH_FILE = os.environ.get('CADDY_TERMINAL_AUTH', os.path.join(STATE, 'terminal-auth'))
+SOCKET = os.environ.get('CADDY_TERMINAL_AUTHD_SOCKET', os.path.join(STATE, 'authd.sock'))
+SESSION_FILE = os.environ.get('CADDY_TERMINAL_AUTHD_SESSIONS', os.path.join(STATE, 'authd-sessions.json'))
+TTYD_SOCKET = os.environ.get('CADDY_TERMINAL_AUTHD_TTYD_SOCKET', os.path.join(STATE, 'run', 'terminal.sock'))
+COOKIE = os.environ.get('CADDY_TERMINAL_AUTHD_COOKIE', 'term_session')
+SESSION_SECONDS = int(os.environ.get('CADDY_TERMINAL_AUTHD_SESSION_SECONDS', '43200'))
+MAX_FAILURES = int(os.environ.get('CADDY_TERMINAL_AUTHD_MAX_FAILURES', '5'))
+FAILURE_WINDOW = int(os.environ.get('CADDY_TERMINAL_AUTHD_FAILURE_WINDOW_SECONDS', '900'))
+LOCKOUT_SECONDS = int(os.environ.get('CADDY_TERMINAL_AUTHD_LOCKOUT_SECONDS', '900'))
+MAX_BODY = 4096
+
+PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Terminal — Sign In</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#161616;font:14px/1.4 "DejaVu Sans",sans-serif}
+main{background:#f0c878;border:1px solid #101010;border-top:2px solid #fffdf4;border-radius:8px 8px 0 0;padding:18px 22px;min-width:280px;color:#161616}
+h1{margin:0 0 12px;font-size:15px}
+input{width:100%;box-sizing:border-box;border:1px solid #101010;background:#fffdf4;padding:6px 8px;font:inherit;border-radius:3px}
+button{margin-top:10px;width:100%;border:1px solid #101010;background:#fffdf4;padding:6px 10px;font:inherit;border-radius:3px;cursor:pointer}
+p{margin:10px 0 0;color:#8a2b0e;font-size:13px}
+</style>
+<main><h1>Terminal</h1>
+<form method="post" action="/login">
+<input type="password" name="password" placeholder="Password" autofocus required aria-label="Password">
+<button type="submit">Open Terminal</button>
+</form>{msg}</main>"""
+
+MESSAGES = {
+    'error': '<p>Wrong password.</p>',
+    'locked': '<p>Too many attempts — locked, try again later.</p>',
+    'auth': '<p>Sign in to open the terminal.</p>',
+    'expired': '<p>Session expired — sign in again.</p>',
+    'loggedout': '<p>Signed out.</p>',
+}
+
+_lock = threading.Lock()
+_failures = collections.defaultdict(collections.deque)  # client key -> failure timestamps
+_lockouts = {}  # client key -> locked-until epoch
+
+
+def read_hash():
+    """Parse the caddy-terminal-passwd file (basic_auth snippet shape)."""
+    try:
+        with open(AUTH_FILE, encoding='utf-8') as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) >= 2 and fields[1].startswith('$2'):
+                    return fields[0], fields[1]
+    except OSError:
+        pass
+    return None, None
+
+
+def load_sessions():
+    try:
+        with open(SESSION_FILE, encoding='utf-8') as handle:
+            value = json.load(handle)
+        now = time.time()
+        return {token: expiry for token, expiry in value.items() if expiry > now}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def save_sessions(sessions):
+    directory = os.path.dirname(SESSION_FILE) or '.'
+    handle = tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=directory,
+                                         prefix='.authd-sessions.', delete=False)
+    try:
+        json.dump(sessions, handle)
+        handle.close()
+        os.chmod(handle.name, 0o600)
+        os.replace(handle.name, SESSION_FILE)
+    except OSError:
+        handle.close()
+        os.unlink(handle.name)
+        raise
+
+
+_sessions = load_sessions()
+
+
+def client_key(headers):
+    forwarded = headers.get('X-Forwarded-For', '')
+    match = re.match(r'\s*([0-9a-fA-F.:]+)', forwarded)
+    return match.group(1) if match else 'local'
+
+
+def remember_failure(key):
+    now = time.time()
+    with _lock:
+        queue = _failures[key]
+        queue.append(now)
+        while queue and now - queue[0] > FAILURE_WINDOW:
+            queue.popleft()
+        if len(queue) >= MAX_FAILURES:
+            _lockouts[key] = now + LOCKOUT_SECONDS
+            queue.clear()
+
+
+def lockout_remaining(key):
+    with _lock:
+        until = _lockouts.get(key, 0)
+        if until <= time.time():
+            _lockouts.pop(key, None)
+            return 0
+        return int(until - time.time()) + 1
+
+
+def ttyd_alive():
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1.0)
+            probe.connect(TTYD_SOCKET)
+            probe.sendall(b'GET / HTTP/1.0\r\n\r\n')
+            return probe.recv(12).startswith(b'HTTP/')
+    except OSError:
+        return False
+
+
+def cookie_attributes(max_age):
+    return f'{COOKIE}=; Path=/; Max-Age={max_age}; Secure; HttpOnly; SameSite=None; Partitioned'
+
+
+def issue_cookie(token):
+    return (f'{COOKIE}={token}; Path=/; Max-Age={SESSION_SECONDS}; '
+            'Secure; HttpOnly; SameSite=None; Partitioned')
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
+    def log_message(self, format, *args):  # noqa: A002 — stdlib signature
+        sys.stderr.write('caddy-terminal-authd: %s %s\n' % (self.address_string(), format % args))
+
+    def address_string(self):
+        return client_key(self.headers)
+
+    def _respond(self, status, body=b'', content_type='text/html; charset=utf-8', headers=()):
+        self.send_response(status)
+        for name, value in headers:
+            self.send_header(name, value)
+        if status != 204:
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        if self.command != 'HEAD' and status != 204:
+            self.wfile.write(body)
+
+    def _redirect(self, location, headers=()):
+        self._respond(303, b'', 'text/plain; charset=utf-8',
+                      [('Location', location), *headers])
+
+    def do_GET(self):  # noqa: N802 — stdlib naming
+        self._serve()
+
+    def do_HEAD(self):  # noqa: N802
+        self._serve()
+
+    def _serve(self):
+        path = urlsplit(self.path).path
+        if path == '/healthz':
+            if ttyd_alive():
+                self._respond(200, b'ok\n', 'text/plain; charset=utf-8')
+            else:
+                self._respond(503, b'down\n', 'text/plain; charset=utf-8')
+            return
+        if path == '/login':
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            note = next((MESSAGES[name] for name in query if name in MESSAGES), '')
+            self._respond(200, PAGE.replace('{msg}', note).encode('utf-8'))
+            return
+        if path == '/logout':
+            token = self._session_token()
+            with _lock:
+                if token in _sessions:
+                    del _sessions[token]
+                    save_sessions(_sessions)
+            self._redirect('/login?loggedout', [('Set-Cookie', cookie_attributes(0))])
+            return
+        if path == '/check':
+            token = self._session_token()
+            with _lock:
+                valid = token in _sessions
+                if valid and _sessions[token] <= time.time():
+                    del _sessions[token]
+                    save_sessions(_sessions)
+                    valid = False
+                if valid:
+                    self._respond(204)
+                else:
+                    self._respond(303, b'', 'text/plain; charset=utf-8',
+                                  [('Location', '/login?auth')])
+            return
+        self._respond(404, b'not found\n', 'text/plain; charset=utf-8')
+
+    def _session_token(self):
+        try:
+            cookie = SimpleCookie(self.headers.get('Cookie', ''))
+            morsel = cookie[COOKIE]
+            return morsel.value if morsel.value else None
+        except (CookieError, KeyError):
+            return None
+
+    def do_POST(self):  # noqa: N802
+        # Drain the body BEFORE any early return: a pooled keep-alive
+        # connection with unread bytes desyncs the next request.
+        try:
+            declared = int(self.headers.get('Content-Length', '0'))
+        except ValueError:
+            declared = 0
+        if declared > MAX_BODY:
+            self.close_connection = True
+        body = self.rfile.read(min(declared, MAX_BODY)) if declared > 0 else b''
+        if urlsplit(self.path).path != '/login':
+            self._respond(404, b'not found\n', 'text/plain; charset=utf-8')
+            return
+        key = client_key(self.headers)
+        remaining = lockout_remaining(key)
+        if remaining:
+            # Throttled: even a correct password is refused during lockout.
+            self._respond(429, b'locked\n', 'text/plain; charset=utf-8',
+                          [('Retry-After', str(remaining)), ('Location', '/login?locked')])
+            return
+        try:
+            password = parse_qs(body.decode('utf-8', 'replace')).get('password', [''])[0]
+        except ValueError:
+            password = ''
+        user, hash_value = read_hash()
+        if not hash_value or not password:
+            remember_failure(key)
+            self._redirect('/login?error')
+            return
+        try:
+            # bcrypt reads at most the first 72 bytes; the comparison itself
+            # is the only place the password is used, and it is never stored.
+            matched = bcrypt.checkpw(password.encode('utf-8')[:72], hash_value.encode('ascii'))
+        except ValueError:
+            matched = False
+        if not matched:
+            remember_failure(key)
+            self._redirect('/login?error')
+            return
+        with _lock:
+            _failures.pop(key, None)
+            token = secrets.token_urlsafe(32)
+            _sessions[token] = time.time() + SESSION_SECONDS
+            save_sessions(_sessions)
+        self._redirect('/', [('Set-Cookie', issue_cookie(token))])
+
+
+class UnixAuthdServer(ThreadingHTTPServer):
+    address_family = socket.AF_UNIX
+    daemon_threads = True
+
+    def server_bind(self):
+        if os.path.lexists(self.server_address):
+            os.unlink(self.server_address)
+        self.socket.bind(self.server_address)
+        try:
+            os.chmod(self.server_address, 0o600)
+        except OSError:
+            pass
+        self.server_name = 'caddy-terminal-authd'
+        self.server_port = 0
+
+
+def alive():
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(2.0)
+            probe.connect(SOCKET)
+            probe.sendall(b'GET /login HTTP/1.0\r\n\r\n')
+            return probe.recv(12).startswith(b'HTTP/')
+    except OSError:
+        return False
+
+
+if __name__ == '__main__':
+    if len(sys.argv) == 2 and sys.argv[1] == '--check':
+        sys.exit(0 if alive() else 3)
+    if len(sys.argv) != 1:
+        sys.stderr.write('Usage: caddy-terminal-authd [--check]\n')
+        sys.exit(2)
+    umask = os.umask(0o077)
+    os.makedirs(os.path.dirname(SOCKET) or '.', mode=0o700, exist_ok=True)
+    try:
+        server = UnixAuthdServer(SOCKET, Handler)
+    finally:
+        os.umask(umask)
+    sys.stderr.write('caddy-terminal-authd: listening on %s\n' % SOCKET)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+#+END_SRC
+
+#+BEGIN_SRC sh
+chmod +x ~/DotCortex/all/.local/bin/caddy-terminal-authd
 #+END_SRC
 
 * Token helper: caddy-terminal-token
@@ -461,7 +861,7 @@ to the unprivileged FileBrowser Caddy instance's machine-local
 =auto_https off= and =admin off= stay), and the instance is restarted. The
 hash file and the token-route snippet are imported, never inlined.
 
-Three details verified live (2026-10-15) and load-bearing:
+Five details verified live (2026-10-15/16) and load-bearing:
 
 - =bind 127.0.0.1= is REQUIRED. Without it a host-IP site address binds the
   port on every interface — the gate briefly listened on the LAN and tailnet
@@ -471,17 +871,37 @@ Three details verified live (2026-10-15) and load-bearing:
   is loopback-only, so wildcard Host is safe — only tailscaled can reach it.
 - The token route import must come FIRST. =handle= blocks are mutually
   exclusive and evaluated in order; the token =handle_path= claims its prefix
-  and the bare =handle= is the authenticated catch-all. Both routes proxy the
-  same unix socket. No X-Frame-Options or CSP is emitted on either route —
-  ttyd sends none, Caddy basic_auth adds none — so both the Centre window and
-  the Logseq panel can frame the terminal.
+  before the path-specific handles and the bare authenticated catch-all.
+  Both proxy routes carry the websocket upgrade natively.
+- The =Content-Security-Policy: frame-ancestors= site header is what R-DOCK-17
+  rides on: it applies to every response of the site — including =/healthz= —
+  so the dock's =inspect_apps= reads =frame-ancestors= off the health probe
+  and reports frame=allowed for the Centre origin and nothing else. No
+  =X-Frame-Options= is ever emitted (it would shadow the CSP).
+- =/healthz=, =/login= and =/logout= are deliberately OUTSIDE the
+  =forward_auth= catch-all: the dock's health probe is unauthenticated (it
+  only ever learns ok/not), and the login page must be reachable without a
+  session. Everything else — the ttyd index, =/token=, =/ws= — requires the
+  session cookie via =forward_auth= against the verifier socket.
 
 #+BEGIN_EXAMPLE
 http://:7680 {
 	bind 127.0.0.1
+	header Content-Security-Policy "frame-ancestors https://kikin-kushi.sphinx-draco.ts.net:1996"
 	import /home/metsatron/.local/state/caddy-terminal/terminal-token-route
+	handle /healthz {
+		reverse_proxy unix//home/metsatron/.local/state/caddy-terminal/authd.sock
+	}
+	handle /login {
+		reverse_proxy unix//home/metsatron/.local/state/caddy-terminal/authd.sock
+	}
+	handle /logout {
+		reverse_proxy unix//home/metsatron/.local/state/caddy-terminal/authd.sock
+	}
 	handle {
-		import /home/metsatron/.local/state/caddy-terminal/terminal-auth
+		forward_auth unix//home/metsatron/.local/state/caddy-terminal/authd.sock {
+			uri /check
+		}
 		reverse_proxy unix//home/metsatron/.local/state/caddy-terminal/run/terminal.sock
 	}
 }
@@ -502,7 +922,10 @@ here: the dock registry owns app routing, icons and window shape.
 
 Live checks (Kikin, run by the builder; recorded in the handoff report).
 The round-1 core: NO listener gives an unauthenticated shell to another
-local user.
+local user. The round-2 core: the dock's health probe is 200 unauthenticated,
+the root without a session is the login page, and the session works inside
+the Centre iframe (HelmCortex =FORGE/tests/test_caddy_terminal_window.py=
+proves all of this against a scratch instance).
 
 1. No TCP listener for ttyd at all: =ss -H -tln "( sport = :7681 )"$ returns
    nothing for the supervised instance (a pre-fix Logseq ttyd may linger
@@ -515,13 +938,26 @@ local user.
    =sudo -u agent-vibe curl --unix-socket=
    =/home/metsatron/.local/state/caddy-terminal/run/terminal.sock=
    =http://localhost/= fails with permission denied.
-3. No credential: =curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7680/=
-   returns 401.
-4. With credential: the ttyd index loads (200) and a websocket echo round-trips
-   through the gate (=/token=, then =/ws= with the tty= subprotocol).
-5. Token route (Logseq lane): =curl -s -o /dev/null -w '%{http_code}'=
+3. No session: =curl -s -o /dev/null -w '%{http_code}' -L=
+   =http://127.0.0.1:7680/= lands on the LOGIN PAGE (200 with the form) —
+   never a 401. =curl -I http://127.0.0.1:7680/= shows the =303= to
+   =/login?auth= from the forward-auth check.
+4. Health probe (dock lane): =curl -s -o /dev/null -w '%{http_code}'=
+   =http://127.0.0.1:7680/healthz= returns 200 with NO credential and body
+   =ok= only; killing ttyd flips it to =503= =down=. The response carries
+   =Content-Security-Policy: frame-ancestors= naming ONLY the Centre origin.
+5. With session: =curl -c jar -d 'password=...' http://127.0.0.1:7680/login=
+   saves the cookie (=Secure; HttpOnly; SameSite=None; Partitioned=), then
+   the ttyd index loads (200) and a websocket echo round-trips through the
+   gate (=/token=, then =/ws= with the tty= subprotocol). =/logout= drops
+   the session and the root is the login page again.
+6. Throttle: five wrong passwords in a row lock the client out — further
+   POSTs to =/login= answer =429= with =Retry-After=, even with the right
+   password, until the lockout window passes.
+7. Token route (Logseq lane): =curl -s -o /dev/null -w '%{http_code}'=
    =http://127.0.0.1:7680/<token>/= returns 200 with NO credential, and a
    websocket echo round-trips through it too. A wrong token gets 401.
-6. =curl http://<tailnet-ip>:7680= is refused (=bind 127.0.0.1=).
-7. Killing the ttyd PID: the supervisor respawns it within its retry window,
-   the socket comes back 0600, and the gate is 200 again.
+8. =curl http://<tailnet-ip>:7680= is refused (=bind 127.0.0.1=).
+9. Killing the ttyd PID: the supervisor respawns it within its retry window,
+   the socket comes back 0600, and the gate is 200 again. Same contract for
+   the authd lane (=caddy-terminal-authd --check=).

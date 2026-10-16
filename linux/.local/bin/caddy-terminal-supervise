@@ -8,6 +8,9 @@ RETRY_SECONDS=5
 ADOPT_SECONDS=30
 LAUNCHER="${CADDY_TERMINAL_SUPERVISE_LAUNCHER:-$HOME/.local/bin/caddy-terminal-serve}"
 SOCKET="${CADDY_TERMINAL_SOCKET:-$HOME/.local/state/caddy-terminal/run/terminal.sock}"
+# The lock is parameterised so the same script can supervise the gate's
+# auth verifier (caddy-terminal-authd) with its own lock file and launcher.
+LOCK_FILE="${CADDY_TERMINAL_SUPERVISE_LOCK:-}"
 HOSTNAME_BIN="${CADDY_TERMINAL_SUPERVISE_HOSTNAME_BIN:-hostname}"
 
 while [ "$#" -gt 0 ]; do
@@ -29,7 +32,7 @@ CURRENT_HOST="$($HOSTNAME_BIN -s)"
 
 LOG_DIR="${CADDY_TERMINAL_STATE:-$HOME/.local/state/caddy-terminal}"
 mkdir -p "$LOG_DIR"
-exec 9>"$LOG_DIR/supervisor.lock"
+exec 9>"${LOCK_FILE:-$LOG_DIR/supervisor.lock}"
 if ! flock -n 9; then
   # Boot watchdog and liveness poll may meet; only one supervisor owns the service.
   exit 0
