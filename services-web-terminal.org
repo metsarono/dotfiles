@@ -441,8 +441,7 @@ spec; the session only ever validates on the gate's own socket.
 3 = down), same contract as the launcher.
 
 #+name: caddy-terminal-authd
-#+BEGIN_SRC python :tangle all/.local/bin/caddy-terminal-authd :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
-#!/usr/bin/env python3
+#+BEGIN_SRC python :tangle all/.local/bin/caddy-terminal-authd :shebang "#!/usr/bin/python3" :tangle-mode (identity #o755)
 """caddy-terminal-authd — unix-socket login/session verifier for the web terminal gate.
 
 Checks the bcrypt hash caddy-terminal-passwd writes; issues CHIPS cookies
