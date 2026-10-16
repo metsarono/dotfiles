@@ -1505,6 +1505,188 @@ def _hold_timeout_seconds():
         return default
 
 
+# Known non-permission blocking dialogs (2026-10-16: Bunta's warm seat sat
+# 2.5 h on the autocompact dialog; it is a modal, so no mail or Telegram wake
+# could type while it was open).  Each entry is an exact screen fingerprint
+# -- heading, question, highlighted default and the dialog's own footer cues
+# are ALL required, never loose words -- plus the single safe key that
+# answers the highlighted default.  The seat must be otherwise idle on the
+# same dialog for DIALOG_SETTLE_SECONDS before one guarded write fires.
+# Permission prompts never enter this path: they keep the 10-minute AFK hold
+# and the Desk queue.  Unknown cue-footered dialogs are never keyed, only
+# recorded once as dialog_unknown so the next one can be added here.
+DIALOG_SETTLE_SECONDS = 5.0
+DIALOG_DISMISS_KEYS = (b"\r",)  # Enter confirms the dialog's highlighted default
+
+
+class BlockingDialog:
+    """One known non-permission blocking dialog: exact fingerprint, one key."""
+    __slots__ = ("dialog_id", "required_markers", "dismiss_key")
+
+    def __init__(self, dialog_id, required_markers, dismiss_key):
+        if not isinstance(dialog_id, str) or not dialog_id:
+            raise ValueError("dialog id")
+        markers = tuple(required_markers)
+        if not markers or any(not isinstance(marker, str) or not marker.strip()
+                               for marker in markers):
+            raise ValueError("dialog fingerprint requires non-empty markers")
+        if dismiss_key not in DIALOG_DISMISS_KEYS:
+            raise ValueError("dialog dismiss key must be one of %r" % (DIALOG_DISMISS_KEYS,))
+        self.dialog_id = dialog_id
+        self.required_markers = tuple(marker.strip().lower() for marker in markers)
+        self.dismiss_key = dismiss_key
+
+    def matches(self, visible):
+        if not isinstance(visible, str) or not visible:
+            return False
+        lowered = visible.lower()
+        return all(marker in lowered for marker in self.required_markers)
+
+    def identity(self, visible):
+        """Bind the whole visible screen plus the fingerprint's position."""
+        if not self.matches(visible):
+            return None
+        lowered = visible.lower()
+        position = min(lowered.index(marker) for marker in self.required_markers)
+        digest = hashlib.sha256(visible.encode("utf-8", "replace")).hexdigest()
+        return f"{digest}@{position}"
+
+
+# The autocompact dialog (captured 2026-10-16): every rewording of heading,
+# question, default choice or footer makes it dialog_unknown instead of a
+# blind Enter.
+KNOWN_BLOCKING_DIALOGS = (
+    BlockingDialog(
+        "autocompact-400k",
+        (
+            "we recommend compacting earlier",
+            "want to autocompact at 400k tokens instead?",
+            "keep auto (1m tokens)",
+            "enter confirm",
+            "esc not now",
+        ),
+        b"\r",
+    ),
+)
+
+
+def match_known_dialog(visible):
+    """The one known dialog on screen; never a permission prompt."""
+    profile = _hold_profile()
+    if profile is not None and profile.matches(visible):
+        return None  # permission prompts keep the AFK hold and the Desk path
+    for dialog in KNOWN_BLOCKING_DIALOGS:
+        if dialog.matches(visible):
+            return dialog
+    return None
+
+
+def dialog_cue_legend(visible):
+    """The bottom keyboard-cue legend of an unidentified blocking dialog.
+
+    Normal chrome never carries both cues: the idle footer is
+    "manual mode on · ? for shortcuts · ← for agents" and the busy footer
+    only adds "esc to interrupt".  A bottom line with both enter and esc
+    cues around "·" separators is a dialog asking for a key."""
+    if not isinstance(visible, str) or not visible:
+        return None
+    lines = [line.strip() for line in visible.splitlines() if line.strip()]
+    for line in reversed(lines[-2:]):
+        lowered = line.lower()
+        if "·" in lowered and "enter" in lowered and "esc" in lowered:
+            return line
+    return None
+
+
+def _dialog_owner_busy(owner):
+    return bool(getattr(owner, "compacting", False)
+                or getattr(owner, "recovery_pending", False)
+                or getattr(owner, "recovery_awaiting", False)
+                or getattr(owner, "mailcortex_input_dirty", True)
+                or getattr(owner, "status", None) not in {"active", "idle"})
+
+
+def dismiss_expired_dialog(owner, timer, dialog, read_screen, now, ledger_write):
+    """One guarded dismiss write, only to the exact recorded dialog.
+
+    Same discipline as the permission deny: owner lock, pending-input
+    check, acknowledged process-tree pause, bounded screen drain, identity
+    re-check immediately before the write, exactly one write, no replay."""
+    expected = timer.identity()
+    lock = getattr(owner, "mailcortex_admission_lock", None)
+    if lock is None or expected is None or not timer.expired(now()):
+        return False
+    with lock:
+        if timer.identity() != expected or not timer.expired(now()):
+            return False
+        written = False
+        try:
+            pending = getattr(owner, "_hold_input_pending", None)
+            barrier = getattr(owner, "_mailcortex_barrier", None)
+            drain = getattr(owner, "_mailcortex_refresh_screen", None)
+            if not all(callable(guard) for guard in (pending, barrier, drain)):
+                timer.clear()
+                return False
+            if _dialog_owner_busy(owner) or pending():
+                timer.clear()
+                return False
+            with barrier():
+                if drain() or _dialog_owner_busy(owner) or pending():
+                    timer.clear()
+                    return False
+                visible = read_screen()
+                if dialog.identity(visible) != expected:
+                    timer.record(visible, dialog, now())
+                    return False
+                fd = owner.master_fd
+                if os.get_blocking(fd):
+                    raise ValueError("PTY dismiss requires a nonblocking owner descriptor")
+                if drain() or _dialog_owner_busy(owner) or pending():
+                    timer.clear()
+                    return False
+                if os.write(fd, dialog.dismiss_key) != len(dialog.dismiss_key):
+                    raise OSError("partial PTY dialog dismiss write")
+                written = True
+                timer.clear()
+        except (OSError, ValueError, AttributeError, RuntimeError, TypeError):
+            timer.clear()
+            if not written:
+                return False
+            logger = getattr(owner, "_guard_log", None)
+            if callable(logger):
+                logger("dialog-dismiss-resume-failed")
+        try:
+            ledger_write(expected)
+        except Exception:
+            # The dismiss landed. Never repeat it because recording failed.
+            logger = getattr(owner, "_guard_log", None)
+            if callable(logger):
+                logger("dialog-dismiss-ledger-failed")
+        return True
+
+
+def _dialog_ledger_write(supervisor, action, dialog_id=None, identity=None, snippet=None):
+    """Append one dialog record to the PTY hold ledger; log failures."""
+    try:
+        ledger = pathlib.Path.home() / ".local/state/dotcortex/pty-hold-ledger.jsonl"
+        ledger.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        record = {"ts": time.time(), "action": action, "session": supervisor.session_id}
+        if dialog_id is not None:
+            record["dialog"] = dialog_id
+        if identity is not None:
+            record["dialog_identity"] = identity
+        if snippet is not None:
+            record["screen_text_snippet"] = snippet
+        descriptor = os.open(ledger, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+        return True
+    except Exception:
+        supervisor._guard_log("dialog-ledger-failed")
+        return False
+
+
 def _hold_queue_write(supervisor, profile, identity):
     """Preserve the full screen request in the real queue; log recording errors."""
     try:
@@ -2213,6 +2395,8 @@ class Supervisor:
         if not hasattr(self, "mailcortex_input_dirty"):
             self.mailcortex_input_dirty = False
         self.hold_timer = None  # created on first permission-prompt sighting
+        self.dialog_timer = None  # settle timer for known non-permission dialogs
+        self.dialog_unknown_logged = False  # one dialog_unknown record per episode
         self.preservation_federation = PreservationFederationClient(self)
         self.lifecycle_health = "pending"
         self.lifecycle_deadline = monotonic() + LIFECYCLE_WAIT_SECONDS
@@ -3803,6 +3987,9 @@ class Supervisor:
             self.status = "starting"
             if self.hold_timer is not None:
                 self.hold_timer.clear()
+            if self.dialog_timer is not None:
+                self.dialog_timer.clear()
+            self.dialog_unknown_logged = False
             if not (first_session and self.screen_classifier.screen.alternate_screen):
                 self.screen_classifier.reset()
                 self.screen_state = None
@@ -3878,6 +4065,8 @@ class Supervisor:
             self.mailcortex_input_dirty = False
             if self.hold_timer is not None:
                 self.hold_timer.clear()
+            if self.dialog_timer is not None:
+                self.dialog_timer.clear()
             self.status = "active"
             self.last_lifecycle_activity = current
             self.compaction_ignore_next_stop = False
@@ -4177,6 +4366,8 @@ class Supervisor:
         self.mailcortex_input_dirty = True
         if self.hold_timer is not None:
             self.hold_timer.clear()
+        if self.dialog_timer is not None:
+            self.dialog_timer.clear()
         self._close_development_channel_acceptance("local-input")
         self.last_local_input = now()
         self.last_local_input_classification = ",".join(sorted(summary))
@@ -4257,6 +4448,7 @@ class Supervisor:
         if state is not None:
             self._report_screen_state(state)
         self._hold_maybe_record(state)
+        self._dialog_maybe_record()
         return True
 
     def _mailcortex_barrier(self):
@@ -4321,6 +4513,72 @@ class Supervisor:
             self, timer, profile, read_screen=self._hold_screen, now=_hold_now,
             queue_write=lambda identity: _hold_queue_write(self, profile, identity))
 
+    def _dialog_screen(self):
+        """The exact visible screen of a known non-permission blocking dialog,
+        only while the seat is otherwise idle on it (never blocked/working)."""
+        classifier = self.screen_classifier
+        visible = classifier._visible_text()
+        if not classifier.screen.complete() or classifier._classify(visible) != "idle":
+            return None, None
+        dialog = match_known_dialog(visible)
+        if dialog is None:
+            return None, None
+        return visible, dialog
+
+    def _dialog_visible(self):
+        return self._dialog_screen()[0]
+
+    def _dialog_maybe_record(self) -> None:
+        # Same re-read discipline as the permission hold: repeated redraws of
+        # the same dialog keep the settle deadline instead of clearing it.
+        module = _hold_module()
+        if module is None:
+            return
+        visible, dialog = self._dialog_screen()
+        if dialog is not None and not self.mailcortex_input_dirty:
+            if self.dialog_timer is None:
+                self.dialog_timer = module.PtyHoldTimer(timeout=DIALOG_SETTLE_SECONDS)
+            self.dialog_timer.record(visible, dialog, now=_hold_now())
+        elif self.dialog_timer is not None:
+            self.dialog_timer.clear()
+        if dialog is None:
+            self._dialog_maybe_log_unknown()
+
+    def _dialog_maybe_log_unknown(self) -> None:
+        """Record an unidentified blocking dialog once per episode; never key it."""
+        classifier = self.screen_classifier
+        visible = classifier._visible_text()
+        if not classifier.screen.complete():
+            return
+        legend = dialog_cue_legend(visible)
+        if legend is None:
+            self.dialog_unknown_logged = False
+            return
+        if (classifier._classify(visible) != "idle"
+                or match_known_dialog(visible) is not None):
+            return
+        profile = _hold_profile()
+        if profile is not None and profile.matches(visible):
+            return
+        if self.dialog_unknown_logged:
+            return
+        if _dialog_ledger_write(self, "dialog_unknown",
+                                snippet=" ".join(visible[-400:].split())):
+            self.dialog_unknown_logged = True
+
+    def _dialog_expire(self) -> None:
+        timer = self.dialog_timer
+        if timer is None:
+            return
+        _visible, dialog = self._dialog_screen()
+        if dialog is None:
+            timer.clear()
+            return
+        dismiss_expired_dialog(
+            self, timer, dialog, read_screen=self._dialog_visible, now=_hold_now,
+            ledger_write=lambda identity: _dialog_ledger_write(
+                self, "dialog_dismissed", dialog.dialog_id, identity))
+
     def _child_has_exited(self) -> bool:
         """Reap the child once and retain its real exit status."""
         if self.child_status is not None or not self.pid:
@@ -4376,6 +4634,11 @@ class Supervisor:
                 # deny itself re-validates everything under the owner lock.
                 if self.hold_timer is not None and self.hold_timer.expired(_hold_now()):
                     self._hold_expire()
+                # Known non-permission dialogs (autocompact prompt): dismiss
+                # with the entry's safe key after the short settle. Unknown
+                # dialogs are only logged, never keyed.
+                if self.dialog_timer is not None and self.dialog_timer.expired(_hold_now()):
+                    self._dialog_expire()
                 if (
                     self.compacting
                     and self.compaction_requested_at
