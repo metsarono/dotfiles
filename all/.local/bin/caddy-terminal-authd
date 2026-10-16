@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+#!/usr/bin/env python3
+"""caddy-terminal-authd — unix-socket login/session verifier for the web terminal gate.
+
+Checks the bcrypt hash caddy-terminal-passwd writes; issues CHIPS cookies
+that work inside the Centre iframe; throttles failed logins. The password is
+only ever in the POST body — never logged, echoed, or stored anywhere.
+"""
+import bcrypt
+import collections
+import json
+import os
+import re
+import secrets
+import socket
+import sys
+import tempfile
+import threading
+import time
+from http.cookies import CookieError, SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
+
+STATE = os.environ.get('CADDY_TERMINAL_STATE', os.path.expanduser('~/.local/state/caddy-terminal'))
+AUTH_FILE = os.environ.get('CADDY_TERMINAL_AUTH', os.path.join(STATE, 'terminal-auth'))
+SOCKET = os.environ.get('CADDY_TERMINAL_AUTHD_SOCKET', os.path.join(STATE, 'authd.sock'))
+SESSION_FILE = os.environ.get('CADDY_TERMINAL_AUTHD_SESSIONS', os.path.join(STATE, 'authd-sessions.json'))
+TTYD_SOCKET = os.environ.get('CADDY_TERMINAL_AUTHD_TTYD_SOCKET', os.path.join(STATE, 'run', 'terminal.sock'))
+COOKIE = os.environ.get('CADDY_TERMINAL_AUTHD_COOKIE', 'term_session')
+SESSION_SECONDS = int(os.environ.get('CADDY_TERMINAL_AUTHD_SESSION_SECONDS', '43200'))
+MAX_FAILURES = int(os.environ.get('CADDY_TERMINAL_AUTHD_MAX_FAILURES', '5'))
+FAILURE_WINDOW = int(os.environ.get('CADDY_TERMINAL_AUTHD_FAILURE_WINDOW_SECONDS', '900'))
+LOCKOUT_SECONDS = int(os.environ.get('CADDY_TERMINAL_AUTHD_LOCKOUT_SECONDS', '900'))
+# Fix round 3 (CSWSH): the exact Origin(s) allowed to POST /login — the
+# ttyd page's own origin inside the Centre iframe. Space-separated so a
+# scratch test stack can name its own; production never overrides it.
+ORIGINS = [value for value in os.environ.get(
+    'CADDY_TERMINAL_ORIGINS',
+    'https://kikin-kushi.sphinx-draco.ts.net:7682').split() if value]
+MAX_BODY = 4096
+
+PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Terminal — Sign In</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#161616;font:14px/1.4 "DejaVu Sans",sans-serif}
+main{background:#f0c878;border:1px solid #101010;border-top:2px solid #fffdf4;border-radius:8px 8px 0 0;padding:18px 22px;min-width:280px;color:#161616}
+h1{margin:0 0 12px;font-size:15px}
+input{width:100%;box-sizing:border-box;border:1px solid #101010;background:#fffdf4;padding:6px 8px;font:inherit;border-radius:3px}
+button{margin-top:10px;width:100%;border:1px solid #101010;background:#fffdf4;padding:6px 10px;font:inherit;border-radius:3px;cursor:pointer}
+p{margin:10px 0 0;color:#8a2b0e;font-size:13px}
+</style>
+<main><h1>Terminal</h1>
+<form method="post" action="/login">
+<input type="password" name="password" placeholder="Password" autofocus required aria-label="Password">
+<button type="submit">Open Terminal</button>
+</form>{msg}</main>"""
+
+MESSAGES = {
+    'error': '<p>Wrong password.</p>',
+    'locked': '<p>Too many attempts — locked, try again later.</p>',
+    'auth': '<p>Sign in to open the terminal.</p>',
+    'expired': '<p>Session expired — sign in again.</p>',
+    'loggedout': '<p>Signed out.</p>',
+}
+
+_lock = threading.Lock()
+_failures = collections.defaultdict(collections.deque)  # client key -> failure timestamps
+_lockouts = {}  # client key -> locked-until epoch
+
+
+def read_hash():
+    """Parse the caddy-terminal-passwd file (basic_auth snippet shape)."""
+    try:
+        with open(AUTH_FILE, encoding='utf-8') as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) >= 2 and fields[1].startswith('$2'):
+                    return fields[0], fields[1]
+    except OSError:
+        pass
+    return None, None
+
+
+def load_sessions():
+    try:
+        with open(SESSION_FILE, encoding='utf-8') as handle:
+            value = json.load(handle)
+        now = time.time()
+        return {token: expiry for token, expiry in value.items() if expiry > now}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def save_sessions(sessions):
+    directory = os.path.dirname(SESSION_FILE) or '.'
+    handle = tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=directory,
+                                         prefix='.authd-sessions.', delete=False)
+    try:
+        json.dump(sessions, handle)
+        handle.close()
+        os.chmod(handle.name, 0o600)
+        os.replace(handle.name, SESSION_FILE)
+    except OSError:
+        handle.close()
+        os.unlink(handle.name)
+        raise
+
+
+_sessions = load_sessions()
+
+
+def client_key(headers):
+    forwarded = headers.get('X-Forwarded-For', '')
+    match = re.match(r'\s*([0-9a-fA-F.:]+)', forwarded)
+    return match.group(1) if match else 'local'
+
+
+def remember_failure(key):
+    now = time.time()
+    with _lock:
+        queue = _failures[key]
+        queue.append(now)
+        while queue and now - queue[0] > FAILURE_WINDOW:
+            queue.popleft()
+        if len(queue) >= MAX_FAILURES:
+            _lockouts[key] = now + LOCKOUT_SECONDS
+            queue.clear()
+
+
+def lockout_remaining(key):
+    with _lock:
+        until = _lockouts.get(key, 0)
+        if until <= time.time():
+            _lockouts.pop(key, None)
+            return 0
+        return int(until - time.time()) + 1
+
+
+def ttyd_alive():
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1.0)
+            probe.connect(TTYD_SOCKET)
+            probe.sendall(b'GET / HTTP/1.0\r\n\r\n')
+            return probe.recv(12).startswith(b'HTTP/')
+    except OSError:
+        return False
+
+
+def cookie_attributes(max_age):
+    return f'{COOKIE}=; Path=/; Max-Age={max_age}; Secure; HttpOnly; SameSite=None; Partitioned'
+
+
+def issue_cookie(token):
+    return (f'{COOKIE}={token}; Path=/; Max-Age={SESSION_SECONDS}; '
+            'Secure; HttpOnly; SameSite=None; Partitioned')
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
+    def log_message(self, format, *args):  # noqa: A002 — stdlib signature
+        sys.stderr.write('caddy-terminal-authd: %s %s\n' % (self.address_string(), format % args))
+
+    def address_string(self):
+        return client_key(self.headers)
+
+    def _respond(self, status, body=b'', content_type='text/html; charset=utf-8', headers=()):
+        self.send_response(status)
+        for name, value in headers:
+            self.send_header(name, value)
+        if status != 204:
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        if self.command != 'HEAD' and status != 204:
+            self.wfile.write(body)
+
+    def _redirect(self, location, headers=()):
+        self._respond(303, b'', 'text/plain; charset=utf-8',
+                      [('Location', location), *headers])
+
+    def do_GET(self):  # noqa: N802 — stdlib naming
+        self._serve()
+
+    def do_HEAD(self):  # noqa: N802
+        self._serve()
+
+    def _serve(self):
+        path = urlsplit(self.path).path
+        if path == '/healthz':
+            if ttyd_alive():
+                self._respond(200, b'ok\n', 'text/plain; charset=utf-8')
+            else:
+                self._respond(503, b'down\n', 'text/plain; charset=utf-8')
+            return
+        if path == '/login':
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            note = next((MESSAGES[name] for name in query if name in MESSAGES), '')
+            self._respond(200, PAGE.replace('{msg}', note).encode('utf-8'))
+            return
+        if path == '/logout':
+            token = self._session_token()
+            with _lock:
+                if token in _sessions:
+                    del _sessions[token]
+                    save_sessions(_sessions)
+            self._redirect('/login?loggedout', [('Set-Cookie', cookie_attributes(0))])
+            return
+        if path == '/check':
+            token = self._session_token()
+            with _lock:
+                valid = token in _sessions
+                if valid and _sessions[token] <= time.time():
+                    del _sessions[token]
+                    save_sessions(_sessions)
+                    valid = False
+                if valid:
+                    self._respond(204)
+                else:
+                    self._respond(303, b'', 'text/plain; charset=utf-8',
+                                  [('Location', '/login?auth')])
+            return
+        self._respond(404, b'not found\n', 'text/plain; charset=utf-8')
+
+    def _session_token(self):
+        try:
+            cookie = SimpleCookie(self.headers.get('Cookie', ''))
+            morsel = cookie[COOKIE]
+            return morsel.value if morsel.value else None
+        except (CookieError, KeyError):
+            return None
+
+    def do_POST(self):  # noqa: N802
+        # Drain the body BEFORE any early return: a pooled keep-alive
+        # connection with unread bytes desyncs the next request.
+        try:
+            declared = int(self.headers.get('Content-Length', '0'))
+        except ValueError:
+            declared = 0
+        if declared > MAX_BODY:
+            self.close_connection = True
+        body = self.rfile.read(min(declared, MAX_BODY)) if declared > 0 else b''
+        if urlsplit(self.path).path != '/login':
+            self._respond(404, b'not found\n', 'text/plain; charset=utf-8')
+            return
+        # Fix round 3: cross-site request forgery is the missing CSRF token.
+        # The login POST is only ever issued by the gate's own page inside the
+        # Centre iframe, so every other Origin — or none — is refused BEFORE
+        # the password is read (refusals never count toward lockout: an
+        # attacker must not be able to lock the Admiral out with junk
+        # Origin headers). The password is never logged either way.
+        origin = self.headers.get('Origin')
+        if origin not in ORIGINS:
+            self.log_message('POST /login refused: Origin %s', (origin or '<missing>')[:200])
+            self._respond(403, b'bad origin\n', 'text/plain; charset=utf-8')
+            return
+        key = client_key(self.headers)
+        remaining = lockout_remaining(key)
+        if remaining:
+            # Throttled: even a correct password is refused during lockout.
+            self._respond(429, b'locked\n', 'text/plain; charset=utf-8',
+                          [('Retry-After', str(remaining)), ('Location', '/login?locked')])
+            return
+        try:
+            password = parse_qs(body.decode('utf-8', 'replace')).get('password', [''])[0]
+        except ValueError:
+            password = ''
+        user, hash_value = read_hash()
+        if not hash_value or not password:
+            remember_failure(key)
+            self._redirect('/login?error')
+            return
+        try:
+            # bcrypt reads at most the first 72 bytes; the comparison itself
+            # is the only place the password is used, and it is never stored.
+            matched = bcrypt.checkpw(password.encode('utf-8')[:72], hash_value.encode('ascii'))
+        except ValueError:
+            matched = False
+        if not matched:
+            remember_failure(key)
+            self._redirect('/login?error')
+            return
+        with _lock:
+            _failures.pop(key, None)
+            token = secrets.token_urlsafe(32)
+            _sessions[token] = time.time() + SESSION_SECONDS
+            save_sessions(_sessions)
+        self._redirect('/', [('Set-Cookie', issue_cookie(token))])
+
+
+class UnixAuthdServer(ThreadingHTTPServer):
+    address_family = socket.AF_UNIX
+    daemon_threads = True
+
+    def server_bind(self):
+        if os.path.lexists(self.server_address):
+            os.unlink(self.server_address)
+        self.socket.bind(self.server_address)
+        try:
+            os.chmod(self.server_address, 0o600)
+        except OSError:
+            pass
+        self.server_name = 'caddy-terminal-authd'
+        self.server_port = 0
+
+
+def alive():
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(2.0)
+            probe.connect(SOCKET)
+            probe.sendall(b'GET /login HTTP/1.0\r\n\r\n')
+            return probe.recv(12).startswith(b'HTTP/')
+    except OSError:
+        return False
+
+
+if __name__ == '__main__':
+    if len(sys.argv) == 2 and sys.argv[1] == '--check':
+        sys.exit(0 if alive() else 3)
+    if len(sys.argv) != 1:
+        sys.stderr.write('Usage: caddy-terminal-authd [--check]\n')
+        sys.exit(2)
+    umask = os.umask(0o077)
+    os.makedirs(os.path.dirname(SOCKET) or '.', mode=0o700, exist_ok=True)
+    try:
+        server = UnixAuthdServer(SOCKET, Handler)
+    finally:
+        os.umask(umask)
+    sys.stderr.write('caddy-terminal-authd: listening on %s\n' % SOCKET)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass

@@ -28,7 +28,9 @@ if [ "$REMOVE" = 0 ]; then
 fi
 
 SUPERVISOR="$HOME/.local/bin/caddy-terminal-supervise"
+AUTHD="$HOME/.local/bin/caddy-terminal-authd"
 [ "$DRY" = 1 ] || [ "$REMOVE" = 1 ] || [ -x "$SUPERVISOR" ] || { echo "$TAG: missing $SUPERVISOR; tangle and stow first" >&2; exit 1; }
+[ "$DRY" = 1 ] || [ "$REMOVE" = 1 ] || [ -x "$AUTHD" ] || { echo "$TAG: missing $AUTHD; tangle and stow first" >&2; exit 1; }
 
 CRON_PATH="$HOME/.guix-extra-profiles/core/core/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
@@ -52,9 +54,13 @@ fi
 desired="$(printf '%s\n' "$stripped" | cat -s)"
 [ -n "$desired" ] && desired="$desired
 "
+AUTHD="$HOME/.local/bin/caddy-terminal-authd"
+AUTHD_ENV="CADDY_TERMINAL_SUPERVISE_LAUNCHER=$AUTHD CADDY_TERMINAL_SUPERVISE_LOCK=$HOME/.local/state/caddy-terminal/authd-supervisor.lock"
 desired="${desired}${BEGIN}
 @reboot HOME=$HOME PATH=$CRON_PATH $SUPERVISOR --expected-host $EXPECTED_HOST --delay 15 --retry-seconds 5
 */2 * * * * HOME=$HOME PATH=$CRON_PATH $SUPERVISOR --expected-host $EXPECTED_HOST
+@reboot HOME=$HOME PATH=$CRON_PATH $AUTHD_ENV $SUPERVISOR --expected-host $EXPECTED_HOST --delay 15 --retry-seconds 5
+*/2 * * * * HOME=$HOME PATH=$CRON_PATH $AUTHD_ENV $SUPERVISOR --expected-host $EXPECTED_HOST
 ${END}"
 
 if [ "$DRY" = 1 ]; then
