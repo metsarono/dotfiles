@@ -546,6 +546,11 @@ OPS_ARG = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_./:@=+,-]*$')
 # same inert character class.
 OPS_GIT_SUBS = frozenset({'log', 'status', 'diff', 'show', 'branch'})
 OPS_FLAG = re.compile(r'^--?[A-Za-z0-9][A-Za-z0-9_./:@=+,-]*$')
+# One '>' or '>>' of a bunta-ops call into the seat's own private scratch
+# (Bunta's review, 2026-10-16): literal absolute target, no symlink anywhere on
+# the path, the parent owned by this user and not group/world-writable, so no
+# other user can plant the target between this check and the shell's open().
+OPS_REDIRECT = re.compile(r'^(?P<base>[^<>|&;`$\\\n]+?)\s(?P<op>>>?)\s?(?P<target>/[A-Za-z0-9_./@+,-]+)$')
 COORDINATOR_ATOM = re.compile(r'^[A-Za-z0-9_./-]+$')
 COORDINATOR_BRANCH = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 DISPATCH_RE = re.compile(
@@ -888,6 +893,29 @@ def _peer_coordinator_match(command, words, config, manifest):
     return None
 
 
+def _ops_redirect_target(target, config):
+    parts = target.split('/')[1:]
+    if not parts or any(part in ('', '.', '..') for part in parts):
+        return False
+    path = ''
+    try:
+        for part in parts[:-1]:
+            path += '/' + part
+            if stat.S_ISLNK(os.lstat(path).st_mode):
+                return False
+        parent = os.lstat(path)
+        if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o022
+                or not any(_inside(path, os.path.realpath(root)) for root in config['scratch_roots'])):
+            return False
+        try:
+            leaf = os.lstat(target)
+        except FileNotFoundError:
+            return True
+        return stat.S_ISREG(leaf.st_mode) and leaf.st_uid == os.getuid() and leaf.st_nlink == 1
+    except OSError:
+        return False
+
+
 def _coordinator_match(event, manifest):
     config = _coordinator_config(manifest)
     tool_input, cwd = event.get('tool_input'), event.get('cwd')
@@ -897,6 +925,12 @@ def _coordinator_match(event, manifest):
     command = tool_input.get('command')
     if not isinstance(command, str) or not command.isascii() or any(ord(c) < 32 or ord(c) == 127 for c in command):
         return None
+    redirect = OPS_REDIRECT.fullmatch(command)
+    if redirect and config['classes'].get('ops_tool') is True:
+        if not _ops_redirect_target(redirect.group('target'), config):
+            return None
+        inner = _coordinator_match({**event, 'tool_input': {**tool_input, 'command': redirect.group('base')}}, manifest)
+        return 'coordinator_ops_redirect' if inner == 'coordinator_ops_tool' else None
     landing = _landing_merge_words(command)
     shape_command = re.sub(r'\s+2>&1\s*$', '', command)
     if landing is not None:
