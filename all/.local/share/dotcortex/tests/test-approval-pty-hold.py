@@ -745,6 +745,323 @@ class PtyHoldTests(unittest.TestCase):
         self.assertEqual(owner.guard_log_path.stat().st_mode & 0o777, 0o600)
 
 
+class BlockingDialogDismissTests(unittest.TestCase):
+    """claude-warm dismisses known non-permission blocking dialogs.
+
+    The 2026-10-16 autocompact prompt froze a warm seat for 2.5 h: it is a
+    modal, the seat still classifies idle, and only the permission hold
+    existed.  A known dialog carries an exact fingerprint (heading,
+    question, highlighted default and the dialog's own footer cues, all
+    required) plus one safe key, fired only after a short settle while the
+    seat is otherwise idle.  Permission prompts never enter this path;
+    unknown dialogs are only logged once, never keyed.
+    """
+
+    # The captured autocompact dialog (Telegram 7563, Bunta's seat).
+    AUTOcompact_SCREEN = (
+        "We recommend compacting earlier\n"
+        "\n"
+        "Want to autocompact at 400k tokens instead?\n"
+        "\n"
+        "❯ Keep auto (1m tokens)\n"
+        "  Autocompact at ‹ 400k › tokens\n"
+        "\n"
+        "↑/↓ choose · ←/→ change size · enter confirm · esc not now\n"
+    )
+    UNKNOWN_SCREEN = (
+        "Another modal heading\n"
+        "\n"
+        "❯ Do the thing\n"
+        "\n"
+        "↑/↓ choose · enter confirm · esc dismiss\n"
+    )
+    IDLE_SCREEN = "❯ \n  ⏸ manual mode on · ? for shortcuts · ← for agents\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.warm = load("dialog_warm", BIN / "claude-warm")
+        self.hold = load("dialog_hold", LIB / "approval_hold_pty.py")
+        patcher = mock.patch.object(Path, "home", lambda: self.base)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def pty_owner(self):
+        """A real PTY whose child echoes what the supervisor writes.
+
+        The slave is fully raw: no ECHO/ICANON, no OPOST, and no ICRNL, so
+        the master observes the exact dismiss byte (b"\\r") the supervisor
+        wrote instead of the line discipline's CR-to-NL translation."""
+        import pty
+        import termios
+        master, slave = pty.openpty()
+        os.set_blocking(master, False)
+        attrs = termios.tcgetattr(slave)
+        attrs[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
+        attrs[1] &= ~termios.OPOST
+        attrs[3] &= ~(termios.ECHO | termios.ECHOCTL | termios.ICANON)
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        reader = subprocess.Popen(
+            [sys.executable, "-c",
+             "import os\n"
+             "import time\n"
+             "deadline = time.monotonic() + 5.0\n"
+             "data = b''\n"
+             "while time.monotonic() < deadline:\n"
+             "    chunk = os.read(0, 16)\n"
+             "    if chunk:\n"
+             "        data += chunk\n"
+             "    if data:\n"
+             "        break\n"
+             "os.write(1, data)\n"],
+            stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        os.close(slave)
+        def reap():
+            if reader.poll() is None:
+                reader.kill()
+            reader.wait(timeout=5)
+        self.addCleanup(reap)
+        return master, reader.pid
+
+    def supervisor(self, master, screen=b""):
+        supervisor = types.SimpleNamespace(
+            screen_classifier=self.warm.ClaudeScreenClassifier(),
+            session_id="fixture-session",
+            hold_timer=None, dialog_timer=None, dialog_unknown_logged=False,
+            mailcortex_admission_lock=threading.RLock(),
+            master_fd=master,
+            status="idle", compacting=False, recovery_pending=False,
+            recovery_awaiting=False, mailcortex_input_dirty=False,
+        )
+        for name in ("_dialog_screen", "_dialog_visible", "_dialog_maybe_record",
+                     "_dialog_maybe_log_unknown", "_dialog_expire",
+                     "_hold_screen", "_hold_maybe_record"):
+            setattr(supervisor, name, getattr(self.warm.Supervisor, name).__get__(supervisor))
+        supervisor._mailcortex_barrier = contextlib.nullcontext
+        supervisor._mailcortex_refresh_screen = lambda: False
+        supervisor._hold_input_pending = lambda: False
+        supervisor._guard_log = mock.Mock()
+        if screen:
+            supervisor.screen_classifier.feed(b"\x1b[2J\x1b[H" + screen)
+        return supervisor
+
+    def read_master(self, master, expect_len, deadline_s=2.0):
+        import select
+        written = bytearray()
+        deadline = time.monotonic() + deadline_s
+        while time.monotonic() < deadline and len(written) < expect_len:
+            ready, _, _ = select.select([master], [], [], max(0.0, deadline - time.monotonic()))
+            if not ready:
+                continue
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if chunk:
+                written.extend(chunk)
+        return bytes(written)
+
+    def master_quiet(self, master, seconds=0.2):
+        """True when no further PTY bytes arrive. The fixture child exits
+        right after echoing its byte, so a closed slave (EOF) is quiet,
+        not a second key."""
+        import select
+        ready, _, _ = select.select([master], [], [], seconds)
+        if not ready:
+            return True
+        try:
+            return not os.read(master, 4096)
+        except OSError:
+            return True
+
+    def ledger_records(self, action=None):
+        path = self.base / ".local/state/dotcortex/pty-hold-ledger.jsonl"
+        if not path.exists():
+            return []
+        records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        return [record for record in records
+                if action is None or record.get("action") == action]
+
+    def test_captured_dialog_detected_while_seat_looks_idle(self):
+        master, _pid = self.pty_owner()
+        self.addCleanup(lambda: os.close(master))
+        supervisor = self.supervisor(master, self.AUTOcompact_SCREEN.encode())
+        visible = supervisor.screen_classifier._visible_text()
+        # the freeze scenario: the modal is up, yet the seat classifies idle
+        self.assertEqual(supervisor.screen_classifier._classify(visible), "idle")
+        self.assertIsNotNone(self.warm.match_known_dialog(visible))
+        screen, dialog = supervisor._dialog_screen()
+        self.assertEqual(screen, visible)
+        self.assertEqual(dialog.dialog_id, "autocompact-400k")
+        self.assertEqual(dialog.dismiss_key, b"\r")
+        # Enter confirms the highlighted default, the Admiral's "Keep auto"
+        self.assertIn("keep auto (1m tokens)", visible.lower())
+        with mock.patch.object(self.warm, "_hold_now", return_value=100):
+            supervisor._dialog_maybe_record()
+        self.assertIsNotNone(supervisor.dialog_timer)
+        self.assertEqual(self.warm.DIALOG_SETTLE_SECONDS, 5.0)
+        self.assertFalse(supervisor.dialog_timer.expired(104.0))
+        self.assertTrue(supervisor.dialog_timer.expired(105.5))
+
+    def test_dismiss_fires_enter_once_after_settle_and_ledger_records(self):
+        master, _pid = self.pty_owner()
+        self.addCleanup(lambda: os.close(master))
+        supervisor = self.supervisor(master, self.AUTOcompact_SCREEN.encode())
+        with mock.patch.object(self.warm, "_hold_now", return_value=100):
+            supervisor._dialog_maybe_record()
+        with mock.patch.object(self.warm, "_hold_now", return_value=104.0):
+            self.assertFalse(supervisor.dialog_timer.expired(self.warm._hold_now()))
+        with mock.patch.object(self.warm, "_hold_now", return_value=106):
+            supervisor._dialog_expire()
+            supervisor._dialog_expire()  # cleared timer: never a second write
+        self.assertEqual(self.read_master(master, 1), b"\r")
+        self.assertTrue(self.master_quiet(master))
+        records = self.ledger_records("dialog_dismissed")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["dialog"], "autocompact-400k")
+        self.assertEqual(records[0]["session"], "fixture-session")
+        self.assertTrue(records[0]["dialog_identity"])
+        self.assertFalse(self.ledger_records("dialog_unknown"))
+
+    def test_captured_permission_prompt_never_matched_by_dialog_path(self):
+        captures = load("dialog_captures", Path(__file__).with_name("claude_renderer_captures.py"))
+        for mode, frames in captures.FULLSCREEN.items():
+            with self.subTest(mode=mode):
+                master, _pid = self.pty_owner()
+                try:
+                    supervisor = self.supervisor(master, frames["permission"])
+                    visible = supervisor.screen_classifier._visible_text()
+                    self.assertEqual(supervisor.screen_classifier._classify(visible), "blocked")
+                    self.assertIsNone(self.warm.match_known_dialog(visible))
+                    self.assertEqual(supervisor._dialog_screen(), (None, None))
+                    supervisor._dialog_maybe_record()
+                    self.assertIsNone(supervisor.dialog_timer)
+                    # the permission path is untouched: the AFK hold still records
+                    supervisor._hold_maybe_record("blocked")
+                    self.assertIsNotNone(supervisor.hold_timer)
+                    self.assertTrue(self.master_quiet(master))
+                    self.assertEqual(self.ledger_records(), [])
+                finally:
+                    os.close(master)
+
+    def test_fingerprint_requires_the_whole_dialog_never_loose_words(self):
+        variants = (
+            "We recommend compacting earlier\n",
+            "↑/↓ choose · ←/→ change size · enter confirm · esc not now\n",
+            "We recommend compacting earlier\nWant to autocompact at 400k tokens instead?\n",
+            "❯ Keep auto (1m tokens)\n↑/↓ choose · enter confirm · esc not now\n",
+            "transcript: we recommend compacting earlier some time ago\n❯ \n",
+            "Do you want to proceed?\n❯ 1. Yes\nEsc to cancel\n",
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertIsNone(self.warm.match_known_dialog(variant))
+        # the complete captured dialog is the only positive match, and its
+        # identity binds the whole screen
+        dialog = self.warm.match_known_dialog(self.AUTOcompact_SCREEN)
+        self.assertEqual(dialog.dialog_id, "autocompact-400k")
+        self.assertEqual(dialog.identity(self.AUTOcompact_SCREEN),
+                         dialog.identity(self.AUTOcompact_SCREEN))
+        self.assertIsNone(dialog.identity(variants[0]))
+
+    def test_unknown_dialog_logged_once_and_never_keyed(self):
+        master, _pid = self.pty_owner()
+        self.addCleanup(lambda: os.close(master))
+        supervisor = self.supervisor(master, self.UNKNOWN_SCREEN.encode())
+        supervisor._dialog_maybe_record()
+        self.assertIsNone(supervisor.dialog_timer)
+        records = self.ledger_records("dialog_unknown")
+        self.assertEqual(len(records), 1)
+        self.assertIn("enter confirm · esc dismiss", records[0]["screen_text_snippet"])
+        self.assertTrue(records[0]["screen_text_snippet"])
+        # a redraw of the same episode logs nothing more
+        supervisor.screen_classifier.feed(b"\x1b[2J\x1b[H" + self.UNKNOWN_SCREEN.encode())
+        supervisor._dialog_maybe_record()
+        self.assertEqual(len(self.ledger_records("dialog_unknown")), 1)
+        # the episode ends, then a new unknown dialog logs once again
+        supervisor.screen_classifier.feed(b"\x1b[2J\x1b[H" + self.IDLE_SCREEN.encode())
+        supervisor._dialog_maybe_record()
+        supervisor.screen_classifier.feed(b"\x1b[2J\x1b[H" + self.UNKNOWN_SCREEN.encode())
+        supervisor._dialog_maybe_record()
+        self.assertEqual(len(self.ledger_records("dialog_unknown")), 2)
+        # unknown dialogs are left alone: no key ever reaches the PTY
+        self.assertTrue(self.master_quiet(master))
+        self.assertFalse(self.ledger_records("dialog_dismissed"))
+
+    def test_normal_idle_and_busy_chrome_never_log_dialog_unknown(self):
+        captures = load("dialog_chrome", Path(__file__).with_name("claude_renderer_captures.py"))
+        for mode, frames in captures.FULLSCREEN.items():
+            for name in ("empty", "busy", "post-turn", "suggestion", "typed"):
+                with self.subTest(mode=mode, screen=name):
+                    master, _pid = self.pty_owner()
+                    try:
+                        supervisor = self.supervisor(master, frames[name])
+                        supervisor._dialog_maybe_record()
+                        self.assertIsNone(supervisor.dialog_timer)
+                        self.assertEqual(self.ledger_records("dialog_unknown"), [])
+                    finally:
+                        os.close(master)
+
+    def test_pending_input_aborts_dismiss_without_write_or_ledger(self):
+        master, _pid = self.pty_owner()
+        self.addCleanup(lambda: os.close(master))
+        supervisor = self.supervisor(master, self.AUTOcompact_SCREEN.encode())
+        with mock.patch.object(self.warm, "_hold_now", return_value=100):
+            supervisor._dialog_maybe_record()
+        supervisor._hold_input_pending = lambda: True
+        with mock.patch.object(self.warm, "_hold_now", return_value=106):
+            supervisor._dialog_expire()
+        self.assertTrue(self.master_quiet(master))
+        self.assertEqual(self.ledger_records(), [])
+        # the guard cleared the timer: no retry at a later deadline
+        with mock.patch.object(self.warm, "_hold_now", return_value=200):
+            supervisor._dialog_expire()
+        self.assertTrue(self.master_quiet(master))
+
+    def test_busy_owner_states_never_dismiss(self):
+        for field in ("compacting", "recovery_pending", "recovery_awaiting"):
+            with self.subTest(field=field):
+                master, _pid = self.pty_owner()
+                try:
+                    supervisor = self.supervisor(master, self.AUTOcompact_SCREEN.encode())
+                    with mock.patch.object(self.warm, "_hold_now", return_value=100):
+                        supervisor._dialog_maybe_record()
+                    setattr(supervisor, field, True)
+                    with mock.patch.object(self.warm, "_hold_now", return_value=106):
+                        supervisor._dialog_expire()
+                    self.assertTrue(self.master_quiet(master))
+                finally:
+                    os.close(master)
+        # a working screen is not an idle-on-dialog screen even with the
+        # fingerprint text present: the state gate holds
+        master, _pid = self.pty_owner()
+        self.addCleanup(lambda: os.close(master))
+        working = self.AUTOcompact_SCREEN + "✻ Working…\n"
+        supervisor = self.supervisor(master, working.encode())
+        visible = supervisor.screen_classifier._visible_text()
+        self.assertEqual(supervisor.screen_classifier._classify(visible), "working")
+        self.assertIsNotNone(self.warm.match_known_dialog(visible))
+        supervisor._dialog_maybe_record()
+        self.assertIsNone(supervisor.dialog_timer)
+
+    def test_dialog_table_is_deny_shape_and_small(self):
+        self.assertEqual(self.warm.DIALOG_DISMISS_KEYS, (b"\r",))
+        ids = [dialog.dialog_id for dialog in self.warm.KNOWN_BLOCKING_DIALOGS]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(ids, ["autocompact-400k"])
+        for dialog in self.warm.KNOWN_BLOCKING_DIALOGS:
+            self.assertGreaterEqual(len(dialog.required_markers), 4)
+            self.assertIn(dialog.dismiss_key, self.warm.DIALOG_DISMISS_KEYS)
+        for bad in [b"y", b"\n", b" ", b"\x1b", b"\x1b[B", (b"\r", b"y")]:
+            with self.subTest(key=bad), self.assertRaises(ValueError):
+                self.warm.BlockingDialog("bad", ("marker",), bad)
+        for bad_markers in [(), ("",), (1,)]:
+            with self.subTest(markers=bad_markers), self.assertRaises(ValueError):
+                self.warm.BlockingDialog("bad", bad_markers, b"\r")
+        with self.assertRaises(ValueError):
+            self.warm.BlockingDialog("", ("marker",), b"\r")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
