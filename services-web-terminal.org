@@ -415,7 +415,11 @@ It serves, through the gate:
 - =GET /login= — the login page (single password field; one user, one hash).
 - =POST /login= — checks the password against the bcrypt hash
   =caddy-terminal-passwd= writes (the SAME =terminal-auth= file the old
-  basic_auth import read — the Admiral never re-sets his password). On
+  basic_auth import read — the Admiral never re-sets his password). The POST
+  must carry the gate's OWN Origin (=CADDY_TERMINAL_ORIGINS=, default exactly
+  =https://kikin-kushi.sphinx-draco.ts.net:7682= — fix round 3): any other
+  Origin, or none, answers =403= before the password is read, without
+  counting toward lockout. This replaces the missing CSRF token. On
   success it mints a session and answers =303= to the gate root with a
   =Secure; HttpOnly; SameSite=None; Partitioned= (CHIPS) cookie, so the
   session survives inside the Centre's cross-origin iframe. On failure it
@@ -470,6 +474,12 @@ SESSION_SECONDS = int(os.environ.get('CADDY_TERMINAL_AUTHD_SESSION_SECONDS', '43
 MAX_FAILURES = int(os.environ.get('CADDY_TERMINAL_AUTHD_MAX_FAILURES', '5'))
 FAILURE_WINDOW = int(os.environ.get('CADDY_TERMINAL_AUTHD_FAILURE_WINDOW_SECONDS', '900'))
 LOCKOUT_SECONDS = int(os.environ.get('CADDY_TERMINAL_AUTHD_LOCKOUT_SECONDS', '900'))
+# Fix round 3 (CSWSH): the exact Origin(s) allowed to POST /login — the
+# ttyd page's own origin inside the Centre iframe. Space-separated so a
+# scratch test stack can name its own; production never overrides it.
+ORIGINS = [value for value in os.environ.get(
+    'CADDY_TERMINAL_ORIGINS',
+    'https://kikin-kushi.sphinx-draco.ts.net:7682').split() if value]
 MAX_BODY = 4096
 
 PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -678,6 +688,17 @@ class Handler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path != '/login':
             self._respond(404, b'not found\n', 'text/plain; charset=utf-8')
             return
+        # Fix round 3: cross-site request forgery is the missing CSRF token.
+        # The login POST is only ever issued by the gate's own page inside the
+        # Centre iframe, so every other Origin — or none — is refused BEFORE
+        # the password is read (refusals never count toward lockout: an
+        # attacker must not be able to lock the Admiral out with junk
+        # Origin headers). The password is never logged either way.
+        origin = self.headers.get('Origin')
+        if origin not in ORIGINS:
+            self.log_message('POST /login refused: Origin %s', (origin or '<missing>')[:200])
+            self._respond(403, b'bad origin\n', 'text/plain; charset=utf-8')
+            return
         key = client_key(self.headers)
         remaining = lockout_remaining(key)
         if remaining:
@@ -861,7 +882,7 @@ to the unprivileged FileBrowser Caddy instance's machine-local
 =auto_https off= and =admin off= stay), and the instance is restarted. The
 hash file and the token-route snippet are imported, never inlined.
 
-Five details verified live (2026-10-15/16) and load-bearing:
+Six details verified live (2026-10-15/16) and load-bearing:
 
 - =bind 127.0.0.1= is REQUIRED. Without it a host-IP site address binds the
   port on every interface — the gate briefly listened on the LAN and tailnet
@@ -883,12 +904,49 @@ Five details verified live (2026-10-15/16) and load-bearing:
   only ever learns ok/not), and the login page must be reachable without a
   session. Everything else — the ttyd index, =/token=, =/ws= — requires the
   session cookie via =forward_auth= against the verifier socket.
+- =SameSite=None= means the cookie rides along on cross-site requests, and
+  CHIPS does not help here: every page under =*.sphinx-draco.ts.net= shares
+  the Centre's top-level site, so the partition key is identical and the
+  cookie is theirs too. =frame-ancestors= stops framing but says nothing
+  about WebSockets, and ttyd runs =-W= (writable): without an Origin check
+  any sibling tailnet page the Admiral has open could open
+  =wss://…:7682/ws= with his cookie and get a writable shell — cross-site
+  WebSocket hijacking. Fix round 3 closes it at the gate with two guards,
+  both named matchers evaluated BEFORE the handles (order matters: =handle=
+  blocks are mutually exclusive, first match wins):
+  - =/ws= requires the Origin header to be EXACTLY
+    =https://kikin-kushi.sphinx-draco.ts.net:7682= — the ttyd page's own
+    origin inside the iframe. Browsers always send Origin on a WebSocket
+    upgrade, so missing or any other Origin answers =403=.
+  - =/ws= is the writable shell; =/token= is only reached by the ttyd
+    page's own same-origin =fetch()=, which browsers do NOT attach an
+    Origin header to (=Origin= is a forbidden header — page JS cannot add
+    it), so =/token= refuses any Origin that is present-but-different (the
+    cross-site hijacker always sends one) and allows the honest
+    missing-Origin fetch. A browser attacker cannot both omit Origin and
+    read the response, and this ttyd ignores token values anyway; the
+    guard is defence-in-depth for a future ttyd with real credentials.
 
 #+BEGIN_EXAMPLE
 http://:7680 {
 	bind 127.0.0.1
 	header Content-Security-Policy "frame-ancestors https://kikin-kushi.sphinx-draco.ts.net:1996"
 	import /home/metsatron/.local/state/caddy-terminal/terminal-token-route
+	@ws_wrong_origin {
+		path /ws
+		not header Origin https://kikin-kushi.sphinx-draco.ts.net:7682
+	}
+	handle @ws_wrong_origin {
+		respond 403
+	}
+	@token_wrong_origin {
+		path /token
+		header Origin *
+		not header Origin https://kikin-kushi.sphinx-draco.ts.net:7682
+	}
+	handle @token_wrong_origin {
+		respond 403
+	}
 	handle /healthz {
 		reverse_proxy unix//home/metsatron/.local/state/caddy-terminal/authd.sock
 	}
@@ -946,14 +1004,19 @@ proves all of this against a scratch instance).
    =http://127.0.0.1:7680/healthz= returns 200 with NO credential and body
    =ok= only; killing ttyd flips it to =503= =down=. The response carries
    =Content-Security-Policy: frame-ancestors= naming ONLY the Centre origin.
-5. With session: =curl -c jar -d 'password=...' http://127.0.0.1:7680/login=
-   saves the cookie (=Secure; HttpOnly; SameSite=None; Partitioned=), then
-   the ttyd index loads (200) and a websocket echo round-trips through the
-   gate (=/token=, then =/ws= with the tty= subprotocol). =/logout= drops
-   the session and the root is the login page again.
+5. With session: =curl -c jar -d 'password=...' -H 'Origin:
+   https://kikin-kushi.sphinx-draco.ts.net:7682'
+   http://127.0.0.1:7680/login= saves the cookie (=Secure; HttpOnly;
+   SameSite=None; Partitioned=), then the ttyd index loads (200) and a
+   websocket echo round-trips through the gate (=/token=, then =/ws= with
+   the tty= subprotocol). =/logout= drops the session and the root is the
+   login page again. The curl Origin header stands in for the iframe's
+   page origin — through the tailnet the browser sends it on its own.
 6. Throttle: five wrong passwords in a row lock the client out — further
    POSTs to =/login= answer =429= with =Retry-After=, even with the right
-   password, until the lockout window passes.
+   password, until the lockout window passes. (POSTs with a wrong or
+   missing Origin answer =403= instead and never count toward the
+   lockout.)
 7. Token route (Logseq lane): =curl -s -o /dev/null -w '%{http_code}'=
    =http://127.0.0.1:7680/<token>/= returns 200 with NO credential, and a
    websocket echo round-trips through it too. A wrong token gets 401.
@@ -961,3 +1024,12 @@ proves all of this against a scratch instance).
 9. Killing the ttyd PID: the supervisor respawns it within its retry window,
    the socket comes back 0600, and the gate is 200 again. Same contract for
    the authd lane (=caddy-terminal-authd --check=).
+10. CSWSH (fix round 3) — a websocket handshake to =/ws= through the gate
+    with a session cookie answers =101= ONLY when Origin is exactly
+    =https://kikin-kushi.sphinx-draco.ts.net:7682=; Origin
+    =https://other.sphinx-draco.ts.net=, any other Origin, or none at all
+    answers =403=. Same shape for the login POST (=403= unless the Origin
+    is exact) — and =/token= answers =403= for every present-but-wrong
+    Origin while the ttyd page's own missing-Origin fetch keeps working.
+    The scratch suite (=FORGE/tests/test_caddy_terminal_window.py=) proves
+    all of it against a scratch gate, cookie included.

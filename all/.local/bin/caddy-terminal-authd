@@ -31,6 +31,12 @@ SESSION_SECONDS = int(os.environ.get('CADDY_TERMINAL_AUTHD_SESSION_SECONDS', '43
 MAX_FAILURES = int(os.environ.get('CADDY_TERMINAL_AUTHD_MAX_FAILURES', '5'))
 FAILURE_WINDOW = int(os.environ.get('CADDY_TERMINAL_AUTHD_FAILURE_WINDOW_SECONDS', '900'))
 LOCKOUT_SECONDS = int(os.environ.get('CADDY_TERMINAL_AUTHD_LOCKOUT_SECONDS', '900'))
+# Fix round 3 (CSWSH): the exact Origin(s) allowed to POST /login — the
+# ttyd page's own origin inside the Centre iframe. Space-separated so a
+# scratch test stack can name its own; production never overrides it.
+ORIGINS = [value for value in os.environ.get(
+    'CADDY_TERMINAL_ORIGINS',
+    'https://kikin-kushi.sphinx-draco.ts.net:7682').split() if value]
 MAX_BODY = 4096
 
 PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -238,6 +244,17 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(min(declared, MAX_BODY)) if declared > 0 else b''
         if urlsplit(self.path).path != '/login':
             self._respond(404, b'not found\n', 'text/plain; charset=utf-8')
+            return
+        # Fix round 3: cross-site request forgery is the missing CSRF token.
+        # The login POST is only ever issued by the gate's own page inside the
+        # Centre iframe, so every other Origin — or none — is refused BEFORE
+        # the password is read (refusals never count toward lockout: an
+        # attacker must not be able to lock the Admiral out with junk
+        # Origin headers). The password is never logged either way.
+        origin = self.headers.get('Origin')
+        if origin not in ORIGINS:
+            self.log_message('POST /login refused: Origin %s', (origin or '<missing>')[:200])
+            self._respond(403, b'bad origin\n', 'text/plain; charset=utf-8')
             return
         key = client_key(self.headers)
         remaining = lockout_remaining(key)
