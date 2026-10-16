@@ -1516,6 +1516,9 @@ def _hold_queue_write(supervisor, profile, identity):
                            "screen_text": visible, "session_id": supervisor.session_id},
             "screen_text_snippet": visible[:200], "prompt_identity": identity,
             "session_id": supervisor.session_id,
+            # The Desk refuses a queue item without an absolute folder (2026-10-16:
+            # one cwd-less hold item made the whole seat queue "invalid").
+            "cwd": os.getcwd(),
         }
         runtime_path = (pathlib.Path(__file__).resolve().parent.parent
                         / "lib/dotcortex/claude_approval_runtime.py")
