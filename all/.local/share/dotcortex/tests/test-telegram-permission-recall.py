@@ -158,6 +158,20 @@ class RecallTests(unittest.TestCase):
         self.assertEqual(fake.stripped, [101])
         self.assertIn(101, fake.messages)
 
+    def test_earlier_sweeps_move_the_anchor_past_a_long_run_of_prompts(self):
+        # Admiral 7316: with no new chat text the transcript anchor stayed at
+        # 100 while prompts climbed past 112, out of probe range.
+        recall.LOG.write_text(json.dumps({'session': 's', 'action': 'swept', 'anchor': 100, 'deleted': [], 'seen': 140}) + '\n')
+        fake = FakeTelegram({141: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
+        self.assertEqual(self.run_sweep(fake), [141])
+        rows = [json.loads(line) for line in recall.LOG.read_text().splitlines()]
+        self.assertEqual(rows[-1]['seen'], 141)
+
+    def test_another_sessions_log_never_moves_the_anchor(self):
+        recall.LOG.write_text(json.dumps({'session': 'other', 'action': 'swept', 'anchor': 100, 'deleted': [], 'seen': 140}) + '\n')
+        fake = FakeTelegram({141: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
+        self.assertEqual(self.run_sweep(fake), [])
+
     def test_no_state_or_ambiguous_chat_does_nothing(self):
         fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
         (self.state / 'access.json').write_text(json.dumps({'allowFrom': [CHAT, '222']}))
