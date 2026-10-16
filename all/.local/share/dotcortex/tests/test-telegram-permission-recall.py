@@ -117,6 +117,17 @@ class RecallTests(unittest.TestCase):
         self.assertEqual(self.run_sweep(fake), [])
         self.assertIn(101, fake.messages)
 
+    def test_a_long_dead_unresolved_call_does_not_block_the_sweep(self):
+        # Admiral 7409: an interrupted call from an earlier turn never gets a
+        # tool_result; only the newest message's batch can hold a live request.
+        path = self.transcript()
+        rows = [json.loads(line) for line in Path(path).read_text().splitlines()]
+        rows.insert(0, {'message': {'id': 'old-turn', 'content': [{'type': 'tool_use', 'id': 'dead', 'name': 'Bash', 'input': {}}]}})
+        Path(path).write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
+        fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
+        event = {'session_id': 's', 'transcript_path': path}
+        self.assertEqual(recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=2.2), [101])
+
     def test_skips_entirely_while_another_request_is_pending(self):
         fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
         self.assertEqual(self.run_sweep(fake, unresolved=2), [])

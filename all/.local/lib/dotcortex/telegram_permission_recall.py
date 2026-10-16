@@ -106,23 +106,32 @@ def _logged_floor(session):
 
 
 def _unresolved(tail):
-    uses, results = set(), set()
+    """Unresolved tool calls in the newest assistant message only.
+
+    Parallel tool calls share one assistant message id, so that batch is the
+    only place another live request can be waiting. A call interrupted or
+    refused long ago never gets a tool_result in the transcript; counting it
+    stalled every later sweep (Admiral 7409)."""
+    uses, results, last_group = {}, set(), None
     for line in tail.splitlines():
         try:
             row = json.loads(line)
         except ValueError:
             continue
-        content = (row.get('message') or {}).get('content') if isinstance(row, dict) else None
+        message = row.get('message') if isinstance(row, dict) else None
+        content = message.get('content') if isinstance(message, dict) else None
         if not isinstance(content, list):
             continue
+        group = message.get('id') or row.get('uuid')
         for block in content:
             if not isinstance(block, dict):
                 continue
             if block.get('type') == 'tool_use' and block.get('id'):
-                uses.add(block['id'])
+                uses[block['id']] = group
+                last_group = group
             elif block.get('type') == 'tool_result' and block.get('tool_use_id'):
                 results.add(block['tool_use_id'])
-    return uses - results
+    return {use for use, group in uses.items() if group == last_group and use not in results}
 
 
 def _call(base, token, method, payload):
