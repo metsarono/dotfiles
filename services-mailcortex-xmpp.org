@@ -153,6 +153,10 @@ modules_enabled = {
   "roster"; "saslauth"; "tls"; "disco"; "carbons"; "pep"; "private";
   "blocklist"; "vcard4"; "vcard_legacy"; "version"; "uptime"; "time";
   "ping"; "smacks"; "csi_simple"; "mam"; "bookmarks"; "http_file_share";
+  -- WebSocket transport for the Caddy's web XMPP client (MailCortex home
+  -- Phase 4). Rides the existing HTTPS listener from the private layer;
+  -- wss sessions are encrypted, so c2s_require_encryption holds unchanged.
+  "websocket";
   -- Local unix socket for prosodyctl adduser/passwd/shell; no network listener.
   "admin_shell"; "admin_socket";
 }
@@ -160,6 +164,26 @@ archive_expires_after = "never"
 
 Include(site .. "/local.cfg.lua")
 #+END_SRC
+
+** Web client WebSocket (C4)
+
+=mod_websocket= (bundled with Prosody) gives the fleet's static web XMPP
+client its transport: a =wss://= endpoint at =/xmpp-websocket= on the existing
+HTTPS listener, whose port and tailnet interface are already declared by the
+private layer (=https_ports=, =https_interfaces=, =https_ssl= with the host's
+Tailscale certificate). This module adds no listener, port or interface, and
+needs no private-layer change. A =wss:= session on the HTTPS listener is
+encrypted by the listener itself, so =c2s_require_encryption= keeps holding;
+the web client's login is an ordinary registered account (registration closed,
+federation off, no anonymous lane and the client's guest access disabled).
+The static client is served from the Caddy Centre face (HelmCortex
+=FORGE/centre-apps/xmpp-web/=), tailnet-only; this module owns only the
+server transport. Apply after review through the service owner:
+=prosodyctl --config <tangled config> reload= re-reads the config and
+re-opens logs; because =websocket= is a newly enabled module, verify the
+endpoint answers (=Serving 'websocket'= in the log,
+=https://<host>:5281/xmpp-websocket=) and fall back to a restart through
+=mailcortex-xmpp-service= with the Admiral if the module did not hot-attach.
 
 ** Voice upload activation (C2)
 

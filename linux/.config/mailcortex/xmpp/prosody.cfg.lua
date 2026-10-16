@@ -39,6 +39,10 @@ modules_enabled = {
   "roster"; "saslauth"; "tls"; "disco"; "carbons"; "pep"; "private";
   "blocklist"; "vcard4"; "vcard_legacy"; "version"; "uptime"; "time";
   "ping"; "smacks"; "csi_simple"; "mam"; "bookmarks"; "http_file_share";
+  -- WebSocket transport for the Caddy's web XMPP client (MailCortex home
+  -- Phase 4). Rides the existing HTTPS listener from the private layer;
+  -- wss sessions are encrypted, so c2s_require_encryption holds unchanged.
+  "websocket";
   -- Local unix socket for prosodyctl adduser/passwd/shell; no network listener.
   "admin_shell"; "admin_socket";
 }
