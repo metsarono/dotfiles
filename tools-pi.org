@@ -1,0 +1,126 @@
+#+TITLE: Tools Loom: pi
+#+DESCRIPTION: pi — Mistral Studio API provider config for the Pi Agent worker lane (mistral-pi)
+#+AUTHOR: Mètsàtron
+#+LANGUAGE: en
+#+PROPERTY: header-args :mkdirp yes :results silent
+#+PROPERTY: header-args:json :comments no
+
+* Pi Agent Mistral Studio lane (mistral-pi)
+
+A coordinator-dispatchable worker lane: Pi Agent (=pi=, installed under
+=~/.npm-global=, Node 24 from the Guix core profile) talking to the Mistral
+Studio API, sitting beside =codex exec= and =vibe -p= as a headless worker
+that Fable launches with a brief, a worktree and a report path (build brief:
+=helm handoff 2026-10-17-mistral-pi-lane=, Admiral Telegram 7824/7826).
+
+The launcher is =HelmCortex/FORGE/bin/mistral-pi=; this module owns only the
+provider and default-model config, which the launcher installs into its own
+Pi state directory (=${XDG_STATE_HOME:-~/.local/state}/mistral-pi=, held in
+=PI_CODING_AGENT_DIR=) before exec'ing =pi=. The lane therefore never touches
+the interactive =~/.pi/agent= configuration.
+
+** Where the key lives
+
+The Studio key is read from the =MISTRAL_API_KEY= environment variable,
+referenced by name only — the =apiKey= field below is a =$MISTRAL_API_KEY=
+template reference, never a value. The machine-local file
+=~/.config/mistral-pi/env= (0600, provisioned by the Admiral from KeePass)
+is the only sanctioned source of that variable for this lane. DotCortex is
+public: no key, no ids beyond model ids, ever.
+
+** Why the template is not at =all/.pi/agent=
+
+The historical pi config emission (=pi.org= → =all/.pi/agent/=) was removed
+by the Hermes decoupling (2026-04), and =~/.pi= is now a HelmCortex NEXUS
+stow symlink (=NEXUS/stow/linux/.pi=) holding private mutable Pi state
+(auth, sessions). Tangling this template into =all/.pi/agent/= would
+stow-conflict with that live directory on every machine. The template
+therefore lives at =all/.local/share/mistral-pi/=, a DotCortex-owned
+read-only template directory that stows cleanly and contains nothing else.
+
+** Models — verified against the Studio API 2026-10-17
+
+Verified against =GET https://api.mistral.ai/v1/models= (54 ids, key used
+only through the environment). The pinned default is =mistral-large-4=
+(1 MiB context, vision, function calling). Named alternates:
+=mistral-medium-3.5= (256 KiB context) and =devstral-latest=.
+
+Devstral caveat, verified the same day: the Vibe-log id
+=devstral-2-123b-instruct-2512= is NOT servable on the Studio API (404 on
+=/v1/models=, 400 =invalid_model= on chat completions), and every =devstral-*=
+id is absent from this key's model list. =devstral-latest= DOES serve, but the
+backend reports the completion's =model= field as =mistral-medium-3-5= —
+treat it as a Studio alias, not a distinct weights offering.
+
+** Provider config (template installed by mistral-pi)
+
+The provider speaks pi's native =mistral-conversations= client against
+=https://api.mistral.ai= — the same api/baseUrl pi's own built-in
+=mistral= provider uses, plus this lane's pinned ids. The handoff asked
+for the OpenAI-compatible =/v1= endpoint; that road was walked and
+abandoned on evidence (2026-10-17): =openai-completions= sends the
+=developer= role, the =store= field and =reasoning_effort: "medium"=,
+and Mistral's Studio API rejects all three (422, 422, 400 — bisected by
+direct curl and a local request-echo server). The native client needs
+no compat flags and surfaces Mistral's real error bodies.
+
+Three traps found live, all recorded for the next traveller:
+
+- The =apiKey= value must carry the dollar sigil: pi 0.85.1's
+  =resolve-config-value= treats a bare identifier as a LITERAL key
+  (which yields 401), interpolates =$VAR= or =${VAR}= from the
+  environment, and runs =!command= values as shell commands. The
+  =pi-agent-gotchas= skill still documents the old bare-env-name
+  behaviour; it is stale for 0.85.1 (found live 2026-10-17).
+- All three pinned models carry =reasoning: false=: with
+  =reasoning: true= the native client requests the reasoning prompt
+  mode, which is NOT enabled for these models on this key (Mistral
+  error 3051, "Reasoning prompt mode is not enabled for this model").
+  pi's own built-in catalog marks Mistral's Large line non-reasoning
+  too. =--thinking off/high= makes no difference: only =reasoning:
+  false= in the model entry avoids the request.
+- =pi -p= exits 0 and prints NOTHING when the API errors, so a
+  dispatch's success is proven by the run log and on-disk results,
+  never by the exit code alone.
+
+#+BEGIN_SRC json :tangle all/.local/share/mistral-pi/models.json :mkdirp yes :comments no
+{
+  "providers": {
+    "mistral": {
+      "baseUrl": "https://api.mistral.ai",
+      "api": "mistral-conversations",
+      "apiKey": "$MISTRAL_API_KEY",
+      "models": [
+        {
+          "id": "mistral-large-4",
+          "name": "Mistral Large 4",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 1048576
+        },
+        {
+          "id": "mistral-medium-3.5",
+          "name": "Mistral Medium 3.5",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 262144
+        },
+        {
+          "id": "devstral-latest",
+          "name": "Devstral (Studio alias; serves as mistral-medium-3-5)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 262144
+        }
+      ]
+    }
+  }
+}
+#+END_SRC
+
+#+BEGIN_SRC json :tangle all/.local/share/mistral-pi/settings.json :mkdirp yes :comments no
+{
+  "defaultProvider": "mistral",
+  "defaultModel": "mistral-large-4"
+}
+#+END_SRC
