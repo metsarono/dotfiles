@@ -158,6 +158,7 @@ OUTCOMES = {
     'away_flag': '⏸️ Denied while away, queued for the Desk',
     'unavailable': '⚠️ Delivery unavailable, queued for the Desk',
     'hold_unavailable': '⚠️ Delivery unavailable, queued for the Desk',
+    'done_by_another_route': '✅ Done by another route',
     'resolved': '✅ Resolved on the Desk',
     'denied': '⏸️ Denied, queued for the Desk',
     'human_denied': '⛔ Denied, queued for the Desk',

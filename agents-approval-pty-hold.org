@@ -920,6 +920,43 @@ class PtyHoldTests(unittest.TestCase):
         self.assertEqual(len(ledger.read_text().splitlines()),3)
         self.assertEqual(json.loads(ledger.read_text().splitlines()[-1])['queue_id'],records[-1]['id'])
 
+    def test_boxed_permission_hold_queues_the_real_request_identity(self):
+        # A boxed Claude Code dialog carries the real request: the warm hold
+        # must queue tool, command and intent so a later successful run of the
+        # same request resolves the card exactly like a hook item.
+        warm=load('review_queue_box',BIN/'claude-warm')
+        command=('T=/fixture/scratch; rm -rf "$T"; mkdir -p "$T" && cd /fixture/work &&'
+            ' cp fixture-a.org fixture-b.org "$T"/ && cd "$T" && python3 -m py_compile'
+            ' /fixture/scratch/engine.py && echo compiled')
+        rows=[command[index:index+40] for index in range(0,len(command),40)]
+        # The classifier's PTY needs carriage returns: a bare line feed keeps
+        # the column and staircases the dialog.
+        screen='\r\n'.join(['Bash command','Tip: auto mode handles these prompts for you',
+            'Tangle the fixture engine into scratch and compile','╌'*80,
+            *[' │ '+row for row in rows],'╌'*80,' Do you want to proceed?',' ❯ 1. Yes',
+            '   2. No',' Esc to cancel · Tab to amend',''])
+        supervisor=types.SimpleNamespace(session_id='fixture-session',
+            screen_classifier=warm.ClaudeScreenClassifier(),_guard_log=mock.Mock())
+        supervisor.screen_classifier.feed(('\x1b[2J\x1b[H'+screen).encode())
+        visible=supervisor.screen_classifier._visible_text()
+        identity=self.hold.CLAUDE_CODE_PROFILE.identity(visible)
+        self.assertIsNotNone(identity)
+        manifest=self.base/'manifest.json'
+        manifest.write_text(json.dumps({'coordinator_ops':{'seat_account':'YOUR_SEAT@YOUR_HOST.helm'}}))
+        queue=self.base/'queue.jsonl'
+        env={'HOME':str(self.base),'SO_APPROVAL_KIKIN_MANIFEST':str(manifest),'SO_APPROVAL_MORNING_QUEUE':str(queue)}
+        with mock.patch.dict(os.environ,env):
+            warm._hold_queue_write(supervisor,self.hold.CLAUDE_CODE_PROFILE,identity)
+            runtime=__import__('sys').modules['claude_approval_runtime']
+            with queue.open() as handle:records=runtime._queue_read(handle)
+        self.assertEqual(len(records),1)
+        row=records[0]
+        self.assertEqual((row['tool'],row['command'],row['intent']),
+            ('Bash',command,'Tangle the fixture engine into scratch and compile'))
+        self.assertIn('screen_text',row['request'])
+        ledger=self.base/'.local/state/dotcortex/pty-hold-ledger.jsonl'
+        self.assertEqual(json.loads(ledger.read_text().splitlines()[-1])['queue_id'],row['id'])
+
     def test_real_hold_write_waits_for_acknowledged_pause_and_resumes_child(self):
         warm=load('review_real_pause',BIN/'claude-warm')
         owner,master,_slave=self.deny_owner('x')

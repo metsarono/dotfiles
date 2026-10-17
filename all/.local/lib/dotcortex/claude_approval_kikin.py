@@ -2861,16 +2861,20 @@ def _absolute_cwd(event):
     return value
 
 
+def _request_sha(tool_name, cwd, tool_input):
+    # Different directories and different content writes are different requests.
+    data = dict(tool_input) if isinstance(tool_input, dict) else {}
+    data.pop('description', None); data.pop('timeout', None)
+    if 'command' in data:
+        data['command'] = _normalized_command(data['command'])
+    return hashlib.sha256(json.dumps([tool_name, cwd, data], sort_keys=True, default=str).encode()).hexdigest()
+
+
 def _queue_identity(event, manifest):
     payload = event if isinstance(event, dict) else {}
     tool = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
     seat = _queue_seat(manifest)
-    # Different directories and different content writes are different requests.
-    data = {**tool}
-    data.pop('description', None); data.pop('timeout', None)
-    if 'command' in data:
-        data['command'] = _normalized_command(data['command'])
-    sha = hashlib.sha256(json.dumps([payload.get('tool_name'), payload.get('cwd'), data], sort_keys=True, default=str).encode()).hexdigest()
+    sha = _request_sha(payload.get('tool_name'), payload.get('cwd'), tool)
     intent = payload.get('approval_intent') or tool.get('description') or ''
     intent = ' '.join(intent.split()) if isinstance(intent, str) else ''
     if intent.casefold() in {'run shell command','bash command','write file','edit file'}:
@@ -2983,6 +2987,178 @@ def _queue_upsert(event, reason, away_reason, manifest, status='open'):
         return item['id']
 
 
+_DIALOG_BOX = re.compile(r'^\s*│( ?)(.*)$')
+_DIALOG_RULE = re.compile(r'^[─╌┄═]{4,}$')
+_DIALOG_TIP = re.compile(r'^tip\s*:', re.IGNORECASE)
+_DIALOG_HEADINGS = {'bash command': 'Bash'}
+_DIALOG_FOREIGN = {'write file', 'edit file', 'read file', 'fetch', 'webfetch', 'notebook'}
+_DIALOG_TAIL = re.compile(r'([A-Za-z0-9_.-]+)$')
+_DIALOG_HEAD = re.compile(r'^([A-Za-z0-9_.-]+)')
+_SHELL_WORDS = {'git','merge','status','log','branch','commit','add','diff','push','pull',
+    'cd','cp','mv','rm','mkdir','touch','echo','cat','grep','sed','awk','tail','head','wc',
+    'ssh','scp','env','export','python','python3','emacs','make','sleep','true','false',
+    'done','do','then','else','fi','in','for','while','if','not','and'}
+
+
+def _parse_permission_dialog(text):
+    """Recover the pending request from a Claude Code permission dialog.
+
+    The dialog renders the request's own heading, a description line directly
+    above the box, and the command inside a ruled box. A box line as wide as
+    the box's own capacity was wrapped by the renderer; a shorter break is a
+    real newline. A wrap can eat the space between two shell words, so every
+    join stays a variant; the stored command uses a small shell lexicon and
+    every variant is hashed for dedup. A heading this parser does not know is
+    left alone, never guessed.
+    """
+    if not isinstance(text, str) or '│' not in text:
+        return None
+    lines = text.splitlines()
+    start = next((index for index, line in enumerate(lines) if _DIALOG_BOX.match(line)), None)
+    if start is None:
+        return None
+    box = []
+    for line in lines[start:]:
+        if _DIALOG_BOX.match(line) is None:
+            break
+        box.append(line)
+    rows = [_DIALOG_BOX.match(line).group(2) for line in box]
+    if not rows or not any(row.strip() for row in rows):
+        return None
+    capacity = max(len(line) for line in box)
+    primary, tight, loose = [], [], []
+    for index, row in enumerate(rows):
+        for target in (primary, tight, loose):
+            target.append(row)
+        if index + 1 == len(rows):
+            continue
+        if len(box[index]) < capacity:
+            for target in (primary, tight, loose):
+                target.append('\n')
+            continue
+        tight.append(''); loose.append(' ')
+        left = _DIALOG_TAIL.search(row.rstrip()); right = _DIALOG_HEAD.match(rows[index + 1].lstrip())
+        primary.append(' ' if left and right and left.group(1).lower() in _SHELL_WORDS
+            and right.group(1).lower() in _SHELL_WORDS else '')
+    command = ''.join(primary)
+    variants = list(dict.fromkeys([command, ''.join(tight), ''.join(loose),
+        '\n'.join(rows), ' '.join(row.strip() for row in rows)]))
+    description, tool = '', None
+    if any(line.strip().lower() in _DIALOG_FOREIGN for line in lines[:start]):
+        return None
+    for line in reversed(lines[:start]):
+        stripped = line.strip()
+        if not stripped or _DIALOG_RULE.match(stripped):
+            continue
+        lowered = stripped.lower()
+        if _DIALOG_TIP.match(lowered):
+            continue
+        if lowered in _DIALOG_HEADINGS:
+            tool = _DIALOG_HEADINGS[lowered]
+            continue
+        if lowered in _DIALOG_FOREIGN:
+            return None
+        if stripped.startswith('⎿'):
+            break
+        description = stripped
+        break
+    return {'tool': tool or 'Bash', 'command': command, 'description': description,
+            'variants': variants}
+
+
+def _command_skeleton(command):
+    """Whitespace-free command shape; dialog wrapping never survives it."""
+    if not isinstance(command, str) or not command.strip():
+        return None
+    return re.sub(r'\s+', '', command)
+
+
+def _item_command(item):
+    request = item.get('request') if isinstance(item, dict) and isinstance(item.get('request'), dict) else {}
+    tool_input = request.get('tool_input') if isinstance(request.get('tool_input'), dict) else {}
+    for value in (item.get('command'), tool_input.get('command')):
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _queue_pty_hold(event, reason, away_reason, manifest):
+    """Queue a PTY hold carrying the real request identity.
+
+    The warm supervisor denies a permission prompt through its PTY after the
+    hold timeout; the queued item must deduplicate exactly like a hook item.
+    The PermissionRequest hook's own record of the same pending request is
+    preferred (same screen identity, same command, same intent); the dialog
+    text is the fallback. The full screen stays on the item as evidence.
+    """
+    payload = dict(event) if isinstance(event, dict) else {}
+    tool = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
+    visible = tool.get('screen_text')
+    parsed = _parse_permission_dialog(visible) if isinstance(visible, str) else None
+    if parsed is None:
+        return _queue_upsert(payload, reason, away_reason, manifest)
+    cwd = _absolute_cwd(payload)
+    profile = tool.get('profile') or payload.get('profile')
+    prompt_identity = tool.get('prompt_identity') or payload.get('prompt_identity')
+    variants = parsed['variants']
+    def synthetic(command):
+        return {'hook_event_name': 'PermissionRequest', 'hold_pty': True, 'pty_recovered': True,
+            'tool_name': parsed['tool'], 'cwd': cwd, 'session_id': payload.get('session_id'),
+            'tool_input': {'command': command, 'description': parsed['description']},
+            'profile': profile, 'prompt_identity': prompt_identity,
+            'screen_text': visible, 'screen_text_snippet': visible[:200],
+            'hold_started': payload.get('hold_started'),
+            'transcript_path': payload.get('transcript_path')}
+    candidates = [synthetic(command) for command in variants]
+    candidate_shas = [_request_sha(parsed['tool'], cwd, candidate['tool_input']) for candidate in candidates]
+    seat, sha, intent = _queue_identity(candidates[0], manifest)
+    skeleton = _command_skeleton(variants[0])
+    now = _utc()
+    with _morning_queue_file() as file:
+        items = _queue_read(file)
+        live = [x for x in items if x.get('seat') == seat and x['status'] in {'open', 'held'}]
+        hook = next((x for x in sorted(live, key=lambda y: str(y.get('last_seen') or ''), reverse=True)
+            if not (x.get('request') or {}).get('hold_pty')
+            and (any(value in x.get('command_hashes', []) for value in candidate_shas)
+                or intent and intent == x.get('intent')
+                or skeleton and skeleton == _command_skeleton(_item_command(x) or ''))), None)
+        rehold = next((x for x in live
+            if prompt_identity and (x.get('request') or {}).get('prompt_identity') == prompt_identity), None)
+        item = hook or rehold
+        if item is not None:
+            item['count'] += 1
+            item['last_seen'] = now
+            item['command_hashes'] = list(dict.fromkeys(item.get('command_hashes', []) + candidate_shas))
+            item['pty_command_variants'] = list(dict.fromkeys(
+                (item.get('pty_command_variants') or []) + [v for v in variants[1:] if isinstance(v, str)]))
+            if candidates[0] not in item.get('requests', []):
+                item['requests'].append(candidates[0])
+            if hook is not None:
+                item['pty_hold'] = {'profile': profile, 'prompt_identity': prompt_identity,
+                    'screen_text_snippet': visible[:200], 'hold_started': payload.get('hold_started')}
+                if not item.get('intent') and intent:
+                    item['intent'] = intent
+            else:
+                item.update(timestamp=now, tool=parsed['tool'], command=variants[0], cwd=cwd,
+                    session=payload.get('session_id'), intent=intent or item.get('intent', ''),
+                    request=candidates[0])
+            if item.get('status') != 'held':
+                item['status'] = 'open'
+                item['away_reason'] = away_reason
+            _queue_append(file, item)
+            return item['id']
+        item = {'schema': 'dotcortex.approval.queue.v2', 'id': secrets.token_hex(12), 'seat': seat,
+            'count': 1, 'first_seen': now, 'command_hashes': candidate_shas,
+            'pty_command_variants': [v for v in variants[1:] if isinstance(v, str)],
+            'requests': [candidates[0]], 'context': {}, 'timestamp': now, 'tool': parsed['tool'],
+            'command': variants[0], 'cwd': cwd, 'session': payload.get('session_id'), 'intent': intent,
+            'reason': reason, 'away_reason': away_reason, 'request': candidates[0],
+            'notification_sha': hashlib.sha256(json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()[:16],
+            'status': 'open'}
+        _queue_append(file, item)
+        return item['id']
+
+
 def _queue_morning(event, reason, away_reason):
     try:
         _queue_upsert(event, reason, away_reason, {})
@@ -3050,10 +3226,96 @@ def _queue_live_allow(event, manifest):
                 now = _utc()
                 item.update(status='resolved', resolution='approved live at ' + now, resolved_at=now)
                 _queue_append(file, item)
-                resolved.append(item['id'])
+                resolved.append(dict(item))
+    for item in resolved:
+        # A request another route carried out must not keep a live Telegram
+        # card; the outcome lane rewrites the hold message without buttons.
+        _telegram_outcome(item, 'done_by_another_route')
     if resolved:
         _clear_away_flag(manifest, 'human_allow_live')
-    return resolved
+    return [item['id'] for item in resolved]
+
+
+_EXECUTED_INDEX_CACHE = {}
+
+
+def _executed_request_index():
+    """The (session, input_sha) pairs this seat's gate allowed, with timestamps."""
+    path = Path(os.environ.get('SO_APPROVAL_KIKIN_LOG') or Path.home()/'.local/state/dotcortex/claude-approval-kikin.jsonl')
+    try:
+        info = path.stat()
+        stamp = (info.st_mtime_ns, info.st_size)
+    except OSError:
+        return {}
+    cached = _EXECUTED_INDEX_CACHE.get(str(path))
+    if cached and cached[0] == stamp:
+        return cached[1]
+    index = {}
+    try:
+        with path.open('rb') as stream:
+            if info.st_size > 262144:
+                stream.seek(info.st_size - 262144)
+                stream.readline()
+            for raw in stream:
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if (isinstance(row, dict) and row.get('decision') == 'allow'
+                        and isinstance(row.get('session'), str) and isinstance(row.get('input_sha'), str)):
+                    key = (row['session'], row['input_sha'][:12])
+                    when = str(row.get('ts') or '')
+                    if key not in index or when > index[key]:
+                        index[key] = when
+    except (OSError, ValueError):
+        return {}
+    _EXECUTED_INDEX_CACHE[str(path)] = (stamp, index)
+    return index
+
+
+def _item_execution_shas(item):
+    """Every log scheme a stored request could have been recorded under.
+
+    The gate journal hashes the raw tool input; the live observation hashes
+    the queue identity. A dialog-recovered request keeps its join variants
+    because the original line breaks were ambiguous.
+    """
+    request = item.get('request') if isinstance(item.get('request'), dict) else {}
+    tool_input = request.get('tool_input') if isinstance(request.get('tool_input'), dict) else {}
+    command = tool_input.get('command')
+    inputs = [tool_input]
+    if isinstance(command, str):
+        for variant in item.get('pty_command_variants') or []:
+            if isinstance(variant, str) and variant != command:
+                candidate = dict(tool_input); candidate['command'] = variant
+                inputs.append(candidate)
+    shas = set()
+    for candidate in inputs:
+        shas.add(_request_sha(request.get('tool_name'), item.get('cwd'), candidate)[:12])
+        shas.add(hashlib.sha256(json.dumps(candidate, sort_keys=True, default=str).encode()).hexdigest()[:12])
+    return shas
+
+
+def _item_execution_evidence(item):
+    """True when the item's own session has since allowed the same request."""
+    session = item.get('session')
+    first = str(item.get('first_seen') or '')
+    if not isinstance(session, str) or not session or not first:
+        return False
+    index = _executed_request_index()
+    if not index:
+        return False
+    for sha in _item_execution_shas(item):
+        when = index.get((session, sha))
+        if when is None:
+            continue
+        try:
+            seen, started = datetime.datetime.fromisoformat(when), datetime.datetime.fromisoformat(first)
+        except ValueError:
+            return False
+        if seen and started and seen >= started:
+            return True
+    return False
 
 
 def _queue_obsolete_reason(item):
@@ -3069,11 +3331,13 @@ def _queue_obsolete_reason(item):
         return 'branch landed'
     if context.get('session_ended') is True and context.get('intent_met') is True:
         return 'session ended and intent met'
+    if _item_execution_evidence(item):
+        return 'done by another route'
     return None
 
 
 def _queue_sweep():
-    changed = []; expired=[]
+    changed = []; expired=[]; routed=[]
     with _morning_queue_file() as file:
         for item in _queue_read(file):
             if item['status'] == 'held' and item.get('hold_deadline', float('inf')) <= time.time():
@@ -3085,7 +3349,10 @@ def _queue_sweep():
                 if reason:
                     item.update(status='obsolete', resolution=reason, resolved_at=_utc())
                     _queue_append(file, item); changed.append(item['id'])
+                    if reason == 'done by another route':
+                        routed.append(dict(item))
     for item in expired:_telegram_outcome(item,'hold_timeout')
+    for item in routed:_telegram_outcome(item,'done_by_another_route')
     return changed
 
 
@@ -3430,6 +3697,110 @@ def _queue_repair(home, seat):
         return {'changed':changed,'backup':str(backup)}
 
 
+def _merge_landed_reason(command):
+    """A queued merge whose branch tip is already on master landed elsewhere."""
+    if not isinstance(command, str) or 'git merge' not in command:
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    repo = None; branch = None; index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == 'cd' and index + 1 < len(tokens) and tokens[index + 1].startswith('/'):
+            repo = tokens[index + 1]; index += 2; continue
+        if token == 'git' and index + 1 < len(tokens) and tokens[index + 1] == 'merge':
+            index += 2
+            while index < len(tokens):
+                word = tokens[index]
+                if word.startswith('-'):
+                    index += 2 if word in {'-m', '--message', '-F', '--file', '--into-name'} else 1
+                    continue
+                branch = word; break
+        if branch is not None:
+            break
+        index += 1
+    if not repo or not branch or branch.startswith('-') or '..' in branch:
+        return None
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_./+-]*', branch):
+        return None
+    if _queue_git(repo, 'merge-base', '--is-ancestor', branch, 'refs/heads/master') == '':
+        return 'merge landed by another route'
+    return None
+
+
+def _queue_repair_pty():
+    """One-shot offline repair for legacy PTY holds with no real identity.
+
+    Recovers tool, command and intent from the stored screen text, restores
+    the request identity the dedup paths hash, and resolves items whose own
+    session has since allowed the same request or whose merge has landed.
+    Offline only: stop queue writers first. Exact bytes are backed up before
+    the first append; a second run changes nothing.
+    """
+    path=_morning_queue_path()
+    with _morning_queue_file() as file:
+        file.seek(0);original=file.read()
+        if original and not original.endswith('\n'):raise ValueError('incomplete queue; manual recovery required')
+        items=_queue_read(file)
+        now=_utc();report=[];appends=[]
+        for item in items:
+            request=item.get('request') if isinstance(item.get('request'),dict) else {}
+            if item.get('status') not in {'open','held'} or request.get('hold_pty') is not True:
+                continue
+            entry={'id':item['id'],'parsed':False,'resolved':None}
+            tool_input=request.get('tool_input') if isinstance(request.get('tool_input'),dict) else {}
+            if request.get('tool_name')=='PTYPermission':
+                parsed=_parse_permission_dialog(tool_input.get('screen_text'))
+                if parsed is None or not isinstance(item.get('cwd'),str) or not item['cwd'].startswith('/'):
+                    entry['note']='command not recoverable from the stored screen'
+                    report.append(entry);continue
+                entry['parsed']=True
+                variants=parsed['variants']
+                candidates=[{'hook_event_name':'PermissionRequest','hold_pty':True,'pty_recovered':True,
+                    'tool_name':parsed['tool'],'cwd':item['cwd'],'session_id':item.get('session'),
+                    'tool_input':{'command':command,'description':parsed['description']},
+                    'screen_text':tool_input.get('screen_text'),
+                    'screen_text_snippet':str(tool_input.get('screen_text') or '')[:200],
+                    'prompt_identity':request.get('prompt_identity'),'profile':request.get('profile')}
+                    for command in variants]
+                candidate_shas=[_request_sha(parsed['tool'],item['cwd'],c['tool_input']) for c in candidates]
+                item.update(tool=parsed['tool'],command=variants[0],intent=parsed['description'],
+                    timestamp=now,request=candidates[0],command_hashes=list(dict.fromkeys(item.get('command_hashes',[])+candidate_shas)),
+                    pty_command_variants=[v for v in variants[1:] if isinstance(v,str)])
+                if candidates[0] not in item.get('requests',[]):item['requests'].append(candidates[0])
+                appends.append(dict(item))
+            else:
+                entry['parsed']=True
+            evidence=dict(item)
+            reason=next((value for value in (_merge_landed_reason(command) for command
+                in [evidence.get('command')] + list(evidence.get('pty_command_variants') or [])) if value), None)
+            if reason is None and _item_execution_evidence(evidence):
+                reason='done by another route'
+            if reason:
+                evidence.update(status='obsolete',resolution=reason,resolved_at=now)
+                entry['resolved']=reason
+                appends.append(evidence)
+            report.append(entry)
+        if not appends:
+            return {'changed':0,'backup':None,'items':report}
+        backup=path.with_name(path.name+'.backup-'+secrets.token_hex(8))
+        fd=os.open(backup,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as saved:
+            saved.write(original);saved.flush();os.fsync(saved.fileno())
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+        for revision in appends:
+            file.write(json.dumps(revision,ensure_ascii=True,separators=(',',':'))+'\n')
+        file.flush();os.fsync(file.fileno())
+    for entry in report:
+        if entry.get('resolved'):
+            _telegram_outcome(next((x for x in appends if x.get('id')==entry['id'] and x.get('status')=='obsolete'),{}),'done_by_another_route')
+    return {'changed':len(appends),'backup':str(backup),'items':report}
+
+
 def _telegram_outcome(item, outcome):
     """Cleanup runs after the queue lock, outside the PTY's guarded write seam."""
     helper=Path(__file__).resolve().parent/'telegram_permission_recall.py'
@@ -3463,6 +3834,7 @@ def queue_main():
     repair = commands.add_parser('repair', help='offline repair; stop queue writers first')
     repair.add_argument('--home', required=True)
     repair.add_argument('--seat', required=True)
+    commands.add_parser('repair-pty', help='offline PTY hold repair; stop queue writers first')
     resolve = commands.add_parser('resolve'); resolve.add_argument('id'); resolve.add_argument('--how', required=True)
     intent = commands.add_parser('intent'); intent.add_argument('id'); intent.add_argument('--text', required=True)
     confirm = commands.add_parser('confirm'); confirm.add_argument('id'); confirm.add_argument('--session', required=True)
@@ -3474,6 +3846,8 @@ def queue_main():
     try:
         if args.action == 'repair':
             print(json.dumps(_queue_repair(args.home,args.seat)));return 0
+        if args.action == 'repair-pty':
+            print(json.dumps(_queue_repair_pty()));return 0
         if args.action == 'resolve':
             return 0 if _queue_resolve(args.id, args.how) else 1
         if args.action == 'intent':
