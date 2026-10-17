@@ -1899,7 +1899,12 @@ def _hold_queue_write(supervisor, profile, identity):
         except (OSError, ValueError):
             supervisor._guard_log("pty-hold-manifest-unavailable")
             manifest = {}
-        item = runtime._queue_upsert(event, "hold_timeout", "hold_timeout", manifest)
+        # The queued item must deduplicate like a hook item: the runtime
+        # recovers the real tool, command, intent and cwd from the hook
+        # record of the same pending request or from the dialog text, so a
+        # later run through any route resolves this card.
+        hold_queue = getattr(runtime, "_queue_pty_hold", None) or runtime._queue_upsert
+        item = hold_queue(event, "hold_timeout", "hold_timeout", manifest)
         runtime._queue_cleanup(item,"hold_timeout")
         ledger = pathlib.Path.home() / ".local/state/dotcortex/pty-hold-ledger.jsonl"
         ledger.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
