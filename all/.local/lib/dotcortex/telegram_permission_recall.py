@@ -5,6 +5,7 @@ Usage: telegram_permission_recall.py <hook-start-epoch>   (hook event JSON on st
 See agents-approval-telegram-recall.org for the identification rules.
 """
 import json
+import datetime
 import hashlib
 import os
 import re
@@ -106,13 +107,43 @@ def _logged_floor(session):
     return best
 
 
+def _probed(session):
+    """What earlier sweeps saw when they stripped permission prompts.
+
+    The probe IS the strip, so the first sweep to reach a parallel batch
+    removes the buttons its sibling sweep needed to read the text. Every
+    stripped permission prompt is recorded; a later sweep that meets an
+    already-buttonless message classifies it from the record instead of
+    treating it as unreadable (2026-10-17, Telegram 7862/7865)."""
+    try:
+        with LOG.open('rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - 262144))
+            lines = handle.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return {}
+    seen = {}
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(row, dict) and row.get('action') == 'probed'
+                and row.get('session') == session and isinstance(row.get('message_id'), int)
+                and isinstance(row.get('text'), str) and type(row.get('date')) is int):
+            seen[row['message_id']] = (row['text'], row['date'])
+    return seen
+
+
 def _unresolved(tail):
-    """Unresolved tool calls in the newest assistant message only.
+    """Unresolved tool calls in the newest assistant message only, with tools.
 
     Parallel tool calls share one assistant message id, so that batch is the
     only place another live request can be waiting. A call interrupted or
     refused long ago never gets a tool_result in the transcript; counting it
-    stalled every later sweep (Admiral 7409)."""
+    stalled every later sweep (Admiral 7409). The tool names let an allow
+    match its own card while a parallel request of a different tool is also
+    waiting (2026-10-17, Telegram 7862/7865)."""
     uses, results, last_group = {}, set(), None
     for line in tail.splitlines():
         try:
@@ -128,11 +159,12 @@ def _unresolved(tail):
             if not isinstance(block, dict):
                 continue
             if block.get('type') == 'tool_use' and block.get('id'):
-                uses[block['id']] = group
+                uses[block['id']] = (group, block.get('name'))
                 last_group = group
             elif block.get('type') == 'tool_result' and block.get('tool_use_id'):
                 results.add(block['tool_use_id'])
-    return {use for use, group in uses.items() if group == last_group and use not in results}
+    return {use: name for use, (group, name) in uses.items()
+            if group == last_group and use not in results}
 
 
 def _call(base, token, method, payload):
@@ -160,6 +192,8 @@ OUTCOMES = {
     'hold_unavailable': '⚠️ Delivery unavailable, queued for the Desk',
     'done_by_another_route': '✅ Done by another route',
     'resolved': '✅ Resolved on the Desk',
+    'desk_approved': '✅ Approved from the Desk',
+    'desk_declined': '❌ Declined from the Desk',
     'denied': '⏸️ Denied, queued for the Desk',
     'human_denied': '⛔ Denied, queued for the Desk',
 }
@@ -204,8 +238,15 @@ def settle(item, outcome):
         edited=edit_outcome(base,token,chat,message_id,outcome);ok=ok and edited
         _log(session=session,action='outcome_edited' if edited else 'cleanup_failed',message_id=message_id)
     # Native plugin sends bypass approval-telegram-notify. Use the existing
-    # bounded recall lane only when the PTY captured the original hold window.
+    # bounded recall lane only when the original prompt window is known: the
+    # PTY captured its hold window, or a hook-queued item carries first_seen,
+    # the moment the request first hit the gate and the card was posted.
     started=request.get('hold_started') or item.get('hold_started')
+    if started is None and isinstance(item.get('first_seen'), str):
+        try:
+            started = datetime.datetime.fromisoformat(item['first_seen']).timestamp()
+        except ValueError:
+            started = None
     if state and isinstance(started,(int,float)) and request.get('transcript_path'):
         native=sweep(request,started,state_dir=Path(state),base=base,outcome=outcome)
         ok=bool(native) and ok
@@ -219,6 +260,11 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
     """Return the deleted message id as a one-item list (empty when nothing qualifies)."""
     decided = now()  # the wrapper starts this right after the gate allowed
     session = event.get('session_id', '') if isinstance(event, dict) else ''
+    tool = event.get('tool_name') if isinstance(event, dict) else None
+    if not isinstance(tool, str) or not tool:
+        _log(session=session, action='skip', why='no_tool')
+        return []
+    wanted = PREFIX + tool  # the card names its tool; parallel prompts do not share it
     token, chat = _token(state_dir), _chat(state_dir)
     if not token or not chat:
         _log(session=session, action='skip', why='no_token' if not token else 'chat_not_single')
@@ -227,8 +273,10 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
     if tail is None:
         _log(session=session, action='skip', why='no_transcript')
         return []
-    if len(_unresolved(tail)) > 1:
-        _log(session=session, action='skip', why='other_request_pending')
+    if outcome is None and sum(1 for name in _unresolved(tail).values() if name == tool) > 1:
+        # Two same-tool calls pending at once: either card could be the other
+        # request's live floor ask, and nothing in the window tells them apart.
+        _log(session=session, action='skip', why='same_tool_parallel')
         return []
     anchor = _anchor(tail)
     floor = _logged_floor(session) if session else None
@@ -238,29 +286,52 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
         _log(session=session, action='skip', why='no_anchor')
         return []
     done, deleted, seen = set(), [], None
+    probed = _probed(session)
     deadline = decided + settle_seconds if outcome else min(started + sweep_seconds, decided + settle_seconds)
     while now() < deadline:
+        # One probe pass classifies every reachable prompt before anything is
+        # acted on: parallel requests post their cards at the same moment, and
+        # only a windowed prompt whose tool matches this request belongs to it.
+        mine, later = [], False
         for message_id in range(anchor + 1, anchor + 1 + PROBE_AHEAD):
             if message_id in done:
                 continue
             reply = _call(base, token, 'editMessageReplyMarkup', {'chat_id': chat, 'message_id': message_id})
-            if not reply.get('ok'):
-                description = str(reply.get('description', ''))
-                if 'not found' not in description:
-                    done.add(message_id)  # user message, button-less bot message, or other refusal
-                    seen = message_id if seen is None else max(seen, message_id)
-                continue
-            done.add(message_id)
-            message = reply.get('result') if isinstance(reply.get('result'), dict) else {}
-            text, date = message.get('text', ''), message.get('date')
-            in_window = isinstance(date, int) and int(started) - 1 <= date <= (int(started + SETTLE_SECONDS) + 1 if outcome else int(decided) + 1)
-            if not (isinstance(text, str) and text.startswith(PREFIX) and in_window):
-                _log(session=session, action='anomaly', message_id=message_id, why='stripped_but_not_a_windowed_permission')
+            if reply.get('ok'):
+                done.add(message_id)
+                message = reply.get('result') if isinstance(reply.get('result'), dict) else {}
+                text, date = message.get('text', ''), message.get('date')
                 if isinstance(text, str) and text.startswith(PREFIX):
-                    deadline = 0  # a later request's prompt: stop before touching anything newer
-                    break  # and never record it as seen: its own sweep must still reach it
+                    _log(session=session, action='probed', message_id=message_id, text=text, date=date)
+            else:
+                if 'not found' in str(reply.get('description', '')):
+                    continue  # not sent yet; retried on the next pass
+                done.add(message_id)
+                cached = probed.get(message_id)
+                if cached is None:
+                    # user message or button-less bot message
+                    seen = message_id if seen is None else max(seen, message_id)
+                    continue
+                text, date = cached  # a sibling sweep stripped this prompt; the record stands in
+            in_window = isinstance(date, int) and int(started) - 1 <= date <= (int(started + SETTLE_SECONDS) + 1 if outcome else int(decided) + 1)
+            if not (isinstance(text, str) and text.startswith(PREFIX)):
+                _log(session=session, action='anomaly', message_id=message_id, why='stripped_but_not_a_windowed_permission')
                 seen = message_id if seen is None else max(seen, message_id)
                 continue
+            if not text.startswith(wanted):
+                continue  # another tool's prompt: its own sweep owns it; never recorded as seen
+            if in_window:
+                mine.append(message_id)
+            else:
+                later = True  # this tool's prompt for a later request: never touch, never seen
+        if later or len(mine) > 1:
+            # A later request with the same tool, or two prompts this sweep
+            # cannot tell apart: a live floor ask is never removed by inference.
+            _log(session=session, action='skip', why='same_tool_prompt_ambiguous' if len(mine) > 1 else 'later_same_tool_prompt')
+            deadline = 0
+            break
+        if mine:
+            message_id = mine[0]
             seen = message_id if seen is None else max(seen, message_id)
             if (edit_outcome(base,token,chat,message_id,outcome) if outcome else
                     _call(base,token,'deleteMessage',{'chat_id':chat,'message_id':message_id}).get('ok')):

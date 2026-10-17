@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Recall deletes only windowed permission prompts, against a loopback fake Telegram."""
+import datetime
 import http.server
 import importlib.util
 import json
+import os
 import tempfile
 import threading
 import time
@@ -25,6 +27,7 @@ class FakeTelegram:
         self.messages = messages
         self.deleted = []
         self.stripped = []
+        self.edited = []
         fake = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -60,6 +63,13 @@ class FakeTelegram:
             message['buttons'] = False
             self.stripped.append(body['message_id'])
             return {'ok': True, 'result': {'message_id': body['message_id'], 'text': message['text'], 'date': message['date']}}
+        if method == 'editMessageText':
+            if message['kind'] == 'user':
+                return {'ok': False, 'description': "Bad Request: message can't be edited"}
+            message['buttons'] = False
+            message['text'] = body['text']
+            self.edited.append((body['message_id'], body['text']))
+            return {'ok': True, 'result': True}
         if method == 'deleteMessage':
             self.deleted.append(body['message_id'])
             del self.messages[body['message_id']]
@@ -78,18 +88,18 @@ class RecallTests(unittest.TestCase):
         recall.LOG = self.dir / 'recall.jsonl'  # never write the live log
         self.sweep_args = {}
 
-    def transcript(self, *, anchor=100, unresolved=1):
+    def transcript(self, *, anchor=100, tools=('Bash',)):
         rows = [{'message': {'content': [{'type': 'text', 'text': f'<channel source="telegram" chat_id="{CHAT}" message_id="{anchor - 1}">hi</channel>'}]}},
                 {'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'old', 'content': f'sent (id: {anchor})'}]}},
                 {'message': {'content': [{'type': 'tool_use', 'id': 'old', 'name': 'x', 'input': {}}]}}]
-        for index in range(unresolved):
-            rows.append({'message': {'content': [{'type': 'tool_use', 'id': f'open{index}', 'name': 'Bash', 'input': {}}]}})
+        for index, name in enumerate(tools):
+            rows.append({'message': {'content': [{'type': 'tool_use', 'id': f'open{index}', 'name': name, 'input': {}}]}})
         path = self.dir / 'transcript.jsonl'
         path.write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
         return str(path)
 
-    def run_sweep(self, fake, **kwargs):
-        event = {'session_id': 's', 'transcript_path': self.transcript(**kwargs)}
+    def run_sweep(self, fake, tool='Bash', **kwargs):
+        event = {'session_id': 's', 'tool_name': tool, 'transcript_path': self.transcript(**kwargs)}
         return recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=2.2, **self.sweep_args)  # self.now is truncated to the second
 
     def test_deletes_only_the_windowed_permission_prompt(self):
@@ -125,13 +135,26 @@ class RecallTests(unittest.TestCase):
         rows.insert(0, {'message': {'id': 'old-turn', 'content': [{'type': 'tool_use', 'id': 'dead', 'name': 'Bash', 'input': {}}]}})
         Path(path).write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
         fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
-        event = {'session_id': 's', 'transcript_path': path}
+        event = {'session_id': 's', 'tool_name': 'Bash', 'transcript_path': path}
         self.assertEqual(recall.sweep(event, self.now, state_dir=self.state, base=fake.base, sweep_seconds=2.2), [101])
 
-    def test_skips_entirely_while_another_request_is_pending(self):
+    def test_two_same_tool_calls_pending_at_once_are_never_touched(self):
+        # Two Bash calls unresolved in one batch: either card could be the
+        # other request's live floor ask, so the sweep refuses to guess.
         fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}})
-        self.assertEqual(self.run_sweep(fake, unresolved=2), [])
+        self.assertEqual(self.run_sweep(fake, tools=('Bash', 'Bash')), [])
         self.assertEqual(fake.stripped, [])
+
+    def test_parallel_prompts_of_different_tools_are_each_cleaned_by_their_own_sweep(self):
+        # Telegram 7862/7865: Bash and WebFetch asked at once, both allowed;
+        # the old blanket guard skipped both sweeps and a card stayed live.
+        fake = FakeTelegram({
+            101: {'kind': 'bot', 'text': '\U0001f510 Permission: Bash', 'buttons': True, 'date': self.now},
+            102: {'kind': 'bot', 'text': '\U0001f510 Permission: WebFetch', 'buttons': True, 'date': self.now},
+        })
+        self.assertEqual(self.run_sweep(fake, tool='Bash', tools=('Bash', 'WebFetch')), [101])
+        self.assertEqual(self.run_sweep(fake, tool='WebFetch', tools=('Bash', 'WebFetch')), [102])
+        self.assertEqual(sorted(fake.messages), [])
 
     def test_prompt_that_arrives_late_is_still_caught(self):
         fake = FakeTelegram({})
@@ -139,14 +162,16 @@ class RecallTests(unittest.TestCase):
         timer.start()
         self.assertEqual(self.run_sweep(fake), [101])
 
-    def test_deletes_only_its_own_prompt_never_the_next_one(self):
+    def test_two_same_tool_prompts_in_one_window_are_never_touched(self):
+        # The old sweep deleted the first of two same-tool prompts; two prompts
+        # this close cannot be told apart, so now neither is touched.
         fake = FakeTelegram({
             101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now},
             102: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now},
         })
-        self.assertEqual(self.run_sweep(fake), [101])
+        self.assertEqual(self.run_sweep(fake), [])
+        self.assertIn(101, fake.messages)
         self.assertIn(102, fake.messages)
-        self.assertEqual(fake.stripped, [101])
 
     def test_next_request_prompt_after_the_decision_is_never_touched(self):
         # Telegram 7224: the next request's live floor prompt arrived seconds
@@ -166,8 +191,9 @@ class RecallTests(unittest.TestCase):
             102: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now + 30},
         })
         self.assertEqual(self.run_sweep(fake), [])
-        self.assertEqual(fake.stripped, [101])
+        self.assertEqual(sorted(fake.stripped), [101, 102])
         self.assertIn(101, fake.messages)
+        self.assertIn(102, fake.messages)
 
     def test_earlier_sweeps_move_the_anchor_past_a_long_run_of_prompts(self):
         # Admiral 7316: with no new chat text the transcript anchor stayed at
@@ -188,6 +214,42 @@ class RecallTests(unittest.TestCase):
         (self.state / 'access.json').write_text(json.dumps({'allowFrom': [CHAT, '222']}))
         self.assertEqual(self.run_sweep(fake), [])
         self.assertEqual(fake.stripped, [])
+
+    def test_settle_uses_first_seen_when_no_hold_window_and_edits_the_desk_outcome(self):
+        # A Desk approval settles a hook-queued item long after the request; the
+        # card was posted when the request first hit the gate, so first_seen
+        # bounds the window and the outcome names the Desk.
+        first = datetime.datetime.now(datetime.timezone.utc)
+        item = {'session': 's', 'first_seen': first.isoformat(),
+                'request': {'tool_name': 'Bash', 'session_id': 's', 'transcript_path': self.transcript(),
+                            'tool_input': {'command': 'printf hello'}}}
+        fake = FakeTelegram({101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': int(first.timestamp())}})
+        os.environ['TELEGRAM_STATE_DIR'] = str(self.state)
+        os.environ['TELEGRAM_API_BASE'] = fake.base
+        try:
+            self.assertTrue(recall.settle(item, 'desk_approved'))
+        finally:
+            del os.environ['TELEGRAM_STATE_DIR']
+            del os.environ['TELEGRAM_API_BASE']
+        self.assertEqual(fake.edited, [(101, '✅ Approved from the Desk')])
+
+    def test_settle_never_touches_another_tools_card(self):
+        first = datetime.datetime.now(datetime.timezone.utc)
+        item = {'session': 's', 'first_seen': first.isoformat(),
+                'request': {'tool_name': 'Bash', 'session_id': 's', 'transcript_path': self.transcript(tools=('Bash', 'WebFetch')),
+                            'tool_input': {'command': 'printf hello'}}}
+        fake = FakeTelegram({
+            101: {'kind': 'bot', 'text': '\U0001f510 Permission: WebFetch', 'buttons': True, 'date': int(first.timestamp())},
+        })
+        os.environ['TELEGRAM_STATE_DIR'] = str(self.state)
+        os.environ['TELEGRAM_API_BASE'] = fake.base
+        try:
+            self.assertFalse(recall.settle(item, 'desk_approved'))
+        finally:
+            del os.environ['TELEGRAM_STATE_DIR']
+            del os.environ['TELEGRAM_API_BASE']
+        self.assertEqual(fake.edited, [])
+        self.assertIn(101, fake.messages)
 
 
 if __name__ == '__main__':
