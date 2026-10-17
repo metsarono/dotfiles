@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -192,6 +193,170 @@ class CleanupTests(unittest.TestCase):
     def test_markdown_v2_escapes_every_reserved_character(self):
         reserved='_*[]()~`>#+-=|{}.!\\'
         self.assertEqual(recall.markdown_text(reserved),''.join('\\'+x for x in reserved))
+
+
+class PtyHoldDedupTests(unittest.TestCase):
+    """A PTY hold must carry and deduplicate the real request (Admiral 7741).
+
+    Fixtures are synthetic rewrites of a real Claude Code Bash permission
+    screen: the box wraps at a fixed width exactly like the renderer, so the
+    parser's rejoin is pinned, and no private path enters this repo.
+    """
+    COMMAND=('T=/fixture/scratch; rm -rf "$T"; mkdir -p "$T" && cd /fixture/work &&'
+        ' cp fixture-a.org fixture-b.org "$T"/ && cd "$T" && python3 -m py_compile'
+        ' /fixture/scratch/engine.py && echo compiled')
+    DESCRIPTION='Tangle the fixture engine into scratch and compile'
+
+    def dialog_screen(self,rows,description=DESCRIPTION,heading=True,foreign=False):
+        lines=[]
+        if heading:
+            lines+=[('Write file' if foreign else 'Bash command'),
+                'Tip: auto mode handles these prompts for you',description]
+        else:
+            lines.append(description)
+        lines.append('╌'*92)
+        lines+=[' │ '+row for row in rows]
+        lines+=['╌'*92," A variable in this command can't be checked before it runs",
+            ' Do you want to proceed?',' ❯ 1. Yes','   2. No',' Esc to cancel · Tab to amend','']
+        return '\n'.join(lines)
+
+    def wrapped_rows(self,command=COMMAND,width=40):
+        return [command[index:index+width] for index in range(0,len(command),width)]
+
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.home=Path(self.tmp.name)
+        self.queue=self.home/'queue.jsonl'
+        self.manifest={'coordinator_ops':{'seat_account':'fixture@example.invalid'}}
+        self.env=patch.dict(os.environ,{'HOME':str(self.home),'SO_APPROVAL_MORNING_QUEUE':str(self.queue)},clear=True)
+        self.env.start();self.addCleanup(self.env.stop)
+        self.argv=patch.object(sys,'argv',['fixture-owner']);self.argv.start();self.addCleanup(self.argv.stop)
+
+    def records(self):
+        with self.queue.open() as stream:return runtime._queue_read(stream)
+
+    def hook_event(self,**extra):
+        return {'tool_name':'Bash','tool_input':{'command':self.COMMAND,'description':self.DESCRIPTION},
+            'cwd':'/fixture','session_id':'fixture-session',**extra}
+
+    def pty_event(self,screen,**extra):
+        return {'hook_event_name':'PermissionRequest','hold_pty':True,'tool_name':'PTYPermission',
+            'cwd':'/fixture','session_id':'fixture-session','profile':'claude-code','prompt_identity':'digest@7',
+            'tool_input':{'profile':'claude-code','prompt_identity':'digest@7','screen_text':screen,
+                'session_id':'fixture-session'},**extra}
+
+    def test_dialog_fallback_recovers_tool_command_and_intent(self):
+        screen=self.dialog_screen(self.wrapped_rows())
+        parsed=runtime._parse_permission_dialog(screen)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['tool'],'Bash')
+        self.assertEqual(parsed['command'],self.COMMAND)
+        self.assertEqual(parsed['description'],self.DESCRIPTION)
+        self.assertIn(self.COMMAND,parsed['variants'])
+        self.assertIn(' '.join(self.wrapped_rows()),parsed['variants'])
+        # Heading scrolled off: the description still sits directly above the rule.
+        headingless=runtime._parse_permission_dialog(self.dialog_screen(self.wrapped_rows(),heading=False))
+        self.assertEqual((headingless['tool'],headingless['description']),('Bash',self.DESCRIPTION))
+        # Unknown dialog shapes and boxless screens are never guessed.
+        self.assertIsNone(runtime._parse_permission_dialog(self.dialog_screen(self.wrapped_rows(),foreign=True)))
+        self.assertIsNone(runtime._parse_permission_dialog('rm OLD\nDo you want to proceed?\nEsc to cancel'))
+
+    def test_pty_hold_then_same_command_succeeding_resolves_the_item(self):
+        item=runtime._queue_pty_hold(self.pty_event(self.dialog_screen(self.wrapped_rows())),
+            'hold_timeout','hold_timeout',self.manifest)
+        row=next(r for r in self.records() if r['id']==item)
+        self.assertEqual((row['tool'],row['command'],row['intent'],row['status']),
+            ('Bash',self.COMMAND,self.DESCRIPTION,'open'))
+        self.assertIn('screen_text',row['request'])
+        with patch.object(runtime,'_telegram_outcome') as cleanup:
+            self.assertEqual(runtime._queue_live_allow(self.hook_event(hook_event_name='PostToolUse'),self.manifest),[item])
+            cleanup.assert_called_once();self.assertEqual(cleanup.call_args.args[1],'done_by_another_route')
+        self.assertEqual(self.records()[0]['status'],'resolved')
+
+    def test_hook_and_pty_items_for_one_request_render_as_one_card(self):
+        hook=runtime._queue_upsert(self.hook_event(),'floor','presence',self.manifest)
+        pty=runtime._queue_pty_hold(self.pty_event(self.dialog_screen(self.wrapped_rows())),
+            'hold_timeout','hold_timeout',self.manifest)
+        self.assertEqual(hook,pty)
+        rows=self.records()
+        self.assertEqual(len(rows),1)
+        row=rows[0]
+        self.assertEqual(row['count'],2)
+        self.assertEqual((row['tool'],row['command'],row['intent']),('Bash',self.COMMAND,self.DESCRIPTION))
+        self.assertEqual(sorted(row['pty_hold']),['hold_started','profile','prompt_identity','screen_text_snippet'])
+        self.assertEqual(len(row['requests']),2)
+
+    def test_unparseable_hold_keeps_the_legacy_shape(self):
+        screen='rm OLD\nDo you want to proceed?\nEsc to cancel'
+        item=runtime._queue_pty_hold(self.pty_event(screen),'hold_timeout','hold_timeout',self.manifest)
+        row=next(r for r in self.records() if r['id']==item)
+        self.assertEqual(row['tool'],'PTYPermission')
+        self.assertIn('screen_text',row['request']['tool_input'])
+
+    def test_sweep_resolves_a_request_the_session_has_since_allowed(self):
+        item=runtime._queue_upsert(self.hook_event(),'floor','presence',self.manifest)
+        row=next(r for r in self.records() if r['id']==item)
+        sha=runtime._request_sha('Bash','/fixture',{'command':self.COMMAND,'description':self.DESCRIPTION})[:12]
+        log=self.home/'.local/state/dotcortex/claude-approval-kikin.jsonl'
+        log.parent.mkdir(parents=True)
+        def append(ts):
+            with log.open('a') as stream:
+                stream.write(json.dumps({'ts':ts,'session':'fixture-session','tool':'Bash',
+                    'decision':'allow','reason':'decider_allow','input_sha':sha})+'\n')
+        append('2026-10-16T00:00:00+00:00')
+        self.assertIsNone(runtime._queue_obsolete_reason(row))
+        append('2026-10-18T00:00:00+00:00')
+        self.assertEqual(runtime._queue_obsolete_reason(row),'done by another route')
+        with patch.object(runtime,'_telegram_outcome') as cleanup:
+            self.assertEqual(runtime._queue_sweep(),[item])
+            self.assertEqual(cleanup.call_args.args[1],'done_by_another_route')
+        self.assertEqual(self.records()[0]['status'],'obsolete')
+
+    def legacy_item(self,identifier,screen,session='fixture-session',first_seen='2026-10-17T00:00:00+00:00'):
+        return {'schema':'dotcortex.approval.queue.v2','id':identifier,'seat':'fixture@example.invalid',
+            'count':1,'first_seen':first_seen,'last_seen':first_seen,'command_hashes':[],'requests':[],
+            'context':{},'timestamp':first_seen,'tool':'PTYPermission','command':'','cwd':'/fixture',
+            'session':session,'intent':'','reason':'hold_timeout','away_reason':'hold_timeout','status':'open',
+            'request':{'hook_event_name':'PermissionRequest','hold_pty':True,'tool_name':'PTYPermission',
+                'cwd':'/fixture','session_id':session,'prompt_identity':'digest@'+identifier[:4],
+                'profile':'claude-code','tool_input':{'profile':'claude-code',
+                    'prompt_identity':'digest@'+identifier[:4],'screen_text':screen,'session_id':session}}}
+
+    def test_repair_recovers_resolves_and_is_idempotent_on_a_scratch_queue(self):
+        repo=self.home/'repo';repo.mkdir()
+        def git(*args):subprocess.run(['git','-C',str(repo),*args],stdin=subprocess.DEVNULL,
+            capture_output=True,timeout=30,check=True)
+        git('init','-b','master');git('config','user.name','YOUR_TEST_USER');git('config','user.email','YOUR_USER@YOUR_HOST.helm')
+        (repo/'fixture.org').write_text('synthetic');git('add','--','fixture.org');git('commit','-m','fixture')
+        git('branch','fixture-feature');git('merge','--no-ff','-q','-m','Fixture merge','fixture-feature')
+        merge_command=f'cd {repo} && git merge --no-ff -q -m "Fixture merge" fixture-feature && git log --oneline -1'
+        sha=hashlib.sha256(json.dumps({'command':self.COMMAND,'description':self.DESCRIPTION},
+            sort_keys=True,default=str).encode()).hexdigest()[:12]
+        log=self.home/'kikin.jsonl'
+        log.write_text(json.dumps({'ts':'2026-10-18T00:00:00+00:00','session':'fixture-session','tool':'Bash',
+            'decision':'allow','reason':'decider_allow','input_sha':sha})+'\n')
+        items=[self.legacy_item('a'*24,self.dialog_screen(self.wrapped_rows())),
+            self.legacy_item('b'*24,'mystery dialog\nDo you want to proceed?\nEsc to cancel'),
+            self.legacy_item('c'*24,self.dialog_screen(self.wrapped_rows(command=merge_command,width=40)))]
+        original=''.join(json.dumps(item)+'\n' for item in items)
+        with patch.dict(os.environ,{'SO_APPROVAL_KIKIN_LOG':str(log)}):
+            self.queue.write_text(original)
+            result=runtime._queue_repair_pty()
+            second=runtime._queue_repair_pty()
+        self.assertEqual(result['changed'],4)
+        self.assertEqual(second['changed'],0);self.assertIsNone(second['backup'])
+        backup=Path(result['backup'])
+        self.assertEqual(backup.read_text(),original)
+        self.assertEqual(backup.stat().st_mode&0o777,0o600)
+        report={entry['id']:entry for entry in result['items']}
+        self.assertEqual(report['a'*24]['resolved'],'done by another route')
+        self.assertFalse(report['b'*24]['parsed'])
+        self.assertEqual(report['c'*24]['resolved'],'merge landed by another route')
+        rows={row['id']:row for row in self.records()}
+        self.assertEqual(rows['a'*24]['status'],'obsolete')
+        self.assertEqual(rows['a'*24]['command'],self.COMMAND)
+        self.assertEqual(rows['b'*24]['status'],'open')
+        self.assertEqual(rows['c'*24]['status'],'obsolete')
 
 if __name__=='__main__':unittest.main()
 #+END_SRC

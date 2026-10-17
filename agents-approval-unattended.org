@@ -450,9 +450,15 @@ def _queue_upsert(event, reason, away_reason, manifest, status='open'):
 
 _DIALOG_BOX = re.compile(r'^\s*│( ?)(.*)$')
 _DIALOG_RULE = re.compile(r'^[─╌┄═]{4,}$')
-_DIALOG_TIP = re.compile(r'^tip\b*:', re.IGNORECASE)
+_DIALOG_TIP = re.compile(r'^tip\s*:', re.IGNORECASE)
 _DIALOG_HEADINGS = {'bash command': 'Bash'}
 _DIALOG_FOREIGN = {'write file', 'edit file', 'read file', 'fetch', 'webfetch', 'notebook'}
+_DIALOG_TAIL = re.compile(r'([A-Za-z0-9_.-]+)$')
+_DIALOG_HEAD = re.compile(r'^([A-Za-z0-9_.-]+)')
+_SHELL_WORDS = {'git','merge','status','log','branch','commit','add','diff','push','pull',
+    'cd','cp','mv','rm','mkdir','touch','echo','cat','grep','sed','awk','tail','head','wc',
+    'ssh','scp','env','export','python','python3','emacs','make','sleep','true','false',
+    'done','do','then','else','fi','in','for','while','if','not','and'}
 
 
 def _parse_permission_dialog(text):
@@ -460,9 +466,11 @@ def _parse_permission_dialog(text):
 
     The dialog renders the request's own heading, a description line directly
     above the box, and the command inside a ruled box. A box line as wide as
-    the rule was wrapped by the renderer; a shorter break is a real newline.
-    Wrapping can still be ambiguous, so callers keep every join variant. A
-    heading this parser does not know is left alone, never guessed.
+    the box's own capacity was wrapped by the renderer; a shorter break is a
+    real newline. A wrap can eat the space between two shell words, so every
+    join stays a variant; the stored command uses a small shell lexicon and
+    every variant is hashed for dedup. A heading this parser does not know is
+    left alone, never guessed.
     """
     if not isinstance(text, str) or '│' not in text:
         return None
@@ -479,13 +487,26 @@ def _parse_permission_dialog(text):
     if not rows or not any(row.strip() for row in rows):
         return None
     capacity = max(len(line) for line in box)
-    pieces = []
+    primary, tight, loose = [], [], []
     for index, row in enumerate(rows):
-        pieces.append(row)
-        if index + 1 < len(rows) and len(box[index]) < capacity:
-            pieces.append('\n')
-    command = ''.join(pieces)
+        for target in (primary, tight, loose):
+            target.append(row)
+        if index + 1 == len(rows):
+            continue
+        if len(box[index]) < capacity:
+            for target in (primary, tight, loose):
+                target.append('\n')
+            continue
+        tight.append(''); loose.append(' ')
+        left = _DIALOG_TAIL.search(row.rstrip()); right = _DIALOG_HEAD.match(rows[index + 1].lstrip())
+        primary.append(' ' if left and right and left.group(1).lower() in _SHELL_WORDS
+            and right.group(1).lower() in _SHELL_WORDS else '')
+    command = ''.join(primary)
+    variants = list(dict.fromkeys([command, ''.join(tight), ''.join(loose),
+        '\n'.join(rows), ' '.join(row.strip() for row in rows)]))
     description, tool = '', None
+    if any(line.strip().lower() in _DIALOG_FOREIGN for line in lines[:start]):
+        return None
     for line in reversed(lines[:start]):
         stripped = line.strip()
         if not stripped or _DIALOG_RULE.match(stripped):
@@ -502,17 +523,8 @@ def _parse_permission_dialog(text):
             break
         description = stripped
         break
-    return {'tool': tool or 'Bash', 'command': command, 'description': description}
-
-
-def _pty_command_variants(command):
-    """Every whitespace join the dialog box could have rendered from."""
-    if not isinstance(command, str) or not command.strip():
-        return []
-    rows = command.split('\n')
-    if len(rows) < 2:
-        return [command]
-    return list(dict.fromkeys([command, ' '.join(row.strip() for row in rows)]))
+    return {'tool': tool or 'Bash', 'command': command, 'description': description,
+            'variants': variants}
 
 
 def _command_skeleton(command):
@@ -549,7 +561,7 @@ def _queue_pty_hold(event, reason, away_reason, manifest):
     cwd = _absolute_cwd(payload)
     profile = tool.get('profile') or payload.get('profile')
     prompt_identity = tool.get('prompt_identity') or payload.get('prompt_identity')
-    variants = _pty_command_variants(parsed['command'])
+    variants = parsed['variants']
     def synthetic(command):
         return {'hook_event_name': 'PermissionRequest', 'hold_pty': True, 'pty_recovered': True,
             'tool_name': parsed['tool'], 'cwd': cwd, 'session_id': payload.get('session_id'),
@@ -580,9 +592,8 @@ def _queue_pty_hold(event, reason, away_reason, manifest):
             item['command_hashes'] = list(dict.fromkeys(item.get('command_hashes', []) + candidate_shas))
             item['pty_command_variants'] = list(dict.fromkeys(
                 (item.get('pty_command_variants') or []) + [v for v in variants[1:] if isinstance(v, str)]))
-            for candidate in candidates:
-                if candidate not in item.get('requests', []):
-                    item['requests'].append(candidate)
+            if candidates[0] not in item.get('requests', []):
+                item['requests'].append(candidates[0])
             if hook is not None:
                 item['pty_hold'] = {'profile': profile, 'prompt_identity': prompt_identity,
                     'screen_text_snippet': visible[:200], 'hold_started': payload.get('hold_started')}
@@ -600,7 +611,7 @@ def _queue_pty_hold(event, reason, away_reason, manifest):
         item = {'schema': 'dotcortex.approval.queue.v2', 'id': secrets.token_hex(12), 'seat': seat,
             'count': 1, 'first_seen': now, 'command_hashes': candidate_shas,
             'pty_command_variants': [v for v in variants[1:] if isinstance(v, str)],
-            'requests': candidates, 'context': {}, 'timestamp': now, 'tool': parsed['tool'],
+            'requests': [candidates[0]], 'context': {}, 'timestamp': now, 'tool': parsed['tool'],
             'command': variants[0], 'cwd': cwd, 'session': payload.get('session_id'), 'intent': intent,
             'reason': reason, 'away_reason': away_reason, 'request': candidates[0],
             'notification_sha': hashlib.sha256(json.dumps(event, sort_keys=True, default=str).encode()).hexdigest()[:16],
@@ -1207,7 +1218,7 @@ def _queue_repair_pty():
                     entry['note']='command not recoverable from the stored screen'
                     report.append(entry);continue
                 entry['parsed']=True
-                variants=_pty_command_variants(parsed['command'])
+                variants=parsed['variants']
                 candidates=[{'hook_event_name':'PermissionRequest','hold_pty':True,'pty_recovered':True,
                     'tool_name':parsed['tool'],'cwd':item['cwd'],'session_id':item.get('session'),
                     'tool_input':{'command':command,'description':parsed['description']},
@@ -1224,7 +1235,8 @@ def _queue_repair_pty():
             else:
                 entry['parsed']=True
             evidence=dict(item)
-            reason=_merge_landed_reason(evidence.get('command'))
+            reason=next((value for value in (_merge_landed_reason(command) for command
+                in [evidence.get('command')] + list(evidence.get('pty_command_variants') or [])) if value), None)
             if reason is None and _item_execution_evidence(evidence):
                 reason='done by another route'
             if reason:
