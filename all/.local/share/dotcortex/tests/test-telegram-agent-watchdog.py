@@ -31,6 +31,7 @@ root="$FAKE_ROOT"
 case "$1" in
   status) if [ -f "$root/nurse_status_after_revive" ]; then cat "$root/nurse_status_after_revive"; else cat "$root/nurse_status"; fi ;;
   revive) printf '%s\\n' "$*" >> "$root/revive_args"; [ ! -f "$root/delay_nurse" ] || sleep 0.2; shift; for a in "$@"; do case "$a" in --*) ;; *) [ "$a" = "$(cat "$root/session_id" 2>/dev/null)" ] || echo "$a" >> "$root/revives" ;; esac; done ;;
+  live-session) echo "$2 $3" >> "$root/live_checks"; if [ -f "$root/live_check_fail" ]; then exit 3; elif [ -f "$root/live_refusal" ]; then cat "$root/live_refusal"; else echo '{"live": false}'; fi ;;
   *) exit 2 ;;
 esac
 """
@@ -348,6 +349,44 @@ class WatchdogTests(unittest.TestCase):
         receipt = json.loads((self.root / "state/receipt.json").read_text())
         self.assertEqual(receipt["request_receipts"][0]["code_staleness"], "fresh")
         self.assertFalse(receipt["request_receipts"][0]["force_escalated"])
+
+    def test_warm_revive_runs_the_live_session_guard_first(self) -> None:
+        session_id = self.prepare_warm_request()
+        self.assertEqual(self.request("warm-fable", self.dead_pid()).returncode, 0)
+        self.run_watchdog()
+        checks = (self.root / "live_checks").read_text().splitlines()
+        self.assertEqual(len(checks), 1)
+        seat, checked_id = checks[0].split()
+        self.assertEqual((seat, checked_id), ("Fable", session_id))
+        self.assertEqual(self.revives(), ["Fable"])
+        self.assertEqual([event["kind"] for event in self.events()], ["revive_done"])
+
+    def test_live_session_guard_rejects_the_revive_without_killing_anything(self) -> None:
+        session_id = self.prepare_warm_request()
+        (self.root / "live_refusal").write_text(json.dumps({
+            "schema": "helmcortex.nurse-joy.live-session.v1", "session": session_id, "live": True,
+            "kind": "background", "pid": 4242, "name": "probe-session", "source": "claude-agents-registry",
+            "message": "session %s is live in a background pty host (pid 4242, name probe-session) — "
+                       "reattach with `claude attach %s`, never relaunch onto it" % (session_id, session_id[:8])}))
+        self.assertEqual(self.request("warm-fable", self.dead_pid()).returncode, 0)
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])  # nurse-joy revive was never invoked
+        self.assertFalse((self.root / "revive_args").exists())
+        self.assertFalse((self.root / "state/requests/warm-fable.json").exists())  # the request is dropped
+        events = self.events()
+        self.assertEqual([event["kind"] for event in events], ["revive_rejected"])
+        self.assertIn("never relaunch onto it", events[0]["body"])
+        self.assertEqual(events[0]["payload"]["resume_session"], session_id)
+
+    def test_live_session_guard_fails_closed_when_the_check_cannot_run(self) -> None:
+        session_id = self.prepare_warm_request()
+        (self.root / "live_check_fail").write_text("")
+        self.assertEqual(self.request("warm-fable", self.dead_pid()).returncode, 0)
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])
+        events = self.events()
+        self.assertEqual([event["kind"] for event in events], ["revive_rejected"])
+        self.assertIn("unavailable", events[0]["body"])
 
     def test_warm_readiness_must_be_verified(self) -> None:
         self.prepare_warm_request()
