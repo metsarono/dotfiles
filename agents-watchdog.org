@@ -27,7 +27,7 @@ An agent cannot safely stop and start itself, because the stop kills the caller'
 
 The lane is idempotent (one pending file per target, a second request reports "already pending"). Telegram agents remain self-targeted by =$TELEGRAM_AGENT_SELF=, with =--other= required to target another Telegram agent. Warm seats use =CLAUDE_WARM_HERDR_AGENT= when present; an explicit =warm-<name>= target is also accepted, but only if the seat is in the private =--warm-file= roster. Warm requests record the claude-warm supervisor pid and kernel start-time from its live runtime state, plus the newest-by-mtime transcript path and its session id. The request is dropped as stale if that supervisor generation has since changed. The transcript file is authoritative: idle compaction can fork a newer JSONL transcript, so a stale =--resume= command-line argument is never used. Telegram requests with a supervisor pid file (codex today, see =PID_FILES=) use the same pid and kernel start-time fence; other Telegram agents are unfenced.
 
-The watchdog waits until the requester's pid (default: the parent shell of the request command) has exited, and drops a request after =--request-timeout= seconds if it never does. A cooldown (=--revive-cooldown=, default 600 s) refuses a second revive of the same target. Warm requests run =nurse-joy revive --no-visit --resume <live-session> <name>=. The normal request first gives the warm seat 30 seconds to exit gracefully; only a self-requested warm revive escalates to =--force= after that bounded wait, since the seat itself asked to bounce. The watchdog re-reads =nurse-joy status --json= to verify readiness (=field= or =degraded= means up) and includes code staleness in the receipt. Telegram requests retain their existing stop/start path. The spool records =revive_done=, =revive_failed=, =revive_stale= or =revive_rejected=; a failed revive clears the intentional-stop marker so the normal relaunch loop takes over.
+The watchdog waits until the requester's pid (default: the parent shell of the request command) has exited, and drops a request after =--request-timeout= seconds if it never does. A cooldown (=--revive-cooldown=, default 600 s) refuses a second revive of the same target. Before a warm revive runs, the resume id is checked with =nurse-joy live-session= (the shared live-session guard): an id already held by another live process — a bg-pty host, per the 2026-10-17 Fable seat incident — records =revive_rejected= instead of killing the tmux supervisor, and the request is dropped; an unavailable check refuses the same way (fail closed, never a second writer). Warm requests run =nurse-joy revive --no-visit --resume <live-session> <name>=. The normal request first gives the warm seat 30 seconds to exit gracefully; only a self-requested warm revive escalates to =--force= after that bounded wait, since the seat itself asked to bounce. The watchdog re-reads =nurse-joy status --json= to verify readiness (=field= or =degraded= means up) and includes code staleness in the receipt. Telegram requests retain their existing stop/start path. The spool records =revive_done=, =revive_failed=, =revive_stale= or =revive_rejected=; a failed revive clears the intentional-stop marker so the normal relaunch loop takes over.
 
 ** Watchdog
 
@@ -306,6 +306,36 @@ def warm_resume_identity(name: str, member: dict | None = None) -> tuple[str | N
     return generation, session_id
 
 
+def live_session_refusal(nurse: str, name: str, session_id: str) -> str | None:
+    """The shared live-session guard (nurse-joy `live-session` verb): the
+    refusal message when the resume id is live in another process, else None.
+
+    2026-10-17, Fable seat diagnosis Part 2: a warm revive must never relaunch
+    onto a conversation already held by a live pty host — the 2026-10-17
+    incident /exit-ed the tmux supervisor for nothing and every relaunch was
+    refused by the token preflight. The check itself lives in nurse-joy (one
+    copy); this lane only consumes its JSON. Fails CLOSED: an unavailable or
+    unreadable check refuses too, because a second writer on a live session is
+    the one failure this guard exists to prevent."""
+    try:
+        proc = subprocess.run([nurse, "live-session", name, session_id], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                              timeout=30, close_fds=True, env=child_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return ("live-session check unavailable (nurse-joy live-session did not run); "
+                "refusing rather than risk a second writer on session %s" % session_id)
+    if proc.returncode != 0:
+        return ("live-session check unavailable (nurse-joy live-session failed); "
+                "refusing rather than risk a second writer on session %s" % session_id)
+    try:
+        payload = json.loads(proc.stdout)
+    except ValueError:
+        return ("live-session check unreadable; refusing rather than risk a second writer on session %s" % session_id)
+    if payload.get("live") is True:
+        return str(payload.get("message") or "session %s is live in another process" % session_id)
+    return None
+
+
 def make_event(host: str, agent: str, kind: str, severity: str, title: str, body: str, payload: dict, when: dt.datetime) -> dict:
     return {
         "schema": SCHEMA,
@@ -497,6 +527,19 @@ def process_requests(args: argparse.Namespace, host: str, state: dict, when: dt.
                                      "%s was self-revived less than %ss ago; request refused" % (agent, args.revive_cooldown),
                                      {"request": request.get("id")}, when))
             continue
+        if warm_target:
+            # Live-session guard before anything is killed: a warm revive whose
+            # resume id is live in another process (a bg-pty host) is refused as
+            # revive_rejected instead of /exit-ing the tmux supervisor for nothing.
+            warm_session = request.get("resume_session")
+            if isinstance(warm_session, str) and re.fullmatch(r"[A-Fa-f0-9-]{16,64}", warm_session):
+                refusal = live_session_refusal(args.nurse, warm_name, warm_session)
+                if refusal is not None:
+                    path.unlink(missing_ok=True)
+                    events.append(make_event(host, agent, "revive_rejected", "warning",
+                                             "%s revive refused: the resume session is live in another process" % agent,
+                                             refusal, {"request": request.get("id"), "resume_session": warm_session}, when))
+                    continue
         if args.dry_run:
             continue
         path.unlink(missing_ok=True)
@@ -772,6 +815,7 @@ root="$FAKE_ROOT"
 case "$1" in
   status) if [ -f "$root/nurse_status_after_revive" ]; then cat "$root/nurse_status_after_revive"; else cat "$root/nurse_status"; fi ;;
   revive) printf '%s\\n' "$*" >> "$root/revive_args"; [ ! -f "$root/delay_nurse" ] || sleep 0.2; shift; for a in "$@"; do case "$a" in --*) ;; *) [ "$a" = "$(cat "$root/session_id" 2>/dev/null)" ] || echo "$a" >> "$root/revives" ;; esac; done ;;
+  live-session) echo "$2 $3" >> "$root/live_checks"; if [ -f "$root/live_check_fail" ]; then exit 3; elif [ -f "$root/live_refusal" ]; then cat "$root/live_refusal"; else echo '{"live": false}'; fi ;;
   *) exit 2 ;;
 esac
 """
@@ -1089,6 +1133,44 @@ class WatchdogTests(unittest.TestCase):
         receipt = json.loads((self.root / "state/receipt.json").read_text())
         self.assertEqual(receipt["request_receipts"][0]["code_staleness"], "fresh")
         self.assertFalse(receipt["request_receipts"][0]["force_escalated"])
+
+    def test_warm_revive_runs_the_live_session_guard_first(self) -> None:
+        session_id = self.prepare_warm_request()
+        self.assertEqual(self.request("warm-fable", self.dead_pid()).returncode, 0)
+        self.run_watchdog()
+        checks = (self.root / "live_checks").read_text().splitlines()
+        self.assertEqual(len(checks), 1)
+        seat, checked_id = checks[0].split()
+        self.assertEqual((seat, checked_id), ("Fable", session_id))
+        self.assertEqual(self.revives(), ["Fable"])
+        self.assertEqual([event["kind"] for event in self.events()], ["revive_done"])
+
+    def test_live_session_guard_rejects_the_revive_without_killing_anything(self) -> None:
+        session_id = self.prepare_warm_request()
+        (self.root / "live_refusal").write_text(json.dumps({
+            "schema": "helmcortex.nurse-joy.live-session.v1", "session": session_id, "live": True,
+            "kind": "background", "pid": 4242, "name": "probe-session", "source": "claude-agents-registry",
+            "message": "session %s is live in a background pty host (pid 4242, name probe-session) — "
+                       "reattach with `claude attach %s`, never relaunch onto it" % (session_id, session_id[:8])}))
+        self.assertEqual(self.request("warm-fable", self.dead_pid()).returncode, 0)
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])  # nurse-joy revive was never invoked
+        self.assertFalse((self.root / "revive_args").exists())
+        self.assertFalse((self.root / "state/requests/warm-fable.json").exists())  # the request is dropped
+        events = self.events()
+        self.assertEqual([event["kind"] for event in events], ["revive_rejected"])
+        self.assertIn("never relaunch onto it", events[0]["body"])
+        self.assertEqual(events[0]["payload"]["resume_session"], session_id)
+
+    def test_live_session_guard_fails_closed_when_the_check_cannot_run(self) -> None:
+        session_id = self.prepare_warm_request()
+        (self.root / "live_check_fail").write_text("")
+        self.assertEqual(self.request("warm-fable", self.dead_pid()).returncode, 0)
+        self.run_watchdog()
+        self.assertEqual(self.revives(), [])
+        events = self.events()
+        self.assertEqual([event["kind"] for event in events], ["revive_rejected"])
+        self.assertIn("unavailable", events[0]["body"])
 
     def test_warm_readiness_must_be_verified(self) -> None:
         self.prepare_warm_request()

@@ -155,6 +155,7 @@ authorize local Kikin reads or writes.
     "presence_window_minutes": 20,
     "hold_timeout_minutes": 10,
     "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
+    "desk_approval_window_hours": 24,
     "quiet_hours": {
       "enabled": true,
       "start": "23:00",
@@ -312,8 +313,8 @@ legacy class grants are retained. Unattended mode never broadens authority.
 ** Deploy after coordinator review, separately for both seats
 
 From each reviewed checkout, tangle =agents-approval.org= with that checkout's
-=tangle-one= and run the five suites (kikin-hook, bunta-honey, honey-reads,
-p3-hook, unattended). Set each wrapper's engine override to the candidate
+=tangle-one= and run the six suites (kikin-hook, bunta-honey, honey-reads,
+p3-hook, unattended, desk). Set each wrapper's engine override to the candidate
 engine during testing; otherwise an installed older engine may shadow it.
 Create a versioned installation with the shared engine, existing wrapper and
 morning reader. Back up the private manifest and hook settings before editing.
@@ -1245,6 +1246,7 @@ restart, installation, pull or push is performed by this review branch.
     "presence_window_minutes": 20,
     "hold_timeout_minutes": 10,
     "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
+    "desk_approval_window_hours": 24,
     "quiet_hours": {
       "enabled": true,
       "start": "23:00",
@@ -1304,12 +1306,14 @@ Their named blocks use =:tangle no :eval never=. The assembly reads both plus
 evaluating Python and emits one self-contained engine. The unattended source
 also emits the independent runtime used by the wrapper and CLI helpers.
 [[file:agents-approval-tests.org][Existing suites]],
-[[file:agents-approval-tests-presence.org][presence and smart queue tests]] and
+[[file:agents-approval-tests-presence.org][presence and smart queue tests]],
+[[file:agents-approval-tests-desk.org][Desk approval gate tests]] and
 [[file:agents-approval-legacy.org][historical p3 source]] own the fixtures.
 
 Tangle =agents-approval.org=, =agents-approval-unattended.org=,
 =agents-approval-telegram.org=, =agents-hooks.org=, =agents-approval-tests.org=,
-=agents-approval-tests-presence.org= and =agents-approval-legacy.org= from the same
+=agents-approval-tests-presence.org=, =agents-approval-tests-desk.org= and
+=agents-approval-legacy.org= from the same
 checkout. Normal =make tangle= includes these sources. After editing either
 engine body or the unattended runtime, tangle =agents-approval.org=. Recheck
 source hashes before tangling. Deploy the reviewed engine and independent
@@ -1346,6 +1350,37 @@ wake; =approve= is for the authenticated Desk consumer only. =claim= rechecks it
 approval, state and staleness and consumes a short-lived seat confirmation nonce. It returns the original request once, never executes it. Resolved or
 obsolete approvals are audited and do nothing. The Desk must consume this live
 API, not raw revision lines, and execute only a successfully claimed request.
+
+* Desk approval gate — Admiral ruling 7874, 2026-10-17
+
+The Desk delivery lane applies an approval through =approval-queue approve →
+confirm → claim= and mails the seat: re-run that exact command. The gate now
+honours that re-run (shared runtime helper =_desk_approval_consume=, wired into
+the engine's =main= before any ask or deferral, on both seats). The gate allows
+a request only when ALL of these hold:
+
+- the refusal reason is in the human-decidable grey zone (=no_match_decider=,
+  =syntax=, =decider_risky=, or an operator-disabled =*_disabled= class). Hard
+  floors and every other hard refusal (=true_floor=, =coordinator_refused=,
+  =ambiguous_shell=, compound/substitution refusals, invalid input) are never
+  satisfied by a Desk approval — secrets, destructive git, the harness/settings
+  floors and the whole =_admiral_floor= family keep their refusal;
+- the request hash matches exactly: same seat, same tool, same absolute cwd,
+  same normalized tool input. Intent-only matching never honours a Desk
+  approval on this path;
+- the matching queue item is =replay_claimed= with =approved_by= equal to this
+  manifest's =admiral_telegram_user_id= — the claim itself proves the approval
+  was approved and confirmed through the authorized verbs;
+- the approval is within the window: =unattended.desk_approval_window_hours=
+  (ruled default 24 h, bound 168 h). Older claims are marked obsolete with
+  "desk approval expired" and never allow.
+
+Single use: the item moves to resolved "approved from the Desk and run" on
+use, so a second identical request faces the normal gate again. Every use is
+logged in the decision journal with =decision_path: "desk_approval"= and the
+queue item id in =queue_id=. The wrapper's engine-unavailable fallback does
+NOT honour Desk approvals: without a live classification the gate cannot prove
+the request is non-floor, so it still defers.
 
 * Decider widening replay — Admiral ruling, 2026-10-15
 

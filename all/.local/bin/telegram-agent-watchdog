@@ -273,6 +273,36 @@ def warm_resume_identity(name: str, member: dict | None = None) -> tuple[str | N
     return generation, session_id
 
 
+def live_session_refusal(nurse: str, name: str, session_id: str) -> str | None:
+    """The shared live-session guard (nurse-joy `live-session` verb): the
+    refusal message when the resume id is live in another process, else None.
+
+    2026-10-17, Fable seat diagnosis Part 2: a warm revive must never relaunch
+    onto a conversation already held by a live pty host — the 2026-10-17
+    incident /exit-ed the tmux supervisor for nothing and every relaunch was
+    refused by the token preflight. The check itself lives in nurse-joy (one
+    copy); this lane only consumes its JSON. Fails CLOSED: an unavailable or
+    unreadable check refuses too, because a second writer on a live session is
+    the one failure this guard exists to prevent."""
+    try:
+        proc = subprocess.run([nurse, "live-session", name, session_id], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                              timeout=30, close_fds=True, env=child_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return ("live-session check unavailable (nurse-joy live-session did not run); "
+                "refusing rather than risk a second writer on session %s" % session_id)
+    if proc.returncode != 0:
+        return ("live-session check unavailable (nurse-joy live-session failed); "
+                "refusing rather than risk a second writer on session %s" % session_id)
+    try:
+        payload = json.loads(proc.stdout)
+    except ValueError:
+        return ("live-session check unreadable; refusing rather than risk a second writer on session %s" % session_id)
+    if payload.get("live") is True:
+        return str(payload.get("message") or "session %s is live in another process" % session_id)
+    return None
+
+
 def make_event(host: str, agent: str, kind: str, severity: str, title: str, body: str, payload: dict, when: dt.datetime) -> dict:
     return {
         "schema": SCHEMA,
@@ -464,6 +494,19 @@ def process_requests(args: argparse.Namespace, host: str, state: dict, when: dt.
                                      "%s was self-revived less than %ss ago; request refused" % (agent, args.revive_cooldown),
                                      {"request": request.get("id")}, when))
             continue
+        if warm_target:
+            # Live-session guard before anything is killed: a warm revive whose
+            # resume id is live in another process (a bg-pty host) is refused as
+            # revive_rejected instead of /exit-ing the tmux supervisor for nothing.
+            warm_session = request.get("resume_session")
+            if isinstance(warm_session, str) and re.fullmatch(r"[A-Fa-f0-9-]{16,64}", warm_session):
+                refusal = live_session_refusal(args.nurse, warm_name, warm_session)
+                if refusal is not None:
+                    path.unlink(missing_ok=True)
+                    events.append(make_event(host, agent, "revive_rejected", "warning",
+                                             "%s revive refused: the resume session is live in another process" % agent,
+                                             refusal, {"request": request.get("id"), "resume_session": warm_session}, when))
+                    continue
         if args.dry_run:
             continue
         path.unlink(missing_ok=True)

@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+# Desk approval gate
+
+# Every fixture is synthetic. The suite drives the real queue verbs (approve →
+# confirm → claim) against a scratch queue and then re-runs the exact refused
+# request through the assembled engine, proving: exact-hash single use, the ruled
+# window, the grey-zone-only eligibility (hard floors and other hard refusals are
+# never satisfied by a Desk approval), and the =desk_approval= decision journal
+# label. Nothing here executes a submitted command or touches a live manifest.
+
+
+# [[file:../../../../../agents-approval-tests-desk.org::*Desk approval gate][Desk approval gate:1]]
+import contextlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+REPO = Path(os.environ.get('APPROVAL_TEST_REPO') or Path(__file__).resolve().parents[5])
+SPEC = importlib.util.spec_from_file_location('desk_engine', REPO / 'all/.local/lib/dotcortex/claude_approval_kikin.py')
+e = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(e)
+
+
+class DeskApprovalGateTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='approval-desk.')
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.root = self.base / 'DotCortex'
+        self.root.mkdir()
+        (self.root / 'README.org').write_text('synthetic')
+        self.worktree = self.base / 'DotCortex-wt-test'
+        self.worktree.mkdir()
+        self.outside = self.base / 'outside'
+        self.outside.mkdir()
+        self.path = self.base / 'manifest.json'
+        self.queue = self.base / 'queue.jsonl'
+        self.log = self.base / 'ledger.jsonl'
+        self.flag = self.base / 'away'
+        self.flag.touch()
+        self.manifest = json.loads((REPO / 'all/.config/dotcortex/claude-approval-canary.kikin.v1.json').read_text())
+        self.manifest['roots'] = [str(self.root)]
+        self.manifest['scratch_roots'] = [str(self.root)]
+        self.manifest['coordinator_ops']['repo_roots'] = [str(self.root)]
+        self.manifest['coordinator_ops']['worktree_roots'] = [str(self.worktree)]
+        self.manifest['coordinator_ops']['scratch_roots'] = [str(self.root)]
+        self.manifest['coordinator_ops']['seat_account'] = 'fable@kikin-kushi.helm'
+        self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
+        self.manifest['notifications'] = {'argv': ['YOUR_SEAT_TELEGRAM_NOTIFIER']}
+        self.manifest['decider'].update(enabled=False)
+        self.manifest['unattended'] = {'enabled': True, 'away_flag': str(self.flag),
+            'admiral_telegram_user_id': '424242', 'desk_approval_window_hours': 24,
+            'quiet_hours': {'enabled': False}}
+        for item in self.manifest['classes']:
+            item['enabled'] = False
+
+    def event(self, command='unknown-command', **kwargs):
+        return {'hook_event_name': 'PermissionRequest', 'tool_name': 'Bash',
+                'tool_input': {'command': command, 'description': 'synthetic probe'},
+                'cwd': str(self.outside), 'session_id': 'SYNTHETIC_SESSION', **kwargs}
+
+    def env(self):
+        return {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.log),
+                'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+
+    def run_hook(self, event, answers=None, status='ok'):
+        self.path.write_text(json.dumps(self.manifest))
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.env()), \
+                mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(event))), \
+                mock.patch.object(e, '_decider_post', return_value=(answers, status)), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(e.main(), 0)
+        if not out.getvalue().strip():
+            return {'behavior': 'ask'}
+        return json.loads(out.getvalue())['hookSpecificOutput']['decision']
+
+    def ledger(self):
+        return json.loads(self.log.read_text().splitlines()[-1])
+
+    def queue_items(self):
+        with mock.patch.dict(os.environ, self.env()):
+            with e._morning_queue_file() as file:
+                return e._queue_read(file)
+
+    def queue_append(self, item):
+        with mock.patch.dict(os.environ, self.env()):
+            with e._morning_queue_file() as file:
+                e._queue_append(file, item)
+
+    def desk_cycle(self, event):
+        """Approve the queued refusal through the real Desk verbs; return the queue id."""
+        item = next(x for x in self.queue_items() if x['status'] == 'open')
+        with mock.patch.dict(os.environ, self.env()):
+            self.assertTrue(e._queue_authorize(item['id'], '424242', self.manifest))
+            token = e._queue_confirm(item['id'], True, 'SYNTHETIC_SESSION')
+            self.assertTrue(token)
+            ok, request = e._queue_claim(item['id'], token)
+        self.assertTrue(ok)
+        self.assertEqual(request['tool_input']['command'], event['tool_input']['command'])
+        return item['id']
+
+    def test_desk_approved_rerun_is_allowed_exactly_once(self):
+        event = self.event()
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.assertEqual(self.ledger()['reason'], 'no_match_decider')
+        item_id = self.desk_cycle(event)
+        self.assertEqual(self.run_hook(event)['behavior'], 'allow')
+        record = self.ledger()
+        self.assertEqual(record['decision'], 'allow')
+        self.assertEqual(record['decision_path'], 'desk_approval')
+        self.assertEqual(record['queue_id'], item_id)
+        consumed = next(x for x in self.queue_items() if x['id'] == item_id)
+        self.assertEqual(consumed['status'], 'resolved')
+        self.assertEqual(consumed['resolution'], 'approved from the Desk and run')
+        # Single use: a second identical request faces the normal gate again.
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.assertNotEqual(self.ledger()['decision_path'], 'desk_approval')
+        reopened = next(x for x in self.queue_items() if x.get('resolution') != 'approved from the Desk and run'
+                        and x['status'] == 'open')
+        self.assertEqual(reopened['reason'], 'no_match_decider')
+
+    def test_hard_floor_refusal_is_never_satisfied_by_a_desk_approval(self):
+        event = self.event('git push --force origin master')
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.assertEqual(self.ledger()['reason'], 'true_floor')
+        self.desk_cycle(event)
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.assertEqual(self.ledger()['decision'], 'deny')
+        self.assertNotEqual(self.ledger()['decision_path'], 'desk_approval')
+
+    def test_ambiguous_shell_refusal_is_never_satisfied(self):
+        event = self.event(tool_input={'command': 'unknown-command', 'surprise': 'value'})
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.assertEqual(self.ledger()['reason'], 'ambiguous_shell')
+        self.desk_cycle(event)
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.assertNotEqual(self.ledger()['decision_path'], 'desk_approval')
+
+    def test_decider_danger_veto_honours_a_desk_approval(self):
+        self.manifest['decider'].update(enabled=True, honey_url='https://YOUR_DECIDER.invalid/decide',
+            honey_api='r2d2d', kikin_url='https://YOUR_DECIDER.invalid/systemone', timeout_ms=500)
+        event = self.event('make test', cwd=str(self.root))
+        self.assertEqual(self.run_hook(event, answers={'approval.risky.v2': {'noul': 0.99}})['behavior'], 'deny')
+        self.assertEqual(self.ledger()['reason'], 'decider_risky')
+        self.desk_cycle(event)
+        self.assertEqual(self.run_hook(event, answers={'approval.risky.v2': {'noul': 0.99}})['behavior'], 'allow')
+        self.assertEqual(self.ledger()['decision_path'], 'desk_approval')
+
+    def test_disabled_class_reasons_are_eligible(self):
+        event = self.event()
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        item_id = self.desk_cycle(event)
+        with mock.patch.dict(os.environ, self.env()):
+            consumed = e._desk_approval_consume(event, self.manifest, 'local_read_disabled')
+        self.assertEqual(consumed, item_id)
+        resolved = next(x for x in self.queue_items() if x['id'] == item_id)
+        self.assertEqual(resolved['status'], 'resolved')
+
+    def test_expired_claim_is_never_allowed_and_is_marked_obsolete(self):
+        event = self.event()
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        item_id = self.desk_cycle(event)
+        stale = next(x for x in self.queue_items() if x['id'] == item_id)
+        stale['approved_at'] = time.time() - 25 * 3600
+        self.queue_append(stale)
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        expired = next(x for x in self.queue_items() if x['id'] == item_id)
+        self.assertEqual(expired['status'], 'obsolete')
+        self.assertEqual(expired['resolution'], 'desk approval expired')
+
+    def test_configured_window_is_honoured(self):
+        self.manifest['unattended']['desk_approval_window_hours'] = 2
+        event = self.event()
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        item_id = self.desk_cycle(event)
+        fresh = next(x for x in self.queue_items() if x['id'] == item_id)
+        fresh['approved_at'] = time.time() - 3600
+        self.queue_append(fresh)
+        self.assertEqual(self.run_hook(event)['behavior'], 'allow')
+        self.assertEqual(self.ledger()['decision_path'], 'desk_approval')
+
+    def test_intent_only_match_never_allows(self):
+        event = self.event('probe-one')
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.desk_cycle(event)
+        other = self.event('probe-two')
+        self.assertEqual(self.run_hook(other)['behavior'], 'deny')
+        self.assertNotEqual(self.ledger().get('decision_path'), 'desk_approval')
+
+    def test_different_cwd_never_allows(self):
+        event = self.event('probe-one')
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.desk_cycle(event)
+        other_cwd = self.base / 'elsewhere'
+        other_cwd.mkdir()
+        other = self.event('probe-one', cwd=str(other_cwd))
+        self.assertEqual(self.run_hook(other)['behavior'], 'deny')
+
+    def test_forged_approval_identity_is_rejected(self):
+        event = self.event()
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        sha = e._queue_identity(event, self.manifest)[1]
+        now = time.time()
+        self.queue_append({'schema': 'dotcortex.approval.queue.v2', 'id': 'forged01', 'seat': 'fable@kikin-kushi.helm',
+            'status': 'replay_claimed', 'approved_by': '999', 'approved_at': now,
+            'approved_request_sha': sha, 'claimed_at': now, 'command_hashes': [sha],
+            'request': event, 'count': 1})
+        self.queue_append({'schema': 'dotcortex.approval.queue.v2', 'id': 'forged02', 'seat': 'stranger@far.helm',
+            'status': 'replay_claimed', 'approved_by': '424242', 'approved_at': now,
+            'approved_request_sha': sha, 'claimed_at': now, 'command_hashes': [sha],
+            'request': event, 'count': 1})
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.assertNotEqual(self.ledger().get('decision_path'), 'desk_approval')
+        self.assertEqual(next(x for x in self.queue_items() if x['id'] == 'forged01')['status'], 'replay_claimed')
+
+    def test_approved_open_item_without_claim_is_not_honoured(self):
+        event = self.event()
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        item = next(x for x in self.queue_items() if x['status'] == 'open')
+        with mock.patch.dict(os.environ, self.env()):
+            self.assertTrue(e._queue_authorize(item['id'], '424242', self.manifest))
+        self.assertEqual(self.run_hook(event)['behavior'], 'deny')
+        self.assertNotEqual(self.ledger().get('decision_path'), 'desk_approval')
+
+    def test_hard_and_invalid_reasons_never_reach_the_queue(self):
+        self.path.write_text(json.dumps(self.manifest))
+        with mock.patch.object(e, '_queue_identity', side_effect=AssertionError('queue touched')) as probe:
+            for reason in ('true_floor', 'ambiguous_shell', 'coordinator_refused', 'not_permission_request',
+                           'compound_refused:segment_1:cat:floor', 'engine_unavailable', 'error:ValueError'):
+                self.assertIsNone(e._desk_approval_consume(self.event(), self.manifest, reason))
+            probe.assert_not_called()
+
+
+if __name__ == '__main__':
+    unittest.main()
+# Desk approval gate:1 ends here

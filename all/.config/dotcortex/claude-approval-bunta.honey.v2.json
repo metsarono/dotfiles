@@ -118,6 +118,7 @@
     "presence_window_minutes": 20,
     "hold_timeout_minutes": 10,
     "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
+    "desk_approval_window_hours": 24,
     "quiet_hours": {
       "enabled": true,
       "start": "23:00",

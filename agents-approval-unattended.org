@@ -879,6 +879,70 @@ def _queue_claim(item_id, confirmation):
     return result is not None, result
 
 
+DESK_APPROVABLE_REASONS = frozenset({'no_match_decider', 'syntax', 'decider_risky'})
+DESK_DEFAULT_WINDOW_HOURS = 24.0
+
+
+def _desk_window_seconds(manifest):
+    """Ruled default 24 h after approval; private manifests may narrow or widen it."""
+    hours = _unattended(manifest).get('desk_approval_window_hours', DESK_DEFAULT_WINDOW_HOURS)
+    if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not math.isfinite(hours) or not 0 < hours <= 168:
+        raise ValueError('desk_approval_window_hours')
+    return hours * 3600.0
+
+
+def _desk_approval_consume(event, manifest, reason):
+    """Honour one Desk approval for this exact request, once (Admiral ruling 7874).
+
+    The Desk consumer applies an Admiral approval through the queue's own
+    verbs (approve -> confirm -> claim); a replay_claimed item is therefore
+    the seat-side proof that the Admiral (admiral_telegram_user_id) approved
+    this exact request hash on this seat. The re-run the Desk mails the seat
+    about is allowed here exactly once: the item moves to resolved "approved
+    from the Desk and run", so a second identical request faces the normal
+    gate again. Only the human-decidable grey zone honours a Desk approval
+    (no_match_decider, syntax, a Decider danger veto, or an operator-disabled
+    class); hard-floor and other hard refusals never do. A claim older than
+    the window (default 24 h, unattended.desk_approval_window_hours) expires
+    and is marked obsolete, never allowed.
+    """
+    if not isinstance(reason, str) or (reason not in DESK_APPROVABLE_REASONS
+                                       and not reason.endswith('_disabled')):
+        return None
+    if not isinstance(event, dict) or event.get('hook_event_name') != 'PermissionRequest':
+        return None
+    try:
+        admiral = _unattended(manifest).get('admiral_telegram_user_id')
+    except ValueError:
+        return None
+    if not isinstance(admiral, str) or not admiral.isdecimal():
+        return None
+    try:
+        seat, sha, _ = _queue_identity(event, manifest)
+        window = _desk_window_seconds(manifest)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not _morning_queue_path().exists():
+        return None
+    consumed = None
+    with _morning_queue_file() as file:
+        for item in _queue_read(file):
+            if item.get('status') != 'replay_claimed' or item.get('seat') != seat:
+                continue
+            if item.get('approved_by') != admiral or item.get('approved_request_sha') != sha:
+                continue
+            approved_at = item.get('approved_at')
+            fresh = isinstance(approved_at, (int, float)) and 0 <= time.time() - approved_at <= window
+            if fresh and consumed is None:
+                item.update(status='resolved', resolution='approved from the Desk and run', resolved_at=_utc())
+                _queue_append(file, item)
+                consumed = item['id']
+            elif not fresh:
+                item.update(status='obsolete', resolution='desk approval expired', resolved_at=_utc())
+                _queue_append(file, item)
+    return consumed
+
+
 def _hold_seconds(manifest):
     return _minutes(_unattended(manifest), 'hold_timeout_minutes', 10) * 60
 
