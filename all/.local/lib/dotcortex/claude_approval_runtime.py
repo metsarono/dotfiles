@@ -107,6 +107,25 @@ def _away_status(manifest, now=None):
         return True, 'invalid_unattended'
 
 
+def _clear_away_flag(manifest, receipt='human_allow'):
+    """Disarm the away latch once the Admiral has actually allowed a request."""
+    raw = _unattended(manifest).get('away_flag', '~/.config/dotcortex/approval-away')
+    path = Path(raw).expanduser()
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            return False
+        path.unlink()
+        receipt_path = Path(os.environ.get('SO_APPROVAL_AWAY_RECEIPT') or Path.home() / '.local/state/dotcortex/approval-away-receipts.jsonl')
+        receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(receipt_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'a') as stream:
+            stream.write(json.dumps({'ts': _utc(), 'action': 'away_auto_cleared', 'reason': receipt}, separators=(',', ':')) + '\n')
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
 def _presence_stamp(manifest):
     section = _unattended(manifest)
     host = section.get('presence_host')
@@ -217,11 +236,81 @@ def _normalized_command(command):
     return ''.join(out)
 
 
+
+def _guard_warning(reason):
+    # Fixed diagnostics only: never include exception text or credential values.
+    path = Path(os.environ.get('CLAUDE_IDLE_GUARD_LOG') or Path.home()/'.local/state/dotcortex/approval-guard.jsonl')
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'a') as file:
+        file.write(json.dumps({'ts':_utc(),'event':reason})+'\n')
+
+
+def _seat_value(manifest):
+    ops = manifest.get('coordinator_ops', {})
+    value = ops.get('seat_account') if isinstance(ops,dict) else None
+    value = value or _unattended(manifest).get('seat_id')
+    return value if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+',value) else None
+
+
+def _queue_seat(manifest):
+    seat = _seat_value(manifest)
+    if seat:return seat
+    try:
+        seat = _seat_value(_runtime_manifest())
+    except (OSError,ValueError,TypeError):
+        seat = None
+    if seat:return seat
+    # Private operator binding is the recovery authority if the manifest cannot
+    # be read. It must equal the Desk registry's queue_seat for this account.
+    seat = os.environ.get('SO_APPROVAL_QUEUE_SEAT')
+    if isinstance(seat,str) and re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+',seat):
+        _guard_warning('approval-seat-manifest-unavailable-using-private-binding')
+        return seat
+    # The same account's own journal retains the hook writer's explicit seat.
+    # Recover only a single unambiguous source identity, never a home path.
+    try:
+        fd=os.open(_morning_queue_path(),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(fd,'r') as file:
+            info=os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1:
+                raise ValueError('unsafe seat journal')
+            fcntl.flock(file,fcntl.LOCK_SH|fcntl.LOCK_NB)
+            data=file.read(4194305)
+            if len(data)>4194304:raise ValueError('seat journal too large')
+        seats=set()
+        for line in data.splitlines():
+            if not line.strip():continue
+            row=json.loads(line)
+            value=row.get('seat') if isinstance(row,dict) else None
+            if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+',value):seats.add(value)
+        if len(seats)==1:
+            _guard_warning('approval-seat-manifest-unavailable-using-own-journal')
+            return seats.pop()
+    except (OSError,ValueError,TypeError):
+        pass
+    _guard_warning('approval-seat-unavailable-provision-SO_APPROVAL_QUEUE_SEAT')
+    raise ValueError('approval seat unavailable; provision private SO_APPROVAL_QUEUE_SEAT')
+
+
+def _absolute_cwd(event):
+    value = event.get('cwd')
+    if isinstance(value,str) and value.startswith('/') and '\x00' not in value:
+        return value
+    try:
+        value = os.getcwd()
+        if value.startswith('/'):return value
+    except OSError:
+        pass
+    value = str(Path.home())
+    if not value.startswith('/') or '\x00' in value:raise ValueError('absolute home required')
+    return value
+
+
 def _queue_identity(event, manifest):
     payload = event if isinstance(event, dict) else {}
     tool = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
-    seat = manifest.get('coordinator_ops', {}).get('seat_account') if isinstance(manifest.get('coordinator_ops'), dict) else None
-    seat = seat or _unattended(manifest).get('seat_id') or str(Path.home())
+    seat = _queue_seat(manifest)
     # Different directories and different content writes are different requests.
     data = {**tool}
     data.pop('description', None); data.pop('timeout', None)
@@ -299,7 +388,9 @@ def _queue_context(event):
 
 
 def _queue_upsert(event, reason, away_reason, manifest, status='open'):
-    payload = event if isinstance(event, dict) else {}
+    payload = dict(event) if isinstance(event, dict) else {}
+    notification_sha = hashlib.sha256(json.dumps(event,sort_keys=True,default=str).encode()).hexdigest()[:16]
+    payload['cwd'] = _absolute_cwd(payload)
     tool = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
     seat, sha, intent = _queue_identity(payload, manifest)
     now = _utc()
@@ -326,7 +417,7 @@ def _queue_upsert(event, reason, away_reason, manifest, status='open'):
         if not inflight:
             item.update(timestamp=now, tool=payload.get('tool_name'), command=tool.get('command'),
                 cwd=payload.get('cwd'), session=payload.get('session_id'), intent=intent or item.get('intent', ''),
-                reason=reason, away_reason=away_reason, request=event)
+                reason=reason, away_reason=away_reason, request=payload, notification_sha=notification_sha)
         elif not item.get('intent') and intent:
             item['intent'] = intent
         # Dedupe counts/history may grow while held, but the nonce is bound to
@@ -349,10 +440,13 @@ def _queue_morning(event, reason, away_reason):
 def _queue_update(item_id, update):
     with _morning_queue_file() as file:
         item = next((x for x in _queue_read(file) if x['id'] == item_id), None)
-        if item is None or update(item) is False:
-            return False
+        if item is None:return False
+        before=(item.get('status'),item.get('hold_nonce'))
+        if update(item) is False:return False
         _queue_append(file, item)
-        return True
+    if before != (item.get('status'),item.get('hold_nonce')) and item.get('status') != 'held' and not item.get('hold_answer') and not item.get('telegram_answered'):
+        _telegram_outcome(item,item.get('away_reason') if item.get('status')=='open' else 'resolved')
+    return True
 
 
 
@@ -385,7 +479,7 @@ def _queue_resolve(item_id, how):
     if not isinstance(how, str) or not how.strip() or '\n' in how:
         raise ValueError('one-line resolution required')
     def update(item):
-        if item['status'] != 'open':
+        if item['status'] not in {'open','held'}:
             return False
         item.update(status='resolved', resolution=how, resolved_at=_utc())
     return _queue_update(item_id, update)
@@ -403,6 +497,8 @@ def _queue_live_allow(event, manifest):
                 item.update(status='resolved', resolution='approved live at ' + now, resolved_at=now)
                 _queue_append(file, item)
                 resolved.append(item['id'])
+    if resolved:
+        _clear_away_flag(manifest, 'human_allow_live')
     return resolved
 
 
@@ -423,18 +519,19 @@ def _queue_obsolete_reason(item):
 
 
 def _queue_sweep():
-    changed = []
+    changed = []; expired=[]
     with _morning_queue_file() as file:
         for item in _queue_read(file):
             if item['status'] == 'held' and item.get('hold_deadline', float('inf')) <= time.time():
                 item.update(status='open', away_reason='hold_timeout')
                 item.pop('hold_nonce', None)
-                _queue_append(file, item)
+                _queue_append(file, item);expired.append(dict(item))
             if item['status'] == 'open':
                 reason = _queue_obsolete_reason(item)
                 if reason:
                     item.update(status='obsolete', resolution=reason, resolved_at=_utc())
                     _queue_append(file, item); changed.append(item['id'])
+    for item in expired:_telegram_outcome(item,'hold_timeout')
     return changed
 
 
@@ -510,7 +607,9 @@ def _queue_begin_hold(item_id, manifest):
         if item['status'] != 'held' or item.get('hold_nonce'):
             return False
         item.pop('hold_delivery_failed',None)
-        item.update(hold_nonce=nonce, hold_deadline=time.time()+_hold_seconds(manifest))
+        item.pop('telegram_answered',None)
+        item.pop('hold_answer',None)
+        item.update(hold_nonce=nonce, hold_started=time.time(), hold_deadline=time.time()+_hold_seconds(manifest))
     return nonce if _queue_update(item_id, update) else None
 
 
@@ -533,6 +632,7 @@ def _queue_answer(item_id, nonce, behavior, sender, manifest):
 def _queue_hold_result(item_id, nonce):
     with _morning_queue_file() as file:
         item = next((x for x in _queue_read(file) if x['id'] == item_id), {})
+        if item.get('status') == 'resolved':return 'resolved'
         if item.get('status') != 'held' or item.get('hold_nonce') != nonce:
             return None
         if item.get('hold_delivery_failed') is True:return 'unavailable'
@@ -548,8 +648,15 @@ def _finish_hold(item_id, nonce, outcome):
         else:
             item.update(status='open', away_reason='hold_timeout' if outcome == 'timeout' else 'human_denied' if outcome == 'deny' else 'away_flag' if outcome == 'away_flag' else 'hold_unavailable')
         item.pop('hold_nonce', None)
-        item.pop('hold_answer', None)
-    return _queue_update(item_id, update)
+        if item.pop('hold_answer', None):item['telegram_answered']=True
+    accepted = _queue_update(item_id, update)
+    if accepted and outcome == 'allow':
+        try:
+            manifest = _runtime_manifest()
+            _clear_away_flag(manifest, 'human_allow_hold')
+        except Exception:
+            pass
+    return accepted
 
 
 def _notify_hold(event, reason, item_id, nonce, manifest):
@@ -586,12 +693,12 @@ def _hold_admiral(event, reason, manifest):
                 if Path(flag).expanduser().exists():
                     outcome = 'away_flag'; break
                 result = _queue_hold_result(item_id, nonce)
-                if result in {'allow', 'deny', 'unavailable'}:
+                if result in {'allow', 'deny', 'unavailable', 'resolved'}:
                     outcome = result; break
                 time.sleep(min(0.05, max(0, deadline-time.monotonic())))
     finally:
         # Timeout, cancellation and bridge failure all leave an actionable item.
-        if not _finish_hold(item_id, nonce, outcome):
+        if outcome != 'resolved' and not _finish_hold(item_id, nonce, outcome):
             outcome = 'unavailable'
     return outcome, item_id
 
@@ -613,7 +720,7 @@ def observe_main():
     try:
         event = json.loads(sys.stdin.read(1024*1024+1))
         manifest = _runtime_manifest()
-        if event.get('hook_event_name') != 'PostToolUse' or _away_status(manifest)[0] or not _morning_queue_path().exists():
+        if event.get('hook_event_name') != 'PostToolUse' or not _morning_queue_path().exists():
             return 0
         resolved = _queue_live_allow(event, manifest)
         if resolved:
@@ -647,13 +754,34 @@ def session_end_main():
     return 0
 
 
+def _runtime_manifest_path():
+    override = os.environ.get('SO_APPROVAL_KIKIN_MANIFEST')
+    if override:return Path(override).expanduser()
+    settings = []
+    if os.environ.get('CLAUDE_SETTINGS_FILE'):settings.append(os.environ['CLAUDE_SETTINGS_FILE'])
+    for index,arg in enumerate(sys.argv[1:],1):
+        if arg.startswith('--settings='):settings.append(arg.partition('=')[2])
+        elif arg=='--settings' and index+1<len(sys.argv):settings.append(sys.argv[index+1])
+    # The PTY owner receives the same --settings as its child. Read only the
+    # PermissionRequest assignment; never execute settings command strings.
+    paths=set()
+    for raw in settings:
+        value=json.loads(Path(raw).expanduser().read_text())
+        for group in value.get('hooks',{}).get('PermissionRequest',[]):
+            for hook in group.get('hooks',[]):
+                for word in shlex.split(hook.get('command','')):
+                    if word.startswith('SO_APPROVAL_KIKIN_MANIFEST='):
+                        path=word.partition('=')[2].replace('${HOME}',str(Path.home())).replace('$HOME',str(Path.home()))
+                        if '$' in path or not path.startswith('/'):raise ValueError('invalid hook manifest path')
+                        paths.add(path)
+    if len(paths)>1:raise ValueError('ambiguous hook manifests')
+    if paths:return Path(paths.pop())
+    return Path.home()/'.config/dotcortex/claude-approval-canary.kikin.v1.local.json'
+
+
 def _runtime_manifest():
-    path = os.environ.get('SO_APPROVAL_KIKIN_MANIFEST')
-    if not path:
-        path = str(Path.home()/'.config/dotcortex/claude-approval-canary.kikin.v1.local.json')
-    value = json.loads(Path(path).read_text())
-    if not isinstance(value, dict):
-        raise ValueError('manifest')
+    value = json.loads(_runtime_manifest_path().read_text())
+    if not isinstance(value, dict):raise ValueError('manifest')
     return value
 
 
@@ -706,12 +834,81 @@ def verdict_main():
         return 1
 
 
+
+def _queue_repair(home, seat):
+    """Offline operator repair: backup exact bytes before a locked rewrite."""
+    home=str(home)
+    if not home.startswith('/') or '\x00' in home:raise ValueError('absolute home required')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+',seat):raise ValueError('invalid repair seat')
+    path=_morning_queue_path()
+    with _morning_queue_file() as file:
+        file.seek(0); original=file.read(); output=[]; changed=0
+        if original and not original.endswith('\n'):raise ValueError('incomplete queue; manual recovery required')
+        for line in original.splitlines(keepends=True):
+            if not line.strip():output.append(line);continue
+            row=json.loads(line)
+            if not isinstance(row,dict):raise ValueError('non-object queue entry')
+            before=json.dumps(row,sort_keys=True)
+            cwd=row.get('cwd')
+            if not isinstance(cwd,str) or not cwd.startswith('/') or '\x00' in cwd:
+                request=row.get('request')
+                if isinstance(request,dict) and 'cwd' in request and request['cwd']!=cwd:
+                    raise ValueError('request cwd disagrees; manual recovery required')
+                row['cwd']=home
+                if isinstance(request,dict):
+                    old=dict(request); request=dict(request,cwd=home);row['request']=request
+                    if isinstance(row.get('requests'),list):
+                        row['requests']=[request if r==old else r for r in row['requests']]
+            if row.get('seat')==home:row['seat']=seat
+            if json.dumps(row,sort_keys=True)!=before:
+                output.append(json.dumps(row,ensure_ascii=True,separators=(',',':'))+'\n');changed+=1
+            else:output.append(line)
+        if not changed:return {'changed':0,'backup':None}
+        # Exclusive private backup, fsynced before touching a single source byte.
+        backup=path.with_name(path.name+'.backup-'+secrets.token_hex(8))
+        fd=os.open(backup,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as saved:
+            saved.write(original);saved.flush();os.fsync(saved.fileno())
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+        file.seek(0);file.truncate(0);file.write(''.join(output));file.flush();os.fsync(file.fileno())
+        return {'changed':changed,'backup':str(backup)}
+
+
+def _telegram_outcome(item, outcome):
+    """Cleanup runs after the queue lock, outside the PTY's guarded write seam."""
+    helper=Path(__file__).resolve().parent/'telegram_permission_recall.py'
+    if not os.environ.get('TELEGRAM_STATE_DIR') and not os.environ.get('APPROVAL_TELEGRAM_BOT_TOKEN'):
+        return
+    try:
+        message={'item':item,'outcome':outcome}
+        child=subprocess.Popen([sys.executable,str(helper),'--outcome'],stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,text=True)
+        child.communicate(json.dumps(message),timeout=0.1)
+        if child.returncode:_guard_warning('approval-telegram-cleanup-failed')
+    except subprocess.TimeoutExpired:
+        # Bounded native-message discovery continues in its own process.
+        pass
+    except (OSError,ValueError):
+        _guard_warning('approval-telegram-cleanup-unavailable')
+
+
+def _queue_cleanup(item_id, outcome):
+    with _morning_queue_file() as file:
+        item=next((x for x in _queue_read(file) if x['id']==item_id),None)
+    if item is not None:_telegram_outcome(item,outcome)
+
+
 def queue_main():
     parser = argparse.ArgumentParser(description='Live smart approval queue; never executes requests.')
     parser.add_argument('--clear', action='store_true', help='legacy print-and-clear under the same lock')
     commands = parser.add_subparsers(dest='action')
     listing = commands.add_parser('list'); listing.add_argument('--json', action='store_true')
     commands.add_parser('sweep')
+    repair = commands.add_parser('repair', help='offline repair; stop queue writers first')
+    repair.add_argument('--home', required=True)
+    repair.add_argument('--seat', required=True)
     resolve = commands.add_parser('resolve'); resolve.add_argument('id'); resolve.add_argument('--how', required=True)
     intent = commands.add_parser('intent'); intent.add_argument('id'); intent.add_argument('--text', required=True)
     confirm = commands.add_parser('confirm'); confirm.add_argument('id'); confirm.add_argument('--session', required=True)
@@ -721,6 +918,8 @@ def queue_main():
     ended = commands.add_parser('session-ended'); ended.add_argument('session'); ended.add_argument('--intent-met', action='store_true')
     args = parser.parse_args()
     try:
+        if args.action == 'repair':
+            print(json.dumps(_queue_repair(args.home,args.seat)));return 0
         if args.action == 'resolve':
             return 0 if _queue_resolve(args.id, args.how) else 1
         if args.action == 'intent':
