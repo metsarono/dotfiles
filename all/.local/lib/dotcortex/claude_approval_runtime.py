@@ -1238,8 +1238,13 @@ def _queue_repair_pty():
         directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
         try:os.fsync(directory)
         finally:os.close(directory)
-        for revision in appends:
-            file.write(json.dumps(revision,ensure_ascii=True,separators=(',',':'))+'\n')
+        # Each appended record is a new revision of its item; the Desk
+        # quarantines an item whose revision repeats with different content.
+        latest={}
+        for record in appends:
+            record['revision']=latest.get(record['id'],record.get('revision',0))+1
+            latest[record['id']]=record['revision']
+            file.write(json.dumps(record,ensure_ascii=True,separators=(',',':'))+'\n')
         file.flush();os.fsync(file.fileno())
     for entry in report:
         if entry.get('resolved'):
