@@ -191,14 +191,38 @@ honey_claude_launch() {
     local state_dir="$HOME/.claude/channels/telegram-$bot"
     local work_dir="${HONEY_CLAUDE_WORK_ROOT:-$HOME/honey-work}/$bot"
     local telegram=0 arg
-    local passthrough=()
+    local passthrough=() resume_id=""
 
-    for arg in "$@"; do
+    # Resume pass-through (2026-10-17, Mètsàtron's word: resume Bunta, never
+    # restart him): --resume <session-id> travels to claude-warm and on to the
+    # claude CLI. The id is validated and a malformed one is refused loudly —
+    # a relaunch that quietly started fresh would lose the live conversation.
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
         case "$arg" in
             --telegram) telegram=1 ;;
+            --resume)
+                if [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+                    printf '%s\n' "$name: refused: --resume needs a session id after it" >&2
+                    return 1
+                fi
+                resume_id="$2"
+                shift
+                ;;
+            --resume=*)
+                resume_id="${arg#--resume=}"
+                ;;
             *) passthrough+=("$arg") ;;
         esac
+        shift
     done
+    if [[ -n "$resume_id" ]]; then
+        if [[ ! "${resume_id,,}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            printf '%s\n' "$name: refused: --resume id '$resume_id' is not a session id (UUID)" >&2
+            return 1
+        fi
+        passthrough+=(--resume "$resume_id")
+    fi
 
     # The bot user's own npm prefix (claude, bun), agent Guix profile (node), stowed
     # bin, and the lane checkout's all/.local/bin (claude-warm and the fleet hooks;
@@ -342,10 +366,12 @@ source "$LIB_DIR/launch.bash"
 
 case "${1-}" in
   -h|--help)
-    printf '%s\n' "Usage: $(basename -- "$0") [--telegram] [claude args...]" \
+    printf '%s\n' "Usage: $(basename -- "$0") [--telegram] [--resume SESSION_ID] [claude args...]" \
       "Launch this Honey Claude bot through claude-warm in ~/honey-work/<bot> (agents-bots-honey.org)." \
       "  --telegram  attach the Telegram channel; runs in acceptEdits (auto) mode." \
-      "              Token: ~/.claude/channels/telegram-<bot>/.env (never printed)."
+      "              Token: ~/.claude/channels/telegram-<bot>/.env (never printed)." \
+      "  --resume SESSION_ID  continue that conversation (UUID; passed to claude-warm" \
+      "              and on to claude). The canonical door is nurse-joy revive, from Kikin."
     exit 0 ;;
 esac
 #+END_SRC
@@ -678,7 +704,9 @@ Modelled on Honey's =/etc/init.d/claude-warm=, with the lessons it already paid 
 - =PATH= is only ever *appended* to (the login shell's PATH plus the bot user's npm prefix, agent Guix profile and bin), never overwritten.
 - The launcher comes from the root-owned system checkout, and =start_pre= refuses to start if anything in the lane or the fleet =bin= it appends is not owned by root or is group/other-writable: the bot must never run code it could have edited itself.
 
-One script body serves all three services: the bot comes from =RC_SVCNAME= (=honey-opus= to =opus=). =honey-claude-install= (below) installs it as =/etc/init.d/honey-{opus,sonnet,haiku}=. =/etc/conf.d/honey-<bot>= may set =bot_user= or =honey_claude_checkout=.
+One script body serves all three services: the bot comes from =RC_SVCNAME= (=honey-opus= to =opus=). =honey-claude-install= (below) installs it as =/etc/init.d/honey-{opus,sonnet,haiku}=. =/etc/conf.d/honey-<bot>= may set =bot_user=, =honey_claude_checkout= or =resume==<session-id>: with =resume= set, =start= launches the bot on that conversation instead of a fresh one.
+
+**Resume semantics (2026-10-17): the service and nurse-joy never fight over the session.** =rc-service honey-<bot> restart= remains forbidden as a resume tool (=stop= kills the tmux session and the live context with it). Two doors resume: (1) *nurse-joy* (Kikin, =HelmCortex/FORGE/bin/nurse-joy=) revives Bunta over ssh as =agent-claude= — graceful =/exit=, relaunch through this lane's launcher with the truthful session id — inside the *live* tmux session, never touching the service; the launcher rewrites =$XDG_RUNTIME_DIR/honey-<bot>.pid= on every launch, so the service's =status= stays truthful. (2) *the service*, with =resume= set in =/etc/conf.d/honey-<bot>=, for a boot or deliberate =stop= where the operator already knows the session id; =start_pre= refuses a malformed id.
 
 #+NAME: honey-openrc
 #+BEGIN_SRC bash
@@ -700,6 +728,9 @@ bot_cwd="${bot_home}/honey-work/${bot}"
 # The service lane: launchers run from the host's root-owned system checkout, never
 # from a checkout the bot user can write (agents-bots-honey.org, "Service lane").
 : "${honey_claude_checkout:=/usr/local/share/dotcortex/DotCortex}"
+# /etc/conf.d/honey-<bot> may set resume=<session-id>: start on that conversation
+# (resume semantics: nurse-joy revive is the live-seat door; this is the boot door).
+resume="${resume:-}"
 bot_lane="${honey_claude_checkout}/all/.local/share/dotcortex/honey-claude"
 bot_launcher="${bot_lane}/bin/${RC_SVCNAME}"
 bot_log="/var/log/${RC_SVCNAME}.log"
@@ -726,6 +757,10 @@ start_pre() {
     fi
     checkpath -d -m 0700 -o "${bot_user}:${bot_user}" "${xdg}"
     checkpath -f -m 0640 -o "${bot_user}:${bot_user}" "${bot_log}"
+    if [ -n "${resume}" ] && ! printf '%s' "${resume}" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+        eerror "resume must be a session id (UUID): ${resume}"
+        return 1
+    fi
 }
 
 bot_pid() {
@@ -739,11 +774,13 @@ bot_pid() {
 }
 
 start() {
+    local bot_args="--telegram"
+    [ -n "${resume}" ] && bot_args="${bot_args} --resume ${resume}"
     ebegin "Starting ${description} (tmux: ${bot_session})"
     su -l "${bot_user}" -c "export XDG_RUNTIME_DIR='${xdg}' PATH=\"\${PATH}:${bot_path_add}\"; \
         tmux new-session -d -s '${bot_session}' -c '${bot_cwd}' \
         -e XDG_RUNTIME_DIR='${xdg}' -e PATH=\"\${PATH}\" \
-        'exec ${bot_launcher} --telegram' \
+        'exec ${bot_launcher} ${bot_args}' \
         && tmux pipe-pane -o -t '${bot_session}' 'cat >> ${bot_log}'"
     eend $? "Failed to start ${RC_SVCNAME}"
 }
@@ -1398,6 +1435,37 @@ class LauncherTests(unittest.TestCase):
         finally:
             box.close()
 
+    def test_resume_reaches_the_warm_session_verbatim(self):
+        # 2026-10-17: nurse-joy revive Bunta relaunches through --resume; the id
+        # must reach claude-warm verbatim, on both the telegram and plain paths.
+        box = Home()
+        try:
+            session = "31986914-a3a3-4f15-8e80-b807af207115"
+            result = box.run("opus", "--telegram", "--resume", session)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = box.recorded()["argv"]
+            self.assertIn("--resume", argv)
+            self.assertEqual(argv[argv.index("--resume") + 1], session)
+            result = box.run("haiku", "--resume=" + session)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = box.recorded()["argv"]
+            self.assertEqual(argv[-2:], ["--resume", session])
+        finally:
+            box.close()
+
+    def test_resume_refuses_a_malformed_id(self):
+        # A relaunch that quietly started fresh would lose the live conversation.
+        box = Home()
+        try:
+            for args in (("--resume", "not-a-session"), ("--resume",),
+                         ("--resume", "12345678-1234-1234-1234-1234567890123")):
+                result = box.run("opus", "--telegram", *args)
+                self.assertNotEqual(result.returncode, 0, args)
+                self.assertIn("--resume", result.stderr)
+                self.assertFalse(box.record.exists())
+        finally:
+            box.close()
+
     def test_model_override(self):
         box = Home()
         try:
@@ -1459,6 +1527,17 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("-perm /022", text, "must refuse a checkout the bot could edit")
         self.assertNotIn("${bot_home}/DotCortex", text, "never the bot's own checkout")
         self.assertNotIn("/home/gille", text)
+        result = subprocess.run(["sh", "-n", str(OPENRC / "honey-bot")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_service_can_start_on_a_given_session(self):
+        # /etc/conf.d/honey-<bot> resume=<session-id> reaches the launcher through
+        # its --resume (2026-10-17); a malformed id is refused before anything starts.
+        text = (OPENRC / "honey-bot").read_text()
+        self.assertIn('resume="${resume:-}"', text)
+        self.assertIn('[ -n "${resume}" ] && bot_args="${bot_args} --resume ${resume}"', text)
+        self.assertIn("'exec ${bot_launcher} ${bot_args}'", text)
+        self.assertIn("resume must be a session id (UUID)", text)
         result = subprocess.run(["sh", "-n", str(OPENRC / "honey-bot")], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 

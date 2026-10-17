@@ -185,6 +185,37 @@ class LauncherTests(unittest.TestCase):
         finally:
             box.close()
 
+    def test_resume_reaches_the_warm_session_verbatim(self):
+        # 2026-10-17: nurse-joy revive Bunta relaunches through --resume; the id
+        # must reach claude-warm verbatim, on both the telegram and plain paths.
+        box = Home()
+        try:
+            session = "31986914-a3a3-4f15-8e80-b807af207115"
+            result = box.run("opus", "--telegram", "--resume", session)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = box.recorded()["argv"]
+            self.assertIn("--resume", argv)
+            self.assertEqual(argv[argv.index("--resume") + 1], session)
+            result = box.run("haiku", "--resume=" + session)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = box.recorded()["argv"]
+            self.assertEqual(argv[-2:], ["--resume", session])
+        finally:
+            box.close()
+
+    def test_resume_refuses_a_malformed_id(self):
+        # A relaunch that quietly started fresh would lose the live conversation.
+        box = Home()
+        try:
+            for args in (("--resume", "not-a-session"), ("--resume",),
+                         ("--resume", "12345678-1234-1234-1234-1234567890123")):
+                result = box.run("opus", "--telegram", *args)
+                self.assertNotEqual(result.returncode, 0, args)
+                self.assertIn("--resume", result.stderr)
+                self.assertFalse(box.record.exists())
+        finally:
+            box.close()
+
     def test_model_override(self):
         box = Home()
         try:
@@ -246,6 +277,17 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("-perm /022", text, "must refuse a checkout the bot could edit")
         self.assertNotIn("${bot_home}/DotCortex", text, "never the bot's own checkout")
         self.assertNotIn("/home/gille", text)
+        result = subprocess.run(["sh", "-n", str(OPENRC / "honey-bot")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_service_can_start_on_a_given_session(self):
+        # /etc/conf.d/honey-<bot> resume=<session-id> reaches the launcher through
+        # its --resume (2026-10-17); a malformed id is refused before anything starts.
+        text = (OPENRC / "honey-bot").read_text()
+        self.assertIn('resume="${resume:-}"', text)
+        self.assertIn('[ -n "${resume}" ] && bot_args="${bot_args} --resume ${resume}"', text)
+        self.assertIn("'exec ${bot_launcher} ${bot_args}'", text)
+        self.assertIn("resume must be a session id (UUID)", text)
         result = subprocess.run(["sh", "-n", str(OPENRC / "honey-bot")], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 

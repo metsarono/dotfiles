@@ -16,6 +16,9 @@ bot_cwd="${bot_home}/honey-work/${bot}"
 # The service lane: launchers run from the host's root-owned system checkout, never
 # from a checkout the bot user can write (agents-bots-honey.org, "Service lane").
 : "${honey_claude_checkout:=/usr/local/share/dotcortex/DotCortex}"
+# /etc/conf.d/honey-<bot> may set resume=<session-id>: start on that conversation
+# (resume semantics: nurse-joy revive is the live-seat door; this is the boot door).
+resume="${resume:-}"
 bot_lane="${honey_claude_checkout}/all/.local/share/dotcortex/honey-claude"
 bot_launcher="${bot_lane}/bin/${RC_SVCNAME}"
 bot_log="/var/log/${RC_SVCNAME}.log"
@@ -42,6 +45,10 @@ start_pre() {
     fi
     checkpath -d -m 0700 -o "${bot_user}:${bot_user}" "${xdg}"
     checkpath -f -m 0640 -o "${bot_user}:${bot_user}" "${bot_log}"
+    if [ -n "${resume}" ] && ! printf '%s' "${resume}" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+        eerror "resume must be a session id (UUID): ${resume}"
+        return 1
+    fi
 }
 
 bot_pid() {
@@ -55,11 +62,13 @@ bot_pid() {
 }
 
 start() {
+    local bot_args="--telegram"
+    [ -n "${resume}" ] && bot_args="${bot_args} --resume ${resume}"
     ebegin "Starting ${description} (tmux: ${bot_session})"
     su -l "${bot_user}" -c "export XDG_RUNTIME_DIR='${xdg}' PATH=\"\${PATH}:${bot_path_add}\"; \
         tmux new-session -d -s '${bot_session}' -c '${bot_cwd}' \
         -e XDG_RUNTIME_DIR='${xdg}' -e PATH=\"\${PATH}\" \
-        'exec ${bot_launcher} --telegram' \
+        'exec ${bot_launcher} ${bot_args}' \
         && tmux pipe-pane -o -t '${bot_session}' 'cat >> ${bot_log}'"
     eend $? "Failed to start ${RC_SVCNAME}"
 }

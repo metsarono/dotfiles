@@ -9,10 +9,12 @@ source "$LIB_DIR/launch.bash"
 
 case "${1-}" in
   -h|--help)
-    printf '%s\n' "Usage: $(basename -- "$0") [--telegram] [claude args...]" \
+    printf '%s\n' "Usage: $(basename -- "$0") [--telegram] [--resume SESSION_ID] [claude args...]" \
       "Launch this Honey Claude bot through claude-warm in ~/honey-work/<bot> (agents-bots-honey.org)." \
       "  --telegram  attach the Telegram channel; runs in acceptEdits (auto) mode." \
-      "              Token: ~/.claude/channels/telegram-<bot>/.env (never printed)."
+      "              Token: ~/.claude/channels/telegram-<bot>/.env (never printed)." \
+      "  --resume SESSION_ID  continue that conversation (UUID; passed to claude-warm" \
+      "              and on to claude). The canonical door is nurse-joy revive, from Kikin."
     exit 0 ;;
 esac
 honey_claude_launch opus "${HONEY_OPUS_MODEL:-claude-opus-5-5}" "$@"
