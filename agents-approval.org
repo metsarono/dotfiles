@@ -631,8 +631,8 @@ class GateInversionTests(unittest.TestCase):
         env = {'APPROVAL_TELEGRAM_BOT_TOKEN': '123:SYNTHETIC_TOKEN', 'APPROVAL_TELEGRAM_CHAT_ID': '42',
                'APPROVAL_TELEGRAM_API_BASE': 'https://' + 'YOUR_TELEGRAM_API'.replace('YOUR_', 'fixture-').replace('_', '-').lower() + '.invalid'}
         response = mock.MagicMock()
-        response.__enter__.return_value.read.return_value = b'{"ok":true}'
-        with mock.patch.dict(os.environ, env), mock.patch.object(notifier.sys, 'stdin', io.StringIO(json.dumps(payload))), \
+        response.__enter__.return_value.read.return_value = b'{"ok":true,"result":{"message_id":7}}'
+        with mock.patch.dict(os.environ, {**env,'HOME':str(self.base)}), mock.patch.object(notifier.sys, 'stdin', io.StringIO(json.dumps(payload))), \
                 mock.patch.object(notifier.urllib.request, 'urlopen', return_value=response) as send:
             self.assertEqual(notifier.main(), 0)
             data = send.call_args.args[0].data.decode()
@@ -919,46 +919,56 @@ or session restart is part of this branch.
 * Optional private-environment Telegram adapter
 
 #+BEGIN_SRC python :tangle all/.local/bin/approval-telegram-notify :shebang "#!/usr/bin/env python3" :comments no :tangle-mode (identity #o755)
-"""Private-environment Telegram adapter; never opens credential files or logs secrets."""
+"""Private-environment Telegram adapter; never logs credentials."""
 import json
 import os
+from pathlib import Path
 import re
+import stat
 import sys
+import time
+import hashlib
 import urllib.request
+
+
+def _receipt(digest, message_id, bot_key):
+    path = Path.home()/'.local/state/dotcortex/approval-telegram-receipts.jsonl'
+    path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+    fd=os.open(path,os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'a') as file:
+        info=os.fstat(file.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1:
+            raise OSError('unsafe Telegram receipt file')
+        file.write(json.dumps({'request_sha':digest,'message_id':message_id,'timestamp':time.time(),'bot_key':bot_key})+'\n')
+        file.flush();os.fsync(file.fileno())
 
 
 def main():
     try:
         raw = sys.stdin.read(8193)
-        if len(raw) > 8192:
-            return 1
-        message = json.loads(raw)
-        if not isinstance(message, dict) or message.get('schema') != 'dotcortex.approval.notification.v1':
-            return 1
-        digest = message.get('request_sha')
-        if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{16}', digest):
-            return 1
-        token = os.environ.get('APPROVAL_TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN')
-        chat = os.environ.get('APPROVAL_TELEGRAM_CHAT_ID', 'YOUR_ADMIRAL_CHAT')
-        base = os.environ.get('APPROVAL_TELEGRAM_API_BASE', 'YOUR_TELEGRAM_API_BASE')
-        if any(not value or 'YOUR_' in value for value in (token, chat, base)):
-            return 1
-        # This adapter is launched by the existing credential-owning bot path;
-        # neither the hook nor this program loads .env/auth/key files.
-        if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+', token) or not re.fullmatch(r'-?[0-9]+', chat):
-            return 1
-        if not re.fullmatch(r'https://[A-Za-z0-9.-]+', base):
-            return 1
-        queued = message.get('queued') is True
-        text = 'Deferred approval ' + digest + '. '
+        if len(raw)>8192:return 1
+        message=json.loads(raw)
+        if not isinstance(message,dict) or message.get('schema')!='dotcortex.approval.notification.v1':return 1
+        digest=message.get('request_sha')
+        if not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{16}',digest):return 1
+        token=os.environ.get('APPROVAL_TELEGRAM_BOT_TOKEN','YOUR_BOT_TOKEN')
+        chat=os.environ.get('APPROVAL_TELEGRAM_CHAT_ID','YOUR_ADMIRAL_CHAT')
+        base=os.environ.get('APPROVAL_TELEGRAM_API_BASE','YOUR_TELEGRAM_API_BASE')
+        if any(not value or 'YOUR_' in value for value in (token,chat,base)):return 1
+        if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+',token) or not re.fullmatch(r'-?[0-9]+',chat):return 1
+        if not re.fullmatch(r'https://[A-Za-z0-9.-]+',base):return 1
+        text='Deferred approval '+digest+'. '
         text += "Queued for morning review. " if message.get('away') is True else "Awaiting the Admiral's approval on the Desk/Telegram. "
-        text += 'Review the private approval queue.' if queued else 'Queue unavailable; inspect the seat.'
-        body = json.dumps({'chat_id': chat, 'text': text}).encode()
-        request = urllib.request.Request(base + '/bot' + token + '/sendMessage', data=body,
-            headers={'Content-Type': 'application/json'}, method='POST')
-        with urllib.request.urlopen(request, timeout=0.5) as response:
-            result = json.loads(response.read(4096))
-        return 0 if isinstance(result, dict) and result.get('ok') is True else 1
+        text += 'Review the private approval queue.' if message.get('queued') is True else 'Queue unavailable; inspect the seat.'
+        text=re.sub(r'([_\*\[\]()~`>#+\-=|{}.!\\])',r'\\\1',text)
+        body=json.dumps({'chat_id':chat,'text':text,'parse_mode':'MarkdownV2'}).encode()
+        request=urllib.request.Request(base+'/bot'+token+'/sendMessage',data=body,
+            headers={'Content-Type':'application/json'},method='POST')
+        with urllib.request.urlopen(request,timeout=0.5) as response:result=json.loads(response.read(4096))
+        message_id=result.get('result',{}).get('message_id') if isinstance(result,dict) else None
+        if result.get('ok') is not True or type(message_id) is not int or message_id<=0:return 1
+        _receipt(digest,message_id,hashlib.sha256((token+':'+chat).encode()).hexdigest())
+        return 0
     except Exception:
         # HTTP exception text may contain the credential-bearing URL.
         return 1
@@ -966,6 +976,7 @@ def main():
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
 #+END_SRC
 
 #+BEGIN_SRC sh :tangle all/.config/dotcortex/approval-telegram.env.template :comments no
@@ -1043,14 +1054,16 @@ def defer(raw):
     return {'hookSpecificOutput':{'hookEventName':'PermissionRequest','decision':{'behavior':'deny','message':note+'; '+_runtime.DEFERRED_ACTION,'interrupt':False}}}
 
 
-def recall_prompt(raw, started):
+def recall_prompt(raw, started, outcome=None):
     # The plugin posts a Telegram prompt for every PermissionRequest at once;
     # retract it after an allow (agents-approval-telegram-recall.org).
     if not os.environ.get('TELEGRAM_STATE_DIR'):
         return
     helper = Path(__file__).resolve().parents[1] / 'lib/dotcortex/telegram_permission_recall.py'
     try:
-        child = subprocess.Popen(['/usr/bin/python3', str(helper), repr(started)], stdin=subprocess.PIPE,
+        argv=['/usr/bin/python3',str(helper),repr(started)]
+        if outcome:argv.append(outcome)
+        child = subprocess.Popen(argv, stdin=subprocess.PIPE,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, text=True)
         child.stdin.write(raw)
         child.stdin.close()
@@ -1084,6 +1097,8 @@ def main():
     if output is not None: print(json.dumps(output,ensure_ascii=True,separators=(',',':')), flush=True)
     if output is not None and output['hookSpecificOutput']['decision']['behavior'] == 'allow':
         recall_prompt(raw, started)
+    elif output is not None:
+        recall_prompt(raw,started,'denied')
     return 0
 
 

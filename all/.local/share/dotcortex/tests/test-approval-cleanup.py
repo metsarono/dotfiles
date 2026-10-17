@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Isolated approval lifecycle regression checks; no live state or network."""
+import copy
+import hashlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch, MagicMock
+
+REPO=Path(__file__).resolve().parents[5]
+LIB=REPO/'all/.local/lib/dotcortex'
+BIN=REPO/'all/.local/bin'
+def load(name,path):
+    spec=importlib.util.spec_from_loader(name,importlib.machinery.SourceFileLoader(name,str(path)))
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+
+runtime=load('cleanup_runtime',LIB/'claude_approval_runtime.py')
+recall=load('cleanup_recall',LIB/'telegram_permission_recall.py')
+notify=load('cleanup_notify',BIN/'approval-telegram-notify')
+
+class CleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.home=Path(self.tmp.name)
+        self.queue=self.home/'queue.jsonl'
+        self.manifest={'coordinator_ops':{'seat_account':'fixture@example.invalid'}}
+        self.env=patch.dict(os.environ,{'HOME':str(self.home),'SO_APPROVAL_MORNING_QUEUE':str(self.queue)},clear=True)
+        self.env.start();self.addCleanup(self.env.stop)
+        self.argv=patch.object(sys,'argv',['fixture-owner']);self.argv.start();self.addCleanup(self.argv.stop)
+        self.event={'tool_name':'Bash','tool_input':{'command':'printf fixture'},'session_id':'fixture-session','cwd':'/fixture'}
+
+    def records(self):
+        with self.queue.open() as stream:return runtime._queue_read(stream)
+
+    def enqueue(self,**changes):
+        return runtime._queue_upsert(self.event|changes,'hold_timeout','presence',self.manifest)
+
+    def test_cwd_falls_back_before_identity_history_and_context(self):
+        original=copy.deepcopy(self.event)
+        for cwd in (None,'relative','',42):
+            with self.subTest(cwd=cwd),patch.object(runtime.os,'getcwd',return_value='/process'):
+                item=self.enqueue(cwd=cwd)
+                row=next(r for r in self.records() if r['id']==item)
+                self.assertEqual(row['cwd'],'/process')
+                self.assertEqual(row['request']['cwd'],'/process')
+                self.assertIn(row['request'],row['requests'])
+        self.assertEqual(self.event,original)
+        self.assertEqual(len(self.records()),1)
+
+    def test_removed_process_directory_falls_back_to_absolute_home(self):
+        with patch.object(runtime.os,'getcwd',side_effect=FileNotFoundError):
+            item=self.enqueue(cwd=None)
+        self.assertEqual(self.records()[0]['cwd'],str(self.home))
+        with patch.object(runtime.os,'getcwd',side_effect=AssertionError('unexpected fallback')):
+            self.enqueue()
+
+    def test_pty_manifest_uses_same_settings_assignment_as_hook(self):
+        path=self.home/'private.json';path.write_text(json.dumps(self.manifest))
+        settings=self.home/'settings.json'
+        settings.write_text(json.dumps({'hooks':{'PermissionRequest':[{'hooks':[{'command':'SO_APPROVAL_KIKIN_MANIFEST=$HOME/private.json claude-hook-permission-request-kikin'}]}]}}))
+        for args in (['owner','--settings='+str(settings)],['owner','--settings',str(settings)]):
+            with patch.object(runtime.sys,'argv',args):
+                manifest=runtime._runtime_manifest()
+                self.assertEqual(runtime._queue_identity({},manifest)[0],'fixture@example.invalid')
+                self.assertEqual(runtime._queue_identity({}, {})[0],'fixture@example.invalid')
+
+    def test_missing_manifest_uses_private_seat_binding_and_guard_log(self):
+        with patch.dict(os.environ,{'SO_APPROVAL_QUEUE_SEAT':'fixture@example.invalid'}):
+            self.assertEqual(runtime._queue_identity({}, {})[0],'fixture@example.invalid')
+            runtime._queue_upsert(self.event,'hold_timeout','hold_timeout',{})
+        self.assertEqual(self.records()[0]['seat'],'fixture@example.invalid')
+        log=self.home/'.local/state/dotcortex/approval-guard.jsonl'
+        self.assertIn('private-binding',json.loads(log.read_text().splitlines()[0])['event'])
+        # Without the private binding, the account's own journal is the recovery
+        # identity: one unambiguous recorded seat, never a home path.
+        self.assertEqual(runtime._queue_identity({}, {})[0],'fixture@example.invalid')
+        self.assertIn('own-journal',json.loads(log.read_text().splitlines()[-1])['event'])
+        self.assertNotEqual(self.records()[0]['seat'],str(self.home))
+        self.queue.unlink()
+        with self.assertRaisesRegex(ValueError,'seat unavailable'):runtime._queue_identity({}, {})
+
+    def test_ambiguous_settings_manifest_refuses_instead_of_guessing(self):
+        paths=[]
+        for n in (1,2):
+            path=self.home/f'settings{n}.json'
+            path.write_text(json.dumps({'hooks':{'PermissionRequest':[{'hooks':[{'command':f'SO_APPROVAL_KIKIN_MANIFEST=/fixture/{n}.json hook'}]}]}}))
+            paths.append(str(path))
+        with patch.object(runtime.sys,'argv',['owner','--settings',paths[0],'--settings',paths[1]]):
+            with self.assertRaisesRegex(ValueError,'ambiguous'):runtime._runtime_manifest()
+
+    def test_repair_backups_exact_bytes_updates_attached_request_and_is_idempotent(self):
+        first=self.enqueue()
+        data=json.loads(self.queue.read_text())
+        data.update(cwd=None,seat=str(self.home));data['request']['cwd']=None
+        data['requests']=[copy.deepcopy(data['request'])]
+        raw=json.dumps(data)+'\n';self.queue.write_text(raw)
+        result=runtime._queue_repair(self.home,'fixture@example.invalid')
+        self.assertEqual(result['changed'],1)
+        backup=Path(result['backup'])
+        self.assertEqual(backup.read_text(),raw);self.assertEqual(backup.stat().st_mode&0o777,0o600)
+        row=self.records()[0]
+        self.assertEqual((row['id'],row['cwd'],row['seat']),(first,str(self.home),'fixture@example.invalid'))
+        self.assertEqual(row['request']['cwd'],str(self.home));self.assertIn(row['request'],row['requests'])
+        repaired=self.queue.read_bytes()
+        self.assertEqual(runtime._queue_repair(self.home,'fixture@example.invalid'),{'changed':0,'backup':None})
+        self.assertEqual(self.queue.read_bytes(),repaired)
+
+    def test_bad_repair_input_fails_before_backup_or_rewrite(self):
+        self.queue.write_text('{bad}\n');before=self.queue.read_bytes()
+        with self.assertRaises(ValueError):runtime._queue_repair(self.home,'fixture@example.invalid')
+        self.assertEqual(self.queue.read_bytes(),before)
+        self.assertEqual(list(self.home.glob('*.backup-*')),[])
+
+    def test_hold_outcomes_cleanup_after_unlock_and_not_on_telegram_answer(self):
+        for outcome in ('timeout','away_flag','unavailable','allow','deny'):
+            with self.subTest(outcome=outcome):
+                item=runtime._queue_upsert(self.event|{'session_id':outcome},'floor','presence',self.manifest,status='held')
+                nonce=runtime._queue_begin_hold(item,self.manifest)
+                def cleaned(row,reason):
+                    # Taking the real lock proves delivery is outside it.
+                    with runtime._morning_queue_file():pass
+                    self.assertNotIn('hold_nonce',row)
+                with patch.object(runtime,'_telegram_outcome',side_effect=cleaned) as cleanup:
+                    self.assertTrue(runtime._finish_hold(item,nonce,outcome))
+                    cleanup.assert_called_once()
+        item=runtime._queue_upsert(self.event,'floor','presence',self.manifest,status='held')
+        nonce=runtime._queue_begin_hold(item,self.manifest)
+        runtime._queue_update(item,lambda row:row.update(hold_answer='deny'))
+        with patch.object(runtime,'_telegram_outcome') as cleanup:
+            runtime._finish_hold(item,nonce,'deny');cleanup.assert_not_called()
+
+    def test_resolve_held_from_desk_and_sweep_expired_hold_cleanup(self):
+        item=runtime._queue_upsert(self.event,'floor','presence',self.manifest,status='held')
+        nonce=runtime._queue_begin_hold(item,self.manifest)
+        with patch.object(runtime,'_telegram_outcome') as cleanup:
+            self.assertTrue(runtime._queue_resolve(item,'reviewed on Desk'))
+            self.assertEqual(runtime._queue_hold_result(item,nonce),'resolved')
+            cleanup.assert_called_once()
+        item=runtime._queue_upsert(self.event,'floor','presence',self.manifest,status='held')
+        runtime._queue_begin_hold(item,self.manifest)
+        runtime._queue_update(item,lambda row:row.update(hold_deadline=0))
+        with patch.object(runtime,'_telegram_outcome') as cleanup:
+            runtime._queue_sweep();cleanup.assert_called_once()
+            self.assertEqual(cleanup.call_args.args[1],'hold_timeout')
+
+    def notifier_env(self):
+        # Synthetic transport values, assembled to avoid real identifiers.
+        return {'APPROVAL_TELEGRAM_BOT_TOKEN':str(1)+':SYNTHETIC',
+                'APPROVAL_TELEGRAM_CHAT_ID':str(1),
+                'APPROVAL_TELEGRAM_API_BASE':'https://example.invalid'}
+
+    def test_notifier_records_exact_returned_id_and_escapes_markdown(self):
+        response=MagicMock();response.__enter__.return_value.read.return_value=b'{"ok":true,"result":{"message_id":7}}'
+        message={'schema':'dotcortex.approval.notification.v1','request_sha':'a'*16,'queued':True}
+        with patch.dict(os.environ,self.notifier_env()),patch.object(notify.sys,'stdin',io.StringIO(json.dumps(message))),patch.object(notify.urllib.request,'urlopen',return_value=response) as send:
+            self.assertEqual(notify.main(),0)
+            body=json.loads(send.call_args.args[0].data)
+            self.assertEqual(body['parse_mode'],'MarkdownV2');self.assertIn('\\.',body['text'])
+        receipt=json.loads((self.home/'.local/state/dotcortex/approval-telegram-receipts.jsonl').read_text())
+        self.assertEqual((receipt['request_sha'],receipt['message_id']),('a'*16,7))
+        self.assertNotIn('SYNTHETIC',json.dumps(receipt))
+
+    def test_every_outcome_edits_exact_message_and_clears_inline_buttons(self):
+        receipts=self.home/'.local/state/dotcortex/approval-telegram-receipts.jsonl'
+        receipts.parent.mkdir(parents=True)
+        receipts.write_text(json.dumps({'request_sha':'a'*16,'message_id':7,'bot_key':hashlib.sha256((str(1)+':SYNTHETIC:'+str(1)).encode()).hexdigest()})+'\n')
+        for outcome in ('hold_timeout','away_flag','hold_unavailable','resolved'):
+            with self.subTest(outcome=outcome),patch.dict(os.environ,self.notifier_env()),patch.object(recall,'_call',return_value={'ok':True}) as call,patch.object(recall,'_log'):
+                self.assertTrue(recall.settle({'notification_sha':'a'*16},outcome))
+                args=call.call_args.args
+                self.assertEqual(args[2],'editMessageText')
+                self.assertEqual(args[3]['message_id'],7)
+                self.assertEqual(args[3]['reply_markup'],{'inline_keyboard':[]})
+                self.assertEqual(args[3]['parse_mode'],'MarkdownV2')
+
+    def test_cleanup_error_logs_fixed_reason_without_credentials(self):
+        with patch.dict(os.environ,self.notifier_env()),patch.object(recall,'_log') as log:
+            self.assertFalse(recall.settle({'notification_sha':'b'*16},'resolved'))
+            self.assertNotIn('SYNTHETIC',str(log.call_args))
+
+    def test_markdown_v2_escapes_every_reserved_character(self):
+        reserved='_*[]()~`>#+-=|{}.!\\'
+        self.assertEqual(recall.markdown_text(reserved),''.join('\\'+x for x in reserved))
+
+if __name__=='__main__':unittest.main()

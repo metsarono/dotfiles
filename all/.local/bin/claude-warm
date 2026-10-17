@@ -1493,13 +1493,7 @@ def _hold_timeout_seconds():
     if module is None:
         return default
     try:
-        import json as _json
-        path = pathlib.Path(os.environ.get("SO_APPROVAL_KIKIN_MANIFEST",
-            str(pathlib.Path.home() / ".config/dotcortex/claude-approval-canary.kikin.v1.local.json")))
-        section = {}
-        if path.is_file():
-            manifest = _json.loads(path.read_text())
-            section = manifest.get("unattended", {}) if isinstance(manifest, dict) else {}
+        section = _hold_runtime()._runtime_manifest().get('unattended', {})
         return module.hold_timeout_seconds(section)
     except Exception:
         return default
@@ -1687,6 +1681,20 @@ def _dialog_ledger_write(supervisor, action, dialog_id=None, identity=None, snip
         return False
 
 
+def _hold_runtime():
+    """Cached runtime; relaunch existing owners after deployment."""
+    runtime_path = (pathlib.Path(__file__).resolve().parent.parent
+                    / "lib/dotcortex/claude_approval_runtime.py")
+    import importlib.util
+    runtime = sys.modules.get("claude_approval_runtime")
+    if runtime is None:
+        spec = importlib.util.spec_from_file_location("claude_approval_runtime", runtime_path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        sys.modules["claude_approval_runtime"] = runtime
+    return runtime
+
+
 def _hold_queue_write(supervisor, profile, identity):
     """Preserve the full screen request in the real queue; log recording errors."""
     try:
@@ -1698,24 +1706,20 @@ def _hold_queue_write(supervisor, profile, identity):
                            "screen_text": visible, "session_id": supervisor.session_id},
             "screen_text_snippet": visible[:200], "prompt_identity": identity,
             "session_id": supervisor.session_id,
+            "transcript_path": str(supervisor.transcript_path) if getattr(supervisor,"transcript_path",None) else None,
+            "hold_started": getattr(supervisor,"hold_started_wall",None),
             # The Desk refuses a queue item without an absolute folder (2026-10-16:
             # one cwd-less hold item made the whole seat queue "invalid").
-            "cwd": os.getcwd(),
+            "cwd": _hold_runtime()._absolute_cwd({}),
         }
-        runtime_path = (pathlib.Path(__file__).resolve().parent.parent
-                        / "lib/dotcortex/claude_approval_runtime.py")
-        import importlib.util
-        runtime = sys.modules.get("claude_approval_runtime")
-        if runtime is None:
-            spec = importlib.util.spec_from_file_location("claude_approval_runtime", runtime_path)
-            runtime = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(runtime)
-            sys.modules["claude_approval_runtime"] = runtime
+        runtime = _hold_runtime()
         try:
             manifest = runtime._runtime_manifest()
         except (OSError, ValueError):
+            supervisor._guard_log("pty-hold-manifest-unavailable")
             manifest = {}
         item = runtime._queue_upsert(event, "hold_timeout", "hold_timeout", manifest)
+        runtime._queue_cleanup(item,"hold_timeout")
         ledger = pathlib.Path.home() / ".local/state/dotcortex/pty-hold-ledger.jsonl"
         ledger.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         record = {"ts": time.time(), "action": "hold_timeout_denied", "queue_id": item,
@@ -4498,7 +4502,8 @@ class Supervisor:
         if visible is not None and not self.mailcortex_input_dirty:
             if self.hold_timer is None:
                 self.hold_timer = _hold_module().PtyHoldTimer(timeout=_hold_timeout_seconds())
-            self.hold_timer.record(visible, profile, now=_hold_now())
+            if self.hold_timer.record(visible, profile, now=_hold_now()):
+                self.hold_started_wall = time.time()
         elif self.hold_timer is not None:
             self.hold_timer.clear()
 

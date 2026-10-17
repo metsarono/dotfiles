@@ -54,14 +54,16 @@ def defer(raw):
     return {'hookSpecificOutput':{'hookEventName':'PermissionRequest','decision':{'behavior':'deny','message':note+'; '+_runtime.DEFERRED_ACTION,'interrupt':False}}}
 
 
-def recall_prompt(raw, started):
+def recall_prompt(raw, started, outcome=None):
     # The plugin posts a Telegram prompt for every PermissionRequest at once;
     # retract it after an allow (agents-approval-telegram-recall.org).
     if not os.environ.get('TELEGRAM_STATE_DIR'):
         return
     helper = Path(__file__).resolve().parents[1] / 'lib/dotcortex/telegram_permission_recall.py'
     try:
-        child = subprocess.Popen(['/usr/bin/python3', str(helper), repr(started)], stdin=subprocess.PIPE,
+        argv=['/usr/bin/python3',str(helper),repr(started)]
+        if outcome:argv.append(outcome)
+        child = subprocess.Popen(argv, stdin=subprocess.PIPE,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, text=True)
         child.stdin.write(raw)
         child.stdin.close()
@@ -95,6 +97,8 @@ def main():
     if output is not None: print(json.dumps(output,ensure_ascii=True,separators=(',',':')), flush=True)
     if output is not None and output['hookSpecificOutput']['decision']['behavior'] == 'allow':
         recall_prompt(raw, started)
+    elif output is not None:
+        recall_prompt(raw,started,'denied')
     return 0
 
 

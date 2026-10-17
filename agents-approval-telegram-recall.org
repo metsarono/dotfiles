@@ -28,6 +28,7 @@ Usage: telegram_permission_recall.py <hook-start-epoch>   (hook event JSON on st
 See agents-approval-telegram-recall.org for the identification rules.
 """
 import json
+import hashlib
 import os
 import re
 import sys
@@ -173,8 +174,70 @@ def _call(base, token, method, payload):
         return {'ok': False, 'description': 'transport'}
 
 
+
+OUTCOMES = {
+    'hold_timeout': '⏱️ Denied on idle, queued for the Desk',
+    'timeout': '⏱️ Denied on idle, queued for the Desk',
+    'away_flag': '⏸️ Denied while away, queued for the Desk',
+    'unavailable': '⚠️ Delivery unavailable, queued for the Desk',
+    'hold_unavailable': '⚠️ Delivery unavailable, queued for the Desk',
+    'resolved': '✅ Resolved on the Desk',
+    'denied': '⏸️ Denied, queued for the Desk',
+    'human_denied': '⛔ Denied, queued for the Desk',
+}
+
+
+def markdown_text(text):
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])',r'\\\1',text)
+
+
+def edit_outcome(base, token, chat, message_id, outcome):
+    return _call(base,token,'editMessageText',{
+        'chat_id':chat,'message_id':message_id,
+        'text':markdown_text(OUTCOMES.get(outcome,OUTCOMES['denied'])),
+        'parse_mode':'MarkdownV2','reply_markup':{'inline_keyboard':[]}}).get('ok') is True
+
+
+def settle(item, outcome):
+    request=item.get('request',{})
+    session=item.get('session','')
+    state=os.environ.get('TELEGRAM_STATE_DIR')
+    token=os.environ.get('APPROVAL_TELEGRAM_BOT_TOKEN')
+    chat=os.environ.get('APPROVAL_TELEGRAM_CHAT_ID')
+    base=os.environ.get('APPROVAL_TELEGRAM_API_BASE')
+    if not (token and chat and base) and state:
+        token,chat=_token(Path(state)),_chat(Path(state))
+        base=os.environ.get('TELEGRAM_API_BASE','https://api.telegram.org')
+    if not token or not chat or not base:
+        _log(session=session,action='cleanup_failed',why='credentials_unavailable');return False
+    digest=item.get('notification_sha')
+    bot_key=hashlib.sha256((token+':'+chat).encode()).hexdigest()
+    ids=set()
+    receipts=Path.home()/'.local/state/dotcortex/approval-telegram-receipts.jsonl'
+    try:
+        for line in receipts.read_text().splitlines():
+            row=json.loads(line)
+            if digest and row.get('request_sha')==digest and row.get('bot_key')==bot_key and type(row.get('message_id')) is int:ids.add(row['message_id'])
+    except FileNotFoundError:pass
+    except (OSError,ValueError):
+        _log(session=session,action='cleanup_failed',why='receipts_unreadable');return False
+    ok=True
+    for message_id in ids:
+        edited=edit_outcome(base,token,chat,message_id,outcome);ok=ok and edited
+        _log(session=session,action='outcome_edited' if edited else 'cleanup_failed',message_id=message_id)
+    # Native plugin sends bypass approval-telegram-notify. Use the existing
+    # bounded recall lane only when the PTY captured the original hold window.
+    started=request.get('hold_started') or item.get('hold_started')
+    if state and isinstance(started,(int,float)) and request.get('transcript_path'):
+        native=sweep(request,started,state_dir=Path(state),base=base,outcome=outcome)
+        ok=bool(native) and ok
+    elif not ids:
+        _log(session=session,action='cleanup_failed',why='no_bound_message_or_hold_window');return False
+    return ok
+
+
 def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, sweep_seconds=SWEEP_SECONDS,
-          settle_seconds=SETTLE_SECONDS):
+          settle_seconds=SETTLE_SECONDS, outcome=None):
     """Return the deleted message id as a one-item list (empty when nothing qualifies)."""
     decided = now()  # the wrapper starts this right after the gate allowed
     session = event.get('session_id', '') if isinstance(event, dict) else ''
@@ -197,7 +260,7 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
         _log(session=session, action='skip', why='no_anchor')
         return []
     done, deleted, seen = set(), [], None
-    deadline = min(started + sweep_seconds, decided + settle_seconds)
+    deadline = decided + settle_seconds if outcome else min(started + sweep_seconds, decided + settle_seconds)
     while now() < deadline:
         for message_id in range(anchor + 1, anchor + 1 + PROBE_AHEAD):
             if message_id in done:
@@ -212,7 +275,7 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
             done.add(message_id)
             message = reply.get('result') if isinstance(reply.get('result'), dict) else {}
             text, date = message.get('text', ''), message.get('date')
-            in_window = isinstance(date, int) and int(started) - 1 <= date <= int(decided) + 1
+            in_window = isinstance(date, int) and int(started) - 1 <= date <= (int(started + SETTLE_SECONDS) + 1 if outcome else int(decided) + 1)
             if not (isinstance(text, str) and text.startswith(PREFIX) and in_window):
                 _log(session=session, action='anomaly', message_id=message_id, why='stripped_but_not_a_windowed_permission')
                 if isinstance(text, str) and text.startswith(PREFIX):
@@ -221,9 +284,11 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
                 seen = message_id if seen is None else max(seen, message_id)
                 continue
             seen = message_id if seen is None else max(seen, message_id)
-            if _call(base, token, 'deleteMessage', {'chat_id': chat, 'message_id': message_id}).get('ok'):
+            if (edit_outcome(base,token,chat,message_id,outcome) if outcome else
+                    _call(base,token,'deleteMessage',{'chat_id':chat,'message_id':message_id}).get('ok')):
                 deleted.append(message_id)
-                _log(session=session, action='deleted', message_id=message_id)
+                _log(session=session,action='outcome_edited' if outcome else 'deleted',message_id=message_id)
+            else:_log(session=session,action='cleanup_failed',message_id=message_id)
             deadline = 0  # one request, one prompt
             break
         sleep(0.5)
@@ -232,8 +297,13 @@ def sweep(event, started, *, state_dir, base, now=time.time, sleep=time.sleep, s
 
 
 def main(argv):
+    if len(argv)==2 and argv[1]=='--outcome':
+        try:
+            value=json.loads(sys.stdin.read(1024*1024));return 0 if settle(value['item'],value['outcome']) else 1
+        except (OSError,ValueError,KeyError,TypeError):
+            _log(action='cleanup_failed',why='invalid_outcome_request');return 1
     state = os.environ.get('TELEGRAM_STATE_DIR')
-    if not state or len(argv) != 2:
+    if not state or len(argv) not in (2,3):
         _log(action='skip', why='no_state_dir' if not state else 'bad_argv')
         return 0
     try:
@@ -243,7 +313,7 @@ def main(argv):
         _log(action='skip', why='bad_input')
         return 0
     base = os.environ.get('TELEGRAM_API_BASE', 'https://api.telegram.org').rstrip('/')
-    sweep(event, started, state_dir=Path(state), base=base)
+    sweep(event, started, state_dir=Path(state), base=base,outcome=argv[2] if len(argv)==3 else None)
     return 0
 
 

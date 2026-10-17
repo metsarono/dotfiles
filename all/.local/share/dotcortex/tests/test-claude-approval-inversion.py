@@ -275,8 +275,8 @@ class GateInversionTests(unittest.TestCase):
         env = {'APPROVAL_TELEGRAM_BOT_TOKEN': '123:SYNTHETIC_TOKEN', 'APPROVAL_TELEGRAM_CHAT_ID': '42',
                'APPROVAL_TELEGRAM_API_BASE': 'https://' + 'YOUR_TELEGRAM_API'.replace('YOUR_', 'fixture-').replace('_', '-').lower() + '.invalid'}
         response = mock.MagicMock()
-        response.__enter__.return_value.read.return_value = b'{"ok":true}'
-        with mock.patch.dict(os.environ, env), mock.patch.object(notifier.sys, 'stdin', io.StringIO(json.dumps(payload))), \
+        response.__enter__.return_value.read.return_value = b'{"ok":true,"result":{"message_id":7}}'
+        with mock.patch.dict(os.environ, {**env,'HOME':str(self.base)}), mock.patch.object(notifier.sys, 'stdin', io.StringIO(json.dumps(payload))), \
                 mock.patch.object(notifier.urllib.request, 'urlopen', return_value=response) as send:
             self.assertEqual(notifier.main(), 0)
             data = send.call_args.args[0].data.decode()
