@@ -2190,6 +2190,19 @@ def main():
     # own relay shows it); the PTY owner (claude-warm) owns the timeout and
     # answers deny into the queue after unattended.hold_timeout_minutes. When
     # away, the gate defers to the queue at once.
+    # Desk approval gate (Admiral ruling 7874, 2026-10-17): a refusal whose
+    # exact request the Admiral approved from the Desk (approve -> confirm ->
+    # claim) is honoured once, within the ruled window, before any ask or
+    # deferral. Hard-floor and other hard refusals never reach this path:
+    # _desk_approval_consume whitelists only the human-decidable grey zone.
+    if not allow:
+        try:
+            desk_item = _desk_approval_consume(event, manifest, reason)
+        except (OSError, ValueError, TypeError, TimeoutError):
+            desk_item = None
+        if desk_item is not None:
+            allow = True
+            _log_decision.extras.update(decision_path='desk_approval', queue_id=desk_item)
     if allow:
         if not away:
             try:
