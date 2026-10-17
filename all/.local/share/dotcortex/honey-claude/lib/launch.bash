@@ -39,14 +39,38 @@ honey_claude_launch() {
     local state_dir="$HOME/.claude/channels/telegram-$bot"
     local work_dir="${HONEY_CLAUDE_WORK_ROOT:-$HOME/honey-work}/$bot"
     local telegram=0 arg
-    local passthrough=()
+    local passthrough=() resume_id=""
 
-    for arg in "$@"; do
+    # Resume pass-through (2026-10-17, Mètsàtron's word: resume Bunta, never
+    # restart him): --resume <session-id> travels to claude-warm and on to the
+    # claude CLI. The id is validated and a malformed one is refused loudly —
+    # a relaunch that quietly started fresh would lose the live conversation.
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
         case "$arg" in
             --telegram) telegram=1 ;;
+            --resume)
+                if [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+                    printf '%s\n' "$name: refused: --resume needs a session id after it" >&2
+                    return 1
+                fi
+                resume_id="$2"
+                shift
+                ;;
+            --resume=*)
+                resume_id="${arg#--resume=}"
+                ;;
             *) passthrough+=("$arg") ;;
         esac
+        shift
     done
+    if [[ -n "$resume_id" ]]; then
+        if [[ ! "${resume_id,,}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            printf '%s\n' "$name: refused: --resume id '$resume_id' is not a session id (UUID)" >&2
+            return 1
+        fi
+        passthrough+=(--resume "$resume_id")
+    fi
 
     # The bot user's own npm prefix (claude, bun), agent Guix profile (node), stowed
     # bin, and the lane checkout's all/.local/bin (claude-warm and the fleet hooks;
