@@ -1,0 +1,32 @@
+{
+  "providers": {
+    "mistral": {
+      "baseUrl": "https://api.mistral.ai",
+      "api": "mistral-conversations",
+      "apiKey": "$MISTRAL_API_KEY",
+      "models": [
+        {
+          "id": "mistral-large-4",
+          "name": "Mistral Large 4",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 1048576
+        },
+        {
+          "id": "mistral-medium-3.5",
+          "name": "Mistral Medium 3.5",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 262144
+        },
+        {
+          "id": "devstral-latest",
+          "name": "Devstral (Studio alias; serves as mistral-medium-3-5)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 262144
+        }
+      ]
+    }
+  }
+}

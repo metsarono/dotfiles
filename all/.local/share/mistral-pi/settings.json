@@ -1,0 +1,4 @@
+{
+  "defaultProvider": "mistral",
+  "defaultModel": "mistral-large-4"
+}
