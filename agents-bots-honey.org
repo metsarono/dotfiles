@@ -641,6 +641,36 @@ if __name__ == "__main__":
     main()
 #+END_SRC
 
+=honey-claude-wakeup-guard= is the Honey seats' copy of the fleet's wakeup cache guard (HelmCortex userspace hook =wakeup-cache-guard=, 2026-10-18). A loop wakeup scheduled at or past the one-hour prompt-cache lifetime lands just after expiry and re-writes the seat's whole context to cache. Eleven such idle ticks burned half a weekly quota overnight on Kikin. The Honey seats do not load the HelmCortex userspace hooks, so the same rule rides here: any =ScheduleWakeup= over 3300 seconds is refused before it runs, and stop requests always pass.
+
+#+BEGIN_SRC python :tangle all/.local/share/dotcortex/honey-claude/bin/honey-claude-wakeup-guard :shebang "#!/usr/bin/env python3" :tangle-mode (identity #o755)
+"""PreToolUse guard: refuse ScheduleWakeup delays past the prompt-cache window (exit 2, reason on stderr)."""
+import json
+import sys
+
+LIMIT = 3300
+
+try:
+    tool_input = json.load(sys.stdin).get("tool_input") or {}
+except Exception:
+    sys.exit(0)
+if tool_input.get("stop") is True:
+    sys.exit(0)
+try:
+    delay = float(tool_input.get("delaySeconds", 0))
+except (TypeError, ValueError):
+    sys.exit(0)
+if delay > LIMIT:
+    sys.stderr.write(
+        f"WAKEUP CACHE GUARD: ScheduleWakeup blocked (delaySeconds={int(delay)} > {LIMIT}).\n"
+        "The prompt cache lives one hour; a wake at or just past it re-writes the whole\n"
+        "context to cache at full price. If nothing is actionable, STOP the loop\n"
+        "(ScheduleWakeup stop:true) and wake only on the Admiral's message or a worker's\n"
+        f"completion notice. If a wake is truly needed, keep it <= {LIMIT}s.\n")
+    sys.exit(2)
+sys.exit(0)
+#+END_SRC
+
 =promptSuggestionEnabled: false= keeps the prompt box truly empty between turns. Claude Code otherwise prints a dimmed suggested next message there, which the mail wake's screen check reads as typed input, so the seat reports busy forever and mail never wakes it (found 2026-10-12 on Bunta's first wake).
 
 #+BEGIN_SRC json :tangle all/.local/share/dotcortex/honey-claude/claude-settings.json
@@ -669,6 +699,8 @@ if __name__ == "__main__":
        "hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
     ],
     "PreToolUse": [
+      {"matcher": "ScheduleWakeup",
+       "hooks": [{"type": "command", "command": "honey-claude-wakeup-guard", "timeout": 5}]},
       {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
     ],
     "PostToolUse": [

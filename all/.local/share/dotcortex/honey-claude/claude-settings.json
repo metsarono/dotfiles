@@ -23,6 +23,8 @@
        "hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
     ],
     "PreToolUse": [
+      {"matcher": "ScheduleWakeup",
+       "hooks": [{"type": "command", "command": "honey-claude-wakeup-guard", "timeout": 5}]},
       {"hooks": [{"type": "command", "command": "claude-hook-idle-event", "timeout": 10}]}
     ],
     "PostToolUse": [

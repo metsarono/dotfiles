@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""PreToolUse guard: refuse ScheduleWakeup delays past the prompt-cache window (exit 2, reason on stderr)."""
+import json
+import sys
+
+LIMIT = 3300
+
+try:
+    tool_input = json.load(sys.stdin).get("tool_input") or {}
+except Exception:
+    sys.exit(0)
+if tool_input.get("stop") is True:
+    sys.exit(0)
+try:
+    delay = float(tool_input.get("delaySeconds", 0))
+except (TypeError, ValueError):
+    sys.exit(0)
+if delay > LIMIT:
+    sys.stderr.write(
+        f"WAKEUP CACHE GUARD: ScheduleWakeup blocked (delaySeconds={int(delay)} > {LIMIT}).\n"
+        "The prompt cache lives one hour; a wake at or just past it re-writes the whole\n"
+        "context to cache at full price. If nothing is actionable, STOP the loop\n"
+        "(ScheduleWakeup stop:true) and wake only on the Admiral's message or a worker's\n"
+        f"completion notice. If a wake is truly needed, keep it <= {LIMIT}s.\n")
+    sys.exit(2)
+sys.exit(0)
