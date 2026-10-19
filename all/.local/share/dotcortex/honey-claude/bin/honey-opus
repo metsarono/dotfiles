@@ -17,4 +17,4 @@ case "${1-}" in
       "              and on to claude). The canonical door is nurse-joy revive, from Kikin."
     exit 0 ;;
 esac
-honey_claude_launch opus "${HONEY_OPUS_MODEL:-claude-opus-5-5}" "$@"
+honey_claude_launch opus "${HONEY_OPUS_MODEL:-claude-opus-4-8[1m]}" "$@"

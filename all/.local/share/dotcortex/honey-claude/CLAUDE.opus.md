@@ -1,4 +1,4 @@
-# CLAUDE.md - Bunta (honey-opus, @honey_opus_bot, claude-opus-5-5)
+# CLAUDE.md - Bunta (honey-opus, @honey_opus_bot, claude-opus-4-8[1m])
 
 ## Identity
 

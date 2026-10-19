@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[5]
 SHARE = ROOT / "all/.local/share/dotcortex/honey-claude"
 BIN = SHARE / "bin"
 OPENRC = SHARE / "openrc"
-BOTS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-4-5-20251001"}
+BOTS = {"opus": "claude-opus-4-8[1m]", "sonnet": "claude-sonnet-5-5[1m]", "haiku": "claude-haiku-4-5-20251001"}
 PERSONAS = {"opus": "Bunta", "sonnet": "Sasuke", "haiku": "Shoukichi"}
 
 

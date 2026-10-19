@@ -179,13 +179,13 @@ alias glib-compile-schemas='hostenv glib-compile-schemas'
 # HelmCortex/FORGE/bin/claude-opus launcher (identity session in the
 # HelmCortex root, --telegram channel support); an alias shadows PATH in
 # interactive zsh and would strand --telegram at the claude CLI. The any-dir
-# shortcut lives on as cco (Opus 5.5, ruling 2026-09-24; no advisor —
-# nothing generally available sits above Opus 5.5).
-alias claude-sonnet='CLAUDE_WARM_HERDR_AGENT=Sonnet claude-warm --model claude-sonnet-5-5 --advisor claude-opus-5-5 --effort xhigh'
+# shortcut lives on as cco (Opus 4.8[1m]; Opus 5.5 taken off the menu
+# 2026-10-19, Telegram 8003, for unreliable reasoning; no advisor).
+alias claude-sonnet='CLAUDE_WARM_HERDR_AGENT=Sonnet claude-warm --model "claude-sonnet-5-5[1m]" --advisor claude-opus-4-8 --effort xhigh'
 alias cch='CLAUDE_WARM_HERDR_AGENT=Haiku claude-warm --model claude-haiku-4-5'
 alias ccs='claude-sonnet'
-alias cco='claude-warm --model claude-opus-5-5 --effort xhigh'
-alias cco46='claude-warm --model claude-opus-4-6 --advisor claude-opus-5-5 --effort xhigh'
+alias cco='claude-warm --model "claude-opus-4-8[1m]" --effort xhigh'
+alias cco46='claude-warm --model claude-opus-4-6 --advisor claude-opus-4-8 --effort xhigh'
 
 # Codex model shortcuts — PTY-supervised through codex-warm (idle-compaction
 # governor). Codex 0.147.0 has no native --yolo alias: the explicit dangerous
