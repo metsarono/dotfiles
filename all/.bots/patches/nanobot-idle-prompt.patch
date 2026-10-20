@@ -1,10 +1,37 @@
 --- a/nanobot/agent/loop.py
 +++ b/nanobot/agent/loop.py
-@@ -1388,7 +1388,66 @@
+@@ -250,10 +250,15 @@
+         return runtime
+
+     def dream_runtime(self) -> LLMRuntime | None:
+-        """Resolve the optional preset used for Dream without changing defaults."""
+-        if not self.dream_model_preset:
+-            return None
+-        return self.runtime_resolver.resolve_preset(self.dream_model_preset)
++        """Resolve Dream override or unified-session runtime without changing defaults."""
++        if self.dream_model_preset:
++            return self.runtime_resolver.resolve_preset(self.dream_model_preset)
++        if self._unified_session:
++            session = (self.sessions.get_cached(UNIFIED_SESSION_KEY)
++                       or self.sessions.read_session_snapshot(UNIFIED_SESSION_KEY))
++            if session is not None:
++                return self.runtime_for_session(session, recover_removed=False)
++        return None
+
+     _RUNTIME_CHECKPOINT_KEY = "runtime_checkpoint"
+     _PENDING_USER_TURN_KEY = "pending_user_turn"
+@@ -1388,7 +1393,73 @@
          """
          self._preserve_inflight_turns_on_shutdown = True
 
 -    async def _dispatch(self, msg: InboundMessage) -> None:
++    def idle_prompt_message(self, chat_id: str, content: str = "") -> InboundMessage:
++        """Bind a validated Telegram delivery to normal routing exactly once."""
++        msg = InboundMessage(
++            channel="telegram", sender_id="mailcortex", chat_id=chat_id, content=content,
++        )
++        return dataclasses.replace(msg, session_key_override=self._effective_session_key(msg))
++
 +    @staticmethod
 +    def _idle_prompt_lock_claimable(lock: asyncio.Lock) -> bool:
 +        """True only for asyncio's no-suspension uncontended acquire path."""
@@ -68,7 +95,7 @@
          """Process a message: per-session serial, cross-session concurrent."""
          session_key = self._effective_session_key(msg)
          if session_key != msg.session_key:
-@@ -1409,13 +1468,16 @@
+@@ -1409,13 +1480,16 @@
                      recovery_admission.unregister_recovery_task(session_key, current_task)
                  return
          lock = self._get_session_lock(session_key)
@@ -88,7 +115,7 @@
                  pending = asyncio.Queue(maxsize=20)
 --- a/nanobot/cli/gateway_runtime.py
 +++ b/nanobot/cli/gateway_runtime.py
-@@ -759,11 +759,70 @@
+@@ -759,10 +759,67 @@
          console.print("[yellow]✗[/yellow] Heartbeat: disabled")
 
      async def _health_server(host: str, health_port: int) -> None:
@@ -99,11 +126,9 @@
 +        import os as _os
 +        import re as _re
 +        import urllib.parse as _urlparse
-+
-+        from nanobot.bus.events import InboundMessage
 
          connection_slots = asyncio.Semaphore(_GATEWAY_HEALTH_MAX_CONNECTIONS)
-
++
 +        def admission_token() -> str | None:
 +            raw = _os.environ.get("NANOBOT_MAILCORTEX_TOKEN_FILE", "").strip()
 +            if not raw:
@@ -156,11 +181,10 @@
 +        def valid_session_key(value: object) -> bool:
 +            return (isinstance(value, str) and value.startswith("telegram:")
 +                    and 9 < len(value) <= 265)
-+
+
          async def handle(
              reader: asyncio.StreamReader,
-             writer: asyncio.StreamWriter,
-@@ -774,22 +833,67 @@
+@@ -774,22 +831,70 @@
 
              async with connection_slots:
                  try:
@@ -194,10 +218,14 @@
 +                    elif method == "GET" and path == "/mailcortex/idle-prompt/status":
 +                        query = _urlparse.parse_qs(parsed_path.query, strict_parsing=True)
 +                        session_key = query.get("session_key", [None])[-1]
-+                        busy = agent.idle_prompt_busy(session_key) if valid_session_key(session_key) else None
++                        message = (agent.idle_prompt_message(session_key[9:])
++                                   if valid_session_key(session_key) else None)
++                        effective_key = message.session_key if message is not None else None
++                        busy = agent.idle_prompt_busy(effective_key)
 +                        payload = {"protocol": "nanobot.idle_prompt.v1", "known": busy is not None,
 +                                   "busy": True if busy is None else busy,
-+                                   "session_key": session_key}
++                                   "session_key": session_key,
++                                   "effective_session_key": effective_key}
 +                        body, status = response_payload(
 +                            payload, "200 OK" if busy is not None else "503 Service Unavailable")
 +                        content_type = "application/json"
@@ -223,17 +251,16 @@
 +                                 and valid_session_key(session_key)
 +                                 and isinstance(value.get("text"), str)
 +                                 and 0 < len(value["text"].strip()) <= 16000)
++                        effective_key = None
 +                        if valid:
-+                            outcome = await agent.try_admit_idle_message(InboundMessage(
-+                                channel="telegram", sender_id="mailcortex",
-+                                chat_id=target["chat_id"], content=value["text"],
-+                                session_key_override=session_key,
-+                            ))
++                            message = agent.idle_prompt_message(target["chat_id"], value["text"])
++                            effective_key = message.session_key
++                            outcome = await agent.try_admit_idle_message(message)
 +                        else:
 +                            outcome = "invalid"
 +                        payload = {"protocol": "nanobot.idle_prompt.v1",
 +                                   "request_id": request_id, "session_key": session_key,
-+                                   "status": outcome}
++                                   "effective_session_key": effective_key, "status": outcome}
 +                        code = {"accepted": "202 Accepted", "busy": "409 Conflict",
 +                                "unavailable": "503 Service Unavailable",
 +                                "invalid": "400 Bad Request"}[outcome]
@@ -241,7 +268,7 @@
                          content_type = "application/json"
                      else:
                          body = "Not Found"
-@@ -805,7 +909,8 @@
+@@ -805,7 +910,8 @@
                      )
                      writer.write(resp.encode())
                      await writer.drain()
