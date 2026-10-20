@@ -749,14 +749,16 @@ def read_message(args: argparse.Namespace) -> int:
     maildir = require_maildir(args.address)
     state, path = locate_message(maildir, args.message)
     message = parse_message(path)
-    if state == "new":
-        seen_name = path.name if ":2," in path.name else path.name + ":2,S"
-        destination = maildir / "cur" / seen_name
+    key, _separator, flags = path.name.partition(":2,")
+    seen_name = key + ":2," + "".join(sorted(set(flags) | {"S"}))
+    destination = maildir / "cur" / seen_name
+    if path != destination:
         if destination.exists():
             raise MailCortexError(f"seen-message destination already exists: {seen_name}")
         os.replace(path, destination)
-        fsync_directory(maildir / "new")
-        fsync_directory(maildir / "cur")
+        fsync_directory(path.parent)
+        if path.parent != destination.parent:
+            fsync_directory(destination.parent)
 
     for header in ("Date", "From", "To", "Subject", "Message-ID", "In-Reply-To", "References",
                    "X-MailCortex-Permission"):
