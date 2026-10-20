@@ -413,6 +413,12 @@ awk -v desired="$desired" -v profile="$profile_name" \
 
   printf '\n[permissions.%s.filesystem]\n' "$profile_name"
   printf '%s = "write"\n' "$(toml_quote "$dotcortex_root/.codex")"
+  # MailCortex outbound lane: the Codex adapters (HelmAstra, HelmDuctor) deposit
+  # mail into recipient maildirs under ~/Mail/consorts (atomic tmp -> new), so
+  # grant that one subtree write -- never ~/Mail itself, never $HOME.  Sealed
+  # 2026-10-20 (Admiral): a coordinator that can build but cannot write its own
+  # MailCortex receipt is a broken membrane.
+  printf '%s = "write"\n' "$(toml_quote "$HOME/Mail/consorts")"
 } >"$tmp"
 
 if cmp -s "$tmp" "$config"; then
