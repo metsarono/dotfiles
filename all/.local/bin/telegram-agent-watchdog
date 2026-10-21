@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import datetime as dt
 import fcntl
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
 import socket
+import sqlite3
+import stat as statmod
 import subprocess
 import sys
 import tempfile
@@ -21,6 +26,8 @@ SOURCE = "agent_watchdog"
 SCHEMA = "helmcortex.notification.v1"
 STATE_SCHEMA = "dotcortex.telegram-agent-watchdog.v1"
 REQUEST_SCHEMA = "dotcortex.telegram-agent-revive-request.v1"
+RENEW_JOURNAL_SCHEMA = "codex.telegram.renew-watchdog.v1"
+PROC_ROOT = Path("/proc")
 
 # Agents whose supervisor exposes a pid file: the request records that
 # process's identity (pid and start-time) as the generation fence. Agents not
@@ -49,6 +56,11 @@ def state_home() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
 
 
+def default_codex_supervisor() -> str:
+    launcher = shutil.which("codex-helmastra")
+    return str(Path(launcher).resolve().parents[1] / "scripts/codex_supervisor.py") if launcher else ""
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="telegram-agent-watchdog",
@@ -61,6 +73,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--boot-lock", default=str(state_home() / "telegram-agent-boot/boot.lock"))
     parser.add_argument("--spool", default=str(state_home() / "helmcortex-notifications/spool"))
     parser.add_argument("--pid-dir", default=str(state_home() / "telegram-agents"))
+    parser.add_argument("--adapter-state-dir", default=str(Path.home() / ".local/state/codex-telegram-helmastra"),
+                        help="operator-owned Codex adapter state root; renewal never trusts a path from a request")
+    parser.add_argument("--codex-supervisor", default=default_codex_supervisor(),
+                        help="canonical codex_supervisor.py source path; defaults from the installed launcher")
     parser.add_argument("--revive-cooldown", type=int, default=600, help="seconds between self-revives of one agent")
     parser.add_argument("--request-timeout", type=int, default=900, help="drop a revive request whose requester never detaches")
     parser.add_argument("--max-attempts", type=int, default=3, help="relaunch attempts per down episode")
@@ -322,8 +338,8 @@ def make_event(host: str, agent: str, kind: str, severity: str, title: str, body
 
 def publish(event: dict, spool: Path, when: dt.datetime) -> None:
     token = uuid.uuid4().hex
-    # Nanoseconds after the second keep same-second events in emission order for a consumer that sorts by name.
-    name = "%s-%s-%09d-%s.json" % (SOURCE, when.astimezone(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"), time.time_ns() % 10**9, token)
+    # Full epoch nanoseconds preserve emission order across second boundaries.
+    name = "%s-%s-%019d-%s.json" % (SOURCE, when.astimezone(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"), time.time_ns(), token)
     atomic_write(spool / name, (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
 
 
@@ -366,6 +382,431 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def private_bytes(path: Path, maximum: int = 4 * 1024 * 1024) -> bytes:
+    """Read only a private, same-user regular file without following a link."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        status = os.fstat(fd)
+        if (not statmod.S_ISREG(status.st_mode) or status.st_uid != os.getuid()
+                or status.st_mode & 0o077 or status.st_size > maximum):
+            raise ValueError("renewal input must be an owner-only bounded regular file")
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            result = handle.read(maximum + 1)
+        if len(result) > maximum:
+            raise ValueError("renewal input exceeded its bound")
+        return result
+    finally:
+        os.close(fd)
+
+
+def private_json(path: Path) -> dict:
+    result = json.loads(private_bytes(path))
+    if not isinstance(result, dict):
+        raise ValueError("renewal input is not an object")
+    return result
+
+
+def process_identity(pid: int) -> tuple[str, int, list[bytes]]:
+    proc = PROC_ROOT / str(pid)
+    fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+    if proc.stat().st_uid != os.getuid() or fields[0] == "Z":
+        raise ValueError("process owner or liveness invalid")
+    return f"{pid}:{fields[19]}", int(fields[1]), (proc / "cmdline").read_bytes().split(b"\0")
+
+
+def codex_owner(args: argparse.Namespace, adapter_identity: str | None = None) -> dict | None:
+    """Inspect the exact managed parent and child, independently of receipts."""
+    pid_path = Path(args.pid_dir) / PID_FILES["codex"]
+    try:
+        pid = int(pid_path.read_text().strip())
+        identity, _, argv = process_identity(pid)
+    except FileNotFoundError:
+        return None
+    supervisor = str(Path(args.codex_supervisor).resolve()) if args.codex_supervisor else ""
+    if not supervisor or os.fsencode(supervisor) not in argv:
+        raise ValueError("canonical Codex supervisor ownership is unproved")
+    # Prior ready receipts supply an adapter identity; successor child-ready
+    # is independently written by the new adapter via the existing launcher.
+    if adapter_identity is None:
+        try:
+            child = int((Path(args.pid_dir) / "codex-helmastra-telegram.child.ready").read_text().strip())
+        except FileNotFoundError:
+            return {"generation": identity, "adapter": None, "uid": os.getuid()}
+    else:
+        if not re.fullmatch(r"[1-9][0-9]*:[0-9]+", str(adapter_identity)):
+            raise ValueError("invalid adapter identity")
+        child = int(adapter_identity.split(":", 1)[0])
+    try:
+        child_identity, parent, child_argv = process_identity(child)
+    except FileNotFoundError:
+        if adapter_identity is None:
+            return {"generation": identity, "adapter": None, "uid": os.getuid()}
+        raise
+    expected_adapter = str(Path(supervisor).with_name("codex_telegram.py"))
+    if (parent != pid or os.fsencode(expected_adapter) not in child_argv
+            or (adapter_identity is not None and child_identity != adapter_identity)
+            or process_identity(pid)[0] != identity or process_identity(child)[0] != child_identity
+            or pid_path.read_text().strip() != str(pid)):
+        raise ValueError("Codex adapter/supervisor generation does not match")
+    return {"generation": identity, "adapter": child_identity, "uid": os.getuid()}
+
+
+def require_old_generation_absent(request: dict) -> None:
+    """A missing pid marker is not evidence that the old process exited."""
+    pid = int(request["generation"].split(":", 1)[0])
+    try:
+        live, _, _ = process_identity(pid)
+    except FileNotFoundError:
+        return
+    if live == request["generation"]:
+        raise ValueError("original supervisor generation remains alive despite absent ownership marker")
+
+
+def validate_renew_request(request: dict) -> None:
+    if (request.get("schema") != REQUEST_SCHEMA or request.get("mode") != "renew"
+            or request.get("agent") != "codex"
+            or not re.fullmatch(r"[a-f0-9]{32}", str(request.get("id", "")))
+            or not re.fullmatch(r"[1-9][0-9]*:[0-9]+", str(request.get("generation", "")))
+            or not re.fullmatch(r"[1-9][0-9]*:[0-9]+", str(request.get("adapter", "")))
+            or request.get("uid") != os.getuid() or type(request.get("uid")) is not int
+            or type(request.get("task_id")) is not int or request["task_id"] <= 0
+            or not isinstance(request.get("old_thread_id"), str) or not request["old_thread_id"].strip()
+            or type(request.get("requested_at")) not in (int, float)
+            or not math.isfinite(request["requested_at"]) or request["requested_at"] < 0):
+        raise ValueError("malformed or unsupported renewal request")
+    if any(key in request for key in ("continuity_seed", "seed_sha256", "seed_kind")):
+        seed = request.get("continuity_seed")
+        if (request.get("seed_kind") != "operator-reviewed" or not isinstance(seed, str) or not seed.strip()
+                or len(seed.encode()) > 200 * 1024
+                or hashlib.sha256(seed.encode()).hexdigest() != request.get("seed_sha256")):
+            raise ValueError("reviewed continuity seed does not match its recorded hash")
+
+
+def renew_pin(args: argparse.Namespace, request: dict, ready: dict | None = None) -> dict:
+    """Bind the committed transaction to this exact request, never a nearby pin."""
+    sessions = private_json(Path(args.adapter_state_dir) / "sessions.json")
+    matches = [row for row in sessions.values() if isinstance(row, dict)
+               and isinstance(row.get("renewal"), dict)
+               and isinstance(row["renewal"].get("external_request"), dict)
+               and row["renewal"]["external_request"].get("id") == request["id"]]
+    if len(matches) != 1:
+        raise ValueError("committed renewal pin is missing or ambiguous")
+    row = matches[0]
+    receipt = row.get("renewal", {})
+    external = receipt.get("external_request", {})
+    bound = ("id", "agent", "mode", "generation", "adapter", "uid", "task_id", "old_thread_id",
+             "continuity_seed", "seed_sha256", "seed_kind")
+    if (any(external.get(key) != request.get(key) for key in bound)
+            or receipt.get("phase") != "committed"
+            or receipt.get("old_thread_id") != request["old_thread_id"]
+            or not row.get("thread_id") or row.get("thread_id") == request["old_thread_id"]
+            or row.get("thread_id") != receipt.get("candidate_thread_id")
+            or not re.fullmatch(r"[a-f0-9]{32}", str(receipt.get("id", "")))
+            or not isinstance(receipt.get("seed"), str)
+            or hashlib.sha256(receipt["seed"].encode()).hexdigest() != receipt.get("seed_sha256")):
+        raise ValueError("committed renewal provenance differs from request")
+    if ready is not None and (ready.get("transaction_id") != receipt["id"]
+            or ready.get("new_thread_id") != row["thread_id"]
+            or ready.get("seed_sha256") != receipt["seed_sha256"]):
+        raise ValueError("ready receipt differs from committed pin")
+    return {"new_thread_id": row["thread_id"], "transaction_id": receipt["id"],
+            "seed_sha256": receipt["seed_sha256"]}
+
+
+def renew_task_delivered(args: argparse.Namespace, task_id: int, request_id: str) -> None:
+    """Read the canonical ledger without recovering or mutating any row."""
+    database = Path(args.adapter_state_dir) / "tasks.sqlite3"
+    # Check file identity and private mode before SQLite opens it read-only.
+    fd = os.open(database, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        mode = os.fstat(fd)
+        if mode.st_uid != os.getuid() or mode.st_mode & 0o077 or not statmod.S_ISREG(mode.st_mode):
+            raise ValueError("renewal task ledger is not private")
+        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
+            row = connection.execute("SELECT chat_id, status, delivered FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            unsettled = connection.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running' OR "
+                "(status IN ('succeeded','failed','interrupted','cancelled') AND delivered = 0)").fetchone()[0]
+        if row is None or row[1:] != ("succeeded", 1) or unsettled:
+            raise ValueError("source task or another task is still active or undelivered")
+        sessions = private_json(Path(args.adapter_state_dir) / "sessions.json")
+        chats = [str(chat) for chat, value in sessions.items() if isinstance(value, dict)
+            and isinstance(value.get("renewal"), dict)
+            and isinstance(value["renewal"].get("external_request"), dict)
+            and value["renewal"]["external_request"].get("id") == request_id]
+        if chats != [str(row[0])]:
+            raise ValueError("source task belongs to another session chat")
+        after = database.stat()
+        if (after.st_dev, after.st_ino) != (mode.st_dev, mode.st_ino):
+            raise ValueError("renewal ledger identity changed")
+    finally:
+        os.close(fd)
+
+
+def renew_journal_write(path: Path, journal: dict) -> None:
+    """Durable ordering barrier before manager effects and release publication."""
+    atomic_write(path, (json.dumps(journal, sort_keys=True) + "\n").encode())
+    # Existing watchdog atomic_write is not a directory durability barrier.
+    for directory in (path.parent, path.parent.parent):
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def renew_refused_pin(args: argparse.Namespace, request: dict, failed: dict) -> None:
+    """A failure ack may close only an unchanged source, never a committed pin."""
+    if failed.get("old_thread_id") != request["old_thread_id"]:
+        raise ValueError("adapter failure acknowledges a different source")
+    sessions = private_json(Path(args.adapter_state_dir) / "sessions.json")
+    rows = [row for row in sessions.values() if isinstance(row, dict)]
+    if sum(row.get("thread_id") == request["old_thread_id"] for row in rows) != 1:
+        raise ValueError("adapter failure does not preserve the exact original pin")
+    if any(isinstance(row.get("renewal"), dict) and row["renewal"].get("phase") == "committed"
+            and isinstance(row["renewal"].get("external_request"), dict)
+            and row["renewal"]["external_request"].get("id") == request["id"] for row in rows):
+        raise ValueError("adapter failure conflicts with a committed pin; recovery required")
+
+
+def renew_cooldown(args: argparse.Namespace, completed_at: float | None = None) -> float:
+    path = Path(args.state_dir) / "renewal-cooldown.json"
+    value = private_json(path) if path.exists() else {}
+    prior = value.get("codex", 0)
+    if type(prior) not in (int, float) or not math.isfinite(prior):
+        raise ValueError("renewal cooldown record is invalid")
+    if completed_at is not None:
+        prior = max(prior, completed_at)
+        renew_journal_write(path, {"codex": prior})
+    return prior
+
+
+def renew_release_accepted(args: argparse.Namespace, request: dict, pin: dict, owner: dict) -> None:
+    ack = private_json(Path(args.adapter_state_dir) / "renew-released.json")
+    if (ack.get("schema") != "codex.telegram.renew-released.v1"
+            or ack.get("request_id") != request["id"] or ack.get("old_generation") != request["generation"]
+            or ack.get("new_thread_id") != pin["new_thread_id"] or ack.get("transaction_id") != pin["transaction_id"]
+            or ack.get("admission_holding") is not False or any(ack.get(k) != owner[k] for k in owner)
+            or owner["generation"] == request["generation"]):
+        raise ValueError("adapter release acknowledgement does not match current owner and transaction")
+    sessions = private_json(Path(args.adapter_state_dir) / "sessions.json")
+    matches = [row for row in sessions.values() if isinstance(row, dict)
+        and isinstance(row.get("renewal"), dict) and row["renewal"].get("id") == pin["transaction_id"]]
+    if len(matches) != 1 or not isinstance(matches[0]["renewal"].get("released_at"), (int, float)) or not matches[0]["renewal"]["released_at"] > 0:
+        raise ValueError("adapter has not durably accepted release")
+
+
+def process_renewal(args: argparse.Namespace, request: dict, path: Path,
+                    host: str, state: dict, when: dt.datetime, now: float) -> list[dict]:
+    """Adapter pause -> committed pin -> once-only external bounce -> release.
+
+    A stop-intent whose outcome is unknown is never replayed. A known failed
+    manager start is retried only while the old owner is absent, under bounded
+    pacing. Every unresolved committed state retains its queue file and records
+    actionable recovery, keeping the source/candidate provenance inspectable.
+    """
+    journal_path = Path(args.state_dir) / "renewals" / (str(request.get("id", "invalid")) + ".json")
+    adapter_root = Path(args.adapter_state_dir)
+    journal = None
+    def event(kind, reason, severity="critical"):
+        key = hashlib.sha256((kind + ":" + reason).encode()).hexdigest()
+        if journal is not None and journal.get("last_notice") == key:
+            return []
+        if journal is not None and not args.dry_run:
+            journal["last_notice"] = key
+            renew_journal_write(journal_path, journal)
+        message = make_event(host, "codex", kind, severity, "Codex renewal " + kind.removeprefix("renew_"),
+            reason, {"request": request["id"], "recovery": str(journal_path)}, when)
+        message["dedupe_key"] = "agent_watchdog:renew:%s:%s" % (request["id"], key)
+        return [message]
+    def save(phase, **fields):
+        journal.update(phase=phase, updated_at=now, **fields)
+        renew_journal_write(journal_path, journal)
+    try:
+        validate_renew_request(request)
+        journal = private_json(journal_path) if journal_path.exists() else {
+            "schema": RENEW_JOURNAL_SCHEMA, "request_id": request["id"], "phase": "waiting-ready"}
+        if journal.get("schema") != RENEW_JOURNAL_SCHEMA or journal.get("request_id") != request["id"]:
+            raise ValueError("renewal journal identity mismatch")
+        if journal.get("phase") == "released":
+            if not args.dry_run:
+                renew_cooldown(args, journal["updated_at"])
+                path.unlink(missing_ok=True)
+            return []
+        if journal.get("phase") == "refused":
+            failed = private_json(adapter_root / "renew-failed.json")
+            if failed != journal.get("failed_ack"):
+                raise ValueError("refused renewal acknowledgement changed during recovery")
+            renew_refused_pin(args, request, failed)
+            if not args.dry_run:
+                path.unlink(missing_ok=True)
+            return []
+        if journal.get("phase") == "recovery-required":
+            return event("renew_recovery_required", journal.get("reason", "inspect renewal journal and owner state; no automatic replay"))
+        failed_path = adapter_root / "renew-failed.json"
+        if journal["phase"] == "waiting-ready" and failed_path.exists():
+            failed = private_json(failed_path)
+            if failed.get("schema") == "codex.telegram.renew-failed.v1" and failed.get("request_id") == request["id"]:
+                renew_refused_pin(args, request, failed)
+                if not args.dry_run:
+                    save("refused", reason=str(failed.get("reason", "adapter refused")), failed_ack=failed)
+                    path.unlink(missing_ok=True)
+                return event("renew_rejected", "Adapter refused before pin transition: " + str(failed.get("reason")), "warning")
+        if journal["phase"] == "waiting-ready":
+            ready_path = adapter_root / "renew-ready.json"
+            if not ready_path.exists():
+                if now - request["requested_at"] <= args.request_timeout:
+                    return []
+                # The adapter may be between candidate RPC and atomic pin
+                # commit. Never consume a timeout without its explicit abort
+                # acknowledgement; a late safe commit must remain observable.
+                if not args.dry_run:
+                    save("waiting-ready", reason="adapter readiness timed out; inspect adapter outcome, do not clear a candidate or pin while its outcome is unknown")
+                return event("renew_pending", "Adapter readiness timed out; request retained for late ready or explicit precommit failure acknowledgement", "warning")
+            ready = private_json(ready_path)
+            if (ready.get("schema") != "codex.telegram.renew-ready.v1"
+                    or ready.get("request_id") != request["id"]
+                    or any(ready.get(k) != request[k] for k in ("generation", "uid", "task_id", "old_thread_id"))
+                    or ready.get("admission_holding") is not True or ready.get("quiescent") is not True):
+                raise ValueError("stale or mismatched adapter readiness")
+            pin = renew_pin(args, request, ready)
+            renew_task_delivered(args, request["task_id"], request["id"])
+            owner = codex_owner(args, ready.get("adapter"))
+            if owner != {key: ready[key] for key in ("generation", "adapter", "uid")}:
+                raise ValueError("source owner generation changed before restart")
+            last_revive = max(float(state.setdefault("revive", {}).get("codex", 0)), renew_cooldown(args))
+            if now - last_revive < args.revive_cooldown:
+                raise ValueError("Codex renewal is cooling down; keep admission held and retry after cooldown")
+            if args.dry_run:
+                return []
+            save("stop-intent", **pin, source_generation=owner["generation"], attempts=0)
+            if codex_owner(args, ready.get("adapter")) != owner or renew_pin(args, request, ready) != pin:
+                raise ValueError("source owner or committed pin changed before managed stop")
+            stopped = run_manager(args.manager, ["stop", "codex"], args.start_timeout)
+            if stopped.returncode != 0:
+                save("recovery-required", reason="manager stop failed; inspect exact old generation before explicit recovery, never repeat stop automatically")
+                return event("renew_recovery_required", journal["reason"])
+            save("stopped")
+        # From here, the journal proves the pin transition and exact candidate.
+        pin = renew_pin(args, request)
+        if any(journal.get(k) != pin[k] for k in pin):
+            raise ValueError("committed pin changed after bounce intent")
+        if journal["phase"] in {"release-intent", "release-issued"}:
+            # The adapter may already have accepted release and started a
+            # pending task. Do not require global quiescence after release.
+            owner = codex_owner(args)
+            if journal["phase"] == "release-intent":
+                if args.dry_run:
+                    return []
+                # Re-publishing the exact release is idempotent. This journal
+                # fence precedes file replacement so a crash after publication
+                # cannot return to a pre-release quiescence gate.
+                release = journal.get("release")
+                if not isinstance(release, dict) or release.get("request_id") != request["id"]:
+                    raise ValueError("release intent lost its exact payload")
+                renew_journal_write(adapter_root / "renew-release.json", release)
+                save("release-issued")
+            if owner is None or not owner.get("adapter") or not (adapter_root / "renew-released.json").exists():
+                if now - journal["updated_at"] > args.request_timeout:
+                    return event("renew_pending", "Release acknowledgement timed out; inspect successor release acceptance, no second bounce or automatic pin rollback", "warning")
+                return []
+            renew_release_accepted(args, request, pin, owner)
+            if args.dry_run:
+                return []
+            save("released", accepted_owner=owner)
+            renew_cooldown(args, now)
+            state.setdefault("revive", {})["codex"] = int(now)
+            path.unlink(missing_ok=True)
+            return event("renew_done", "Seeded pin and external bounce verified; successor durably accepted release", "notice")
+        renew_task_delivered(args, request["task_id"], request["id"])
+        if args.dry_run:
+            return []
+        phase = journal["phase"]
+        if phase == "stop-intent":
+            # Crash between durable intent and return from stop: never repeat
+            # stop/start merely because a receipt exists. Inspect generation.
+            owner = codex_owner(args)
+            if owner is not None and owner["generation"] == request["generation"]:
+                save("recovery-required", reason="watchdog interrupted at stop-intent with old supervisor alive; stop outcome unknown, explicit operator recovery required")
+                return event("renew_recovery_required", journal["reason"])
+            if owner is None:
+                save("stopped")
+                phase = "stopped"
+            else:
+                save("awaiting-resume")
+                phase = "awaiting-resume"
+        if phase in {"stopped", "start-retry"}:
+            owner = codex_owner(args)
+            if owner is not None:
+                if owner["generation"] == request["generation"]:
+                    raise ValueError("old supervisor still owns the adapter after managed stop")
+                save("awaiting-resume")
+            else:
+                try:
+                    require_old_generation_absent(request)
+                except (OSError, ValueError) as exc:
+                    save("recovery-required", reason=str(exc) + "; inspect exact old supervisor before explicit recovery, no start attempted")
+                    return event("renew_recovery_required", journal["reason"])
+                attempts = journal.get("attempts", 0)
+                if attempts >= args.max_attempts:
+                    save("recovery-required", reason="managed start attempt cap reached; inspect quota/wrapper readiness, keep committed pin and recover through manager")
+                    return event("renew_recovery_required", journal["reason"])
+                if now < journal.get("retry_at", 0):
+                    return []
+                save("start-intent", attempts=attempts + 1)
+                try:
+                    started = run_manager(args.manager, ["start", "codex"], args.start_timeout)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    save("recovery-required", reason="managed start outcome unknown (%s); inspect supervisor and resumed receipt before explicit retry" % type(exc).__name__)
+                    return event("renew_recovery_required", journal["reason"])
+                if started.returncode != 0:
+                    save("start-retry", retry_at=now + args.backoff * (2 ** attempts),
+                         reason="managed start refused or failed; waiting for wrapper/quota recovery, never clear pin or launch raw CLI")
+                    # Do not leave the operator-stop marker blocking manager
+                    # admission, but suppress the generic healer below while
+                    # this durable renewal queue owns the target.
+                    (Path(args.intent_dir) / "codex").unlink(missing_ok=True)
+                    return event("renew_pending", journal["reason"], "warning")
+                save("awaiting-resume")
+        elif phase == "start-intent":
+            # Unknown start outcome after a watchdog crash is observed only.
+            save("awaiting-resume")
+        owner = codex_owner(args)
+        resumed_path = adapter_root / "renew-resumed.json"
+        if owner is None or not owner.get("adapter") or not resumed_path.exists():
+            if now - journal["updated_at"] > args.request_timeout:
+                return event("renew_pending", "Successor readiness timed out; inspect manager/quota and renew-resumed receipt, no automatic second bounce", "warning")
+            return []
+        resumed = private_json(resumed_path)
+        if (owner["generation"] == request["generation"]
+                or resumed.get("schema") != "codex.telegram.renew-resumed.v1"
+                or resumed.get("request_id") != request["id"]
+                or resumed.get("old_generation") != request["generation"]
+                or resumed.get("new_thread_id") != pin["new_thread_id"]
+                or resumed.get("transaction_id") != pin["transaction_id"]
+                or resumed.get("admission_holding") is not True
+                or any(resumed.get(k) != owner[k] for k in owner)):
+            raise ValueError("successor resumed receipt does not match live owner and committed pin")
+        probe = run_manager(args.manager, ["status"], 60)
+        if classify("codex", probe.stdout) != "up":
+            return event("renew_pending", "Successor is still holding admission; manager has not confirmed readiness", "warning")
+        # Final read-only fences immediately precede durable release. The
+        # adapter remains paused throughout status polling and these rechecks.
+        if codex_owner(args) != owner or renew_pin(args, request) != pin:
+            raise ValueError("successor ownership or committed pin changed before release")
+        renew_task_delivered(args, request["task_id"], request["id"])
+        release = {"schema": "codex.telegram.renew-release.v1", "request_id": request["id"],
+            **owner, "old_generation": request["generation"], "new_thread_id": pin["new_thread_id"],
+            "transaction_id": pin["transaction_id"]}
+        save("release-intent", release=release)
+        renew_journal_write(adapter_root / "renew-release.json", release)
+        save("release-issued", release=release)
+        return event("renew_pending", "Successor verified; release issued and admission acknowledgement pending", "notice")
+    except (OSError, ValueError, KeyError, IndexError, TypeError, sqlite3.Error, subprocess.SubprocessError) as exc:
+        # Preserve the request and provenance. A malformed receipt never
+        # authorizes a restart and a committed adapter cannot be abandoned.
+        return event("renew_recovery_required", str(exc))
+
+
 def request_main(argv: list[str]) -> int:
     """Agent-side entry: ask the external watchdog to restart an agent, then return."""
     default_agent = os.environ.get("TELEGRAM_AGENT_SELF")
@@ -380,11 +821,22 @@ def request_main(argv: list[str]) -> int:
     parser.add_argument("--other", action="store_true", help="allow targeting an agent other than $TELEGRAM_AGENT_SELF")
     parser.add_argument("--requester-pid", type=int, default=os.getppid(),
                         help="process whose exit means the requesting turn has detached (default: parent)")
+    parser.add_argument("--renew", action="store_true", help="Codex only: request a seeded adapter renewal, then external managed bounce")
+    parser.add_argument("--adapter-state-dir", default=str(Path.home() / ".local/state/codex-telegram-helmastra"))
+    parser.add_argument("--codex-supervisor", default=default_codex_supervisor())
+    parser.add_argument("--seed-file", type=Path, help="optional private reviewed continuity seed; text is bound into the request")
+    parser.add_argument("--seed-sha256", help="required exact SHA256 when --seed-file is used")
     parser.add_argument("--state-dir", default=str(state_home() / "telegram-agent-watchdog"))
     parser.add_argument("--pid-dir", default=str(state_home() / "telegram-agents"))
     parser.add_argument("--warm-file", default=str(Path.home() / ".config/telegram-agent-watchdog/warm-sessions"))
     parser.add_argument("--nurse", default=shutil.which("nurse-joy") or str(Path.home() / ".local/hx/bin/nurse-joy"))
     args = parser.parse_args(argv)
+    if args.renew and args.agent != "codex":
+        print("telegram-agent-watchdog request: --renew is implemented only for managed Codex Telegram", file=sys.stderr)
+        return 2
+    if not args.renew and (args.seed_file or args.seed_sha256):
+        print("telegram-agent-watchdog request: seed options require --renew", file=sys.stderr)
+        return 2
     warm_target = bool(args.agent and args.agent.startswith(WARM_PREFIX))
     warm_name = args.agent[len(WARM_PREFIX):] if warm_target else ""
     warm_names = read_warm_sessions(Path(args.warm_file)) if warm_target else []
@@ -409,6 +861,14 @@ def request_main(argv: list[str]) -> int:
     canonical_agent = WARM_PREFIX + warm_name.lower() if warm_target else args.agent
     path = Path(args.state_dir) / "requests" / ("%s.json" % canonical_agent)
     if path.exists():
+        if args.renew:
+            try:
+                previous = private_json(path)
+                if previous.get("mode") != "renew":
+                    raise ValueError("a revive request is already pending; renewal was not queued")
+            except (OSError, ValueError) as exc:
+                print("telegram-agent-watchdog request: " + str(exc), file=sys.stderr)
+                return 2
         print("telegram-agent-watchdog request: revive of %s already pending" % args.agent)
         return 0
     generation = generation_of(args.agent, Path(args.pid_dir)) if not warm_target else None
@@ -428,10 +888,32 @@ def request_main(argv: list[str]) -> int:
         "self_requested": is_self,
         "requested_at": int(time.time()),
     }
+    if args.renew:
+        try:
+            origin = private_json(Path(args.adapter_state_dir) / "renew-origin.json")
+            owner = codex_owner(args, origin.get("adapter"))
+            if (origin.get("schema") != "codex.telegram.renew-origin.v1"
+                    or owner is None or any(origin.get(k) != owner[k] for k in owner)):
+                raise ValueError("adapter origin does not match its managed supervisor")
+            body.update(mode="renew", **{key: origin[key] for key in
+                ("generation", "adapter", "uid", "task_id", "old_thread_id")})
+            if args.seed_file is not None:
+                seed = private_bytes(args.seed_file, 200 * 1024).decode("utf-8")
+                digest = hashlib.sha256(seed.encode()).hexdigest()
+                if digest != args.seed_sha256 or not seed.strip():
+                    raise ValueError("reviewed seed hash does not match --seed-sha256")
+                body.update(continuity_seed=seed, seed_sha256=digest, seed_kind="operator-reviewed")
+            elif args.seed_sha256:
+                raise ValueError("--seed-sha256 requires --seed-file")
+            validate_renew_request(body)
+        except (OSError, ValueError, KeyError, TypeError, IndexError, UnicodeError) as exc:
+            print("telegram-agent-watchdog request: renewal refused: " + str(exc), file=sys.stderr)
+            return 2
     if warm_target:
         body["resume_session"] = resume_session
     atomic_write(path, (json.dumps(body, sort_keys=True) + "\n").encode("utf-8"))
-    print("telegram-agent-watchdog request: revive of %s queued; the watchdog restarts it after this turn detaches" % args.agent)
+    print(("telegram-agent-watchdog request: renewal queued; adapter quiescence, seeded pin and successor release are required"
+           if args.renew else "telegram-agent-watchdog request: revive of %s queued; the watchdog restarts it after this turn detaches" % args.agent))
     return 0
 
 
@@ -451,6 +933,10 @@ def process_requests(args: argparse.Namespace, host: str, state: dict, when: dt.
             path.unlink(missing_ok=True)
             events.append(make_event(host, "*", "revive_rejected", "warning", "Malformed revive request dropped",
                                      "A revive request in the watchdog queue was unreadable and was dropped", {}, when))
+            continue
+        if request.get("mode") == "renew":
+            # Requester-shell exit does not prove handler or delivery cleanup.
+            events.extend(process_renewal(args, request, path, host, state, when, now))
             continue
         requester = int(request.get("requester_pid") or 0)
         age = now - float(request.get("requested_at", now))
@@ -619,6 +1105,20 @@ def main(argv: list[str]) -> int:
     supervised = {agent for agent, _, _ in targets}
 
     for agent, verdict, start_cmd in targets:
+        if agent == "codex":
+            # The durable renewal state machine exclusively owns stop/start
+            # while pending. Generic liveness repair must not race its pause,
+            # quota admission, uncertain effects or successor-release checks.
+            try:
+                queued = private_json(state_dir / "requests/codex.json")
+            except FileNotFoundError:
+                queued = {}
+            except (OSError, ValueError):
+                outcomes[agent] = "renewal-request-unreadable"
+                continue
+            if queued.get("mode") == "renew":
+                outcomes[agent] = "renewal-pending"
+                continue
         entry = agents_state.setdefault(agent, {})
         marker = Path(args.intent_dir) / agent
         if verdict == "up":
@@ -678,7 +1178,7 @@ def main(argv: list[str]) -> int:
             except OSError as exc:
                 print("telegram-agent-watchdog: spool write failed: %s" % type(exc).__name__, file=sys.stderr)
         atomic_write(state_path, (json.dumps({"schema": STATE_SCHEMA, "agents": agents_state_out, "revive": state.get("revive", {})}, sort_keys=True) + "\n").encode("utf-8"))
-        request_receipts = [dict(e["payload"], result=e["kind"]) for e in events if e["kind"].startswith("revive_")]
+        request_receipts = [dict(e["payload"], result=e["kind"]) for e in events if e["kind"].startswith(("revive_", "renew_"))]
         atomic_write(state_dir / "receipt.json", (json.dumps({"schema": STATE_SCHEMA, "host": host, "timestamp": int(now), "outcomes": outcomes, "events": [e["kind"] + ":" + e["payload"]["agent"] for e in events], "request_receipts": request_receipts}, sort_keys=True) + "\n").encode("utf-8"))
     for name, outcome in sorted(outcomes.items()):
         print("telegram-agent-watchdog: %s=%s" % (name, outcome))
