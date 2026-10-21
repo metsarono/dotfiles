@@ -56,11 +56,6 @@ def state_home() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
 
 
-def default_codex_supervisor() -> str:
-    launcher = shutil.which("codex-helmastra")
-    return str(Path(launcher).resolve().parents[1] / "scripts/codex_supervisor.py") if launcher else ""
-
-
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="telegram-agent-watchdog",
@@ -75,8 +70,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--pid-dir", default=str(state_home() / "telegram-agents"))
     parser.add_argument("--adapter-state-dir", default=str(Path.home() / ".local/state/codex-telegram-helmastra"),
                         help="operator-owned Codex adapter state root; renewal never trusts a path from a request")
-    parser.add_argument("--codex-supervisor", default=default_codex_supervisor(),
-                        help="canonical codex_supervisor.py source path; defaults from the installed launcher")
+    parser.add_argument("--codex-supervisor",
+                        help="optional exact codex_supervisor.py source path to check against the live managed process")
     parser.add_argument("--revive-cooldown", type=int, default=600, help="seconds between self-revives of one agent")
     parser.add_argument("--request-timeout", type=int, default=900, help="drop a revive request whose requester never detaches")
     parser.add_argument("--max-attempts", type=int, default=3, help="relaunch attempts per down episode")
@@ -422,9 +417,15 @@ def codex_owner(args: argparse.Namespace, adapter_identity: str | None = None) -
         identity, _, argv = process_identity(pid)
     except FileNotFoundError:
         return None
-    supervisor = str(Path(args.codex_supervisor).resolve()) if args.codex_supervisor else ""
-    if not supervisor or os.fsencode(supervisor) not in argv:
+    live_scripts = [os.fsdecode(arg) for arg in argv
+                    if Path(os.fsdecode(arg)).name == "codex_supervisor.py"]
+    if len(live_scripts) != 1 or not Path(live_scripts[0]).is_absolute():
         raise ValueError("canonical Codex supervisor ownership is unproved")
+    supervisor = str(Path(live_scripts[0]).resolve())
+    if not Path(supervisor).is_file():
+        raise ValueError("canonical Codex supervisor source is unavailable")
+    if args.codex_supervisor and str(Path(args.codex_supervisor).resolve()) != supervisor:
+        raise ValueError("configured Codex supervisor does not match the live managed process")
     # Prior ready receipts supply an adapter identity; successor child-ready
     # is independently written by the new adapter via the existing launcher.
     if adapter_identity is None:
@@ -823,7 +824,8 @@ def request_main(argv: list[str]) -> int:
                         help="process whose exit means the requesting turn has detached (default: parent)")
     parser.add_argument("--renew", action="store_true", help="Codex only: request a seeded adapter renewal, then external managed bounce")
     parser.add_argument("--adapter-state-dir", default=str(Path.home() / ".local/state/codex-telegram-helmastra"))
-    parser.add_argument("--codex-supervisor", default=default_codex_supervisor())
+    parser.add_argument("--codex-supervisor",
+                        help="optional exact codex_supervisor.py source path to check against the live managed process")
     parser.add_argument("--seed-file", type=Path, help="optional private reviewed continuity seed; text is bound into the request")
     parser.add_argument("--seed-sha256", help="required exact SHA256 when --seed-file is used")
     parser.add_argument("--state-dir", default=str(state_home() / "telegram-agent-watchdog"))

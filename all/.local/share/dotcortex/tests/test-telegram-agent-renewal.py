@@ -32,15 +32,21 @@ class OwnerProofTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.args = argparse.Namespace(pid_dir=str(self.root/"pids"), codex_supervisor="/fixture/FORGE/scripts/codex_supervisor.py")
+        scripts = self.root/"fixture/FORGE/scripts"
+        scripts.mkdir(parents=True)
+        self.supervisor = str(scripts/"codex_supervisor.py")
+        self.adapter = str(scripts/"codex_telegram.py")
+        self.args = argparse.Namespace(pid_dir=str(self.root/"pids"), codex_supervisor=self.supervisor)
         Path(self.args.pid_dir).mkdir()
+        Path(self.supervisor).write_text("fixture supervisor\n")
+        Path(self.adapter).write_text("fixture adapter\n")
         (Path(self.args.pid_dir)/"codex-helmastra-telegram.pid").write_text("10")
         (Path(self.args.pid_dir)/"codex-helmastra-telegram.child.ready").write_text("11")
         patcher = patch.object(w, "PROC_ROOT", self.root/"proc")
         patcher.start()
         self.addCleanup(patcher.stop)
         self.proc(10, 1, 100, self.args.codex_supervisor)
-        self.proc(11, 10, 110, "/fixture/FORGE/scripts/codex_telegram.py")
+        self.proc(11, 10, 110, self.adapter)
 
     def proc(self, pid, parent, start, script):
         root = w.PROC_ROOT/str(pid)
@@ -53,18 +59,28 @@ class OwnerProofTests(unittest.TestCase):
         self.assertEqual(w.codex_owner(self.args, "11:110"),
             {"generation":"10:100", "adapter":"11:110", "uid":os.getuid()})
 
+    def test_live_supervisor_source_is_resolved_without_launcher_path_guessing(self):
+        self.args.codex_supervisor = None
+        self.assertEqual(w.codex_owner(self.args, "11:110"),
+            {"generation":"10:100", "adapter":"11:110", "uid":os.getuid()})
+
+    def test_configured_supervisor_must_match_live_process(self):
+        self.args.codex_supervisor = "/elsewhere/codex_supervisor.py"
+        with self.assertRaises(ValueError):
+            w.codex_owner(self.args, "11:110")
+
     def test_inherited_env_label_does_not_prove_wrapper(self):
         self.proc(10, 1, 100, "/arbitrary/codex_supervisor.py")
         with patch.dict(os.environ, {"TELEGRAM_AGENT_SELF":"codex"}), self.assertRaises(ValueError):
             w.codex_owner(self.args, "11:110")
 
     def test_child_of_different_parent_refused(self):
-        self.proc(11, 99, 110, "/fixture/FORGE/scripts/codex_telegram.py")
+        self.proc(11, 99, 110, self.adapter)
         with self.assertRaises(ValueError):
             w.codex_owner(self.args, "11:110")
 
     def test_reused_adapter_pid_with_different_start_refused(self):
-        self.proc(11, 10, 999, "/fixture/FORGE/scripts/codex_telegram.py")
+        self.proc(11, 10, 999, self.adapter)
         with self.assertRaises(ValueError):
             w.codex_owner(self.args, "11:110")
 

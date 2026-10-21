@@ -33,7 +33,7 @@ The watchdog waits until the requester's pid (default: the parent shell of the r
 
 =request codex --renew= is a separate, Codex-only transaction. The calling turn queues a request bound to the private adapter =renew-origin.json= receipt, its exact supervisor and child kernel start times, the source thread and original task. An optional =--seed-file= must be a private regular UTF-8 file no larger than 200 KiB, accompanied by its exact =--seed-sha256=; its text and digest are copied into the private request as an explicit reviewed continuity seed. This flag does not verify the semantic adequacy of the seed. Other harnesses refuse =--renew=.
 
-Both the request command and cron watchdog take an operator-owned =--adapter-state-dir=; a request cannot choose a filesystem destination for receipts. =--codex-supervisor= names the canonical source script and otherwise resolves from the installed launcher. The adapter first holds dequeue, finishes the original task and Telegram delivery, cancels and joins idle compaction, archives source continuity, seeds and verifies a distinct thread, and commits the pin. The watchdog requires its =renew-ready.json= receipt, the exact committed transaction and seed hash, the canonical ledger's successful delivered task and no running or undelivered work, plus actual parent/child process ancestry and uid. A requester's shell exiting supplies none of that evidence.
+Both the request command and cron watchdog take an operator-owned =--adapter-state-dir=; a request cannot choose a filesystem destination for receipts. The live Codex supervisor path is read from the exact process named by the managed pid file and checked against its adapter child; an optional =--codex-supervisor= pins an additional exact path. The watchdog does not infer HelmCortex source paths from a DotCortex launcher symlink. The adapter first holds dequeue, finishes the original task and Telegram delivery, cancels and joins idle compaction, archives source continuity, seeds and verifies a distinct thread, and commits the pin. The watchdog requires its =renew-ready.json= receipt, the exact committed transaction and seed hash, the canonical ledger's successful delivered task and no running or undelivered work, plus actual parent/child process ancestry and uid. A requester's shell exiting supplies none of that evidence.
 
 Only then does the watchdog use =telegram-agent-host stop codex= and =start codex=, preserving the launcher's fleet-managed quota admission and permissions profile. It never invokes a raw CLI or clears a thread pin. Each request has a durable =renewals/<request-id>.json= journal. File, containing directory and parent directory syncs precede effects; unknown stop/start outcomes require inspection instead of another bounce. A known failed start retries only while the original process generation is independently absent, under the existing attempt cap and backoff. A missing pid marker alone never proves absence. The generic healer stands down while renewal owns the queued target.
 
@@ -101,11 +101,6 @@ def state_home() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
 
 
-def default_codex_supervisor() -> str:
-    launcher = shutil.which("codex-helmastra")
-    return str(Path(launcher).resolve().parents[1] / "scripts/codex_supervisor.py") if launcher else ""
-
-
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="telegram-agent-watchdog",
@@ -120,8 +115,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--pid-dir", default=str(state_home() / "telegram-agents"))
     parser.add_argument("--adapter-state-dir", default=str(Path.home() / ".local/state/codex-telegram-helmastra"),
                         help="operator-owned Codex adapter state root; renewal never trusts a path from a request")
-    parser.add_argument("--codex-supervisor", default=default_codex_supervisor(),
-                        help="canonical codex_supervisor.py source path; defaults from the installed launcher")
+    parser.add_argument("--codex-supervisor",
+                        help="optional exact codex_supervisor.py source path to check against the live managed process")
     parser.add_argument("--revive-cooldown", type=int, default=600, help="seconds between self-revives of one agent")
     parser.add_argument("--request-timeout", type=int, default=900, help="drop a revive request whose requester never detaches")
     parser.add_argument("--max-attempts", type=int, default=3, help="relaunch attempts per down episode")
@@ -467,9 +462,15 @@ def codex_owner(args: argparse.Namespace, adapter_identity: str | None = None) -
         identity, _, argv = process_identity(pid)
     except FileNotFoundError:
         return None
-    supervisor = str(Path(args.codex_supervisor).resolve()) if args.codex_supervisor else ""
-    if not supervisor or os.fsencode(supervisor) not in argv:
+    live_scripts = [os.fsdecode(arg) for arg in argv
+                    if Path(os.fsdecode(arg)).name == "codex_supervisor.py"]
+    if len(live_scripts) != 1 or not Path(live_scripts[0]).is_absolute():
         raise ValueError("canonical Codex supervisor ownership is unproved")
+    supervisor = str(Path(live_scripts[0]).resolve())
+    if not Path(supervisor).is_file():
+        raise ValueError("canonical Codex supervisor source is unavailable")
+    if args.codex_supervisor and str(Path(args.codex_supervisor).resolve()) != supervisor:
+        raise ValueError("configured Codex supervisor does not match the live managed process")
     # Prior ready receipts supply an adapter identity; successor child-ready
     # is independently written by the new adapter via the existing launcher.
     if adapter_identity is None:
@@ -868,7 +869,8 @@ def request_main(argv: list[str]) -> int:
                         help="process whose exit means the requesting turn has detached (default: parent)")
     parser.add_argument("--renew", action="store_true", help="Codex only: request a seeded adapter renewal, then external managed bounce")
     parser.add_argument("--adapter-state-dir", default=str(Path.home() / ".local/state/codex-telegram-helmastra"))
-    parser.add_argument("--codex-supervisor", default=default_codex_supervisor())
+    parser.add_argument("--codex-supervisor",
+                        help="optional exact codex_supervisor.py source path to check against the live managed process")
     parser.add_argument("--seed-file", type=Path, help="optional private reviewed continuity seed; text is bound into the request")
     parser.add_argument("--seed-sha256", help="required exact SHA256 when --seed-file is used")
     parser.add_argument("--state-dir", default=str(state_home() / "telegram-agent-watchdog"))
@@ -1274,15 +1276,21 @@ class OwnerProofTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.args = argparse.Namespace(pid_dir=str(self.root/"pids"), codex_supervisor="/fixture/FORGE/scripts/codex_supervisor.py")
+        scripts = self.root/"fixture/FORGE/scripts"
+        scripts.mkdir(parents=True)
+        self.supervisor = str(scripts/"codex_supervisor.py")
+        self.adapter = str(scripts/"codex_telegram.py")
+        self.args = argparse.Namespace(pid_dir=str(self.root/"pids"), codex_supervisor=self.supervisor)
         Path(self.args.pid_dir).mkdir()
+        Path(self.supervisor).write_text("fixture supervisor\n")
+        Path(self.adapter).write_text("fixture adapter\n")
         (Path(self.args.pid_dir)/"codex-helmastra-telegram.pid").write_text("10")
         (Path(self.args.pid_dir)/"codex-helmastra-telegram.child.ready").write_text("11")
         patcher = patch.object(w, "PROC_ROOT", self.root/"proc")
         patcher.start()
         self.addCleanup(patcher.stop)
         self.proc(10, 1, 100, self.args.codex_supervisor)
-        self.proc(11, 10, 110, "/fixture/FORGE/scripts/codex_telegram.py")
+        self.proc(11, 10, 110, self.adapter)
 
     def proc(self, pid, parent, start, script):
         root = w.PROC_ROOT/str(pid)
@@ -1295,18 +1303,28 @@ class OwnerProofTests(unittest.TestCase):
         self.assertEqual(w.codex_owner(self.args, "11:110"),
             {"generation":"10:100", "adapter":"11:110", "uid":os.getuid()})
 
+    def test_live_supervisor_source_is_resolved_without_launcher_path_guessing(self):
+        self.args.codex_supervisor = None
+        self.assertEqual(w.codex_owner(self.args, "11:110"),
+            {"generation":"10:100", "adapter":"11:110", "uid":os.getuid()})
+
+    def test_configured_supervisor_must_match_live_process(self):
+        self.args.codex_supervisor = "/elsewhere/codex_supervisor.py"
+        with self.assertRaises(ValueError):
+            w.codex_owner(self.args, "11:110")
+
     def test_inherited_env_label_does_not_prove_wrapper(self):
         self.proc(10, 1, 100, "/arbitrary/codex_supervisor.py")
         with patch.dict(os.environ, {"TELEGRAM_AGENT_SELF":"codex"}), self.assertRaises(ValueError):
             w.codex_owner(self.args, "11:110")
 
     def test_child_of_different_parent_refused(self):
-        self.proc(11, 99, 110, "/fixture/FORGE/scripts/codex_telegram.py")
+        self.proc(11, 99, 110, self.adapter)
         with self.assertRaises(ValueError):
             w.codex_owner(self.args, "11:110")
 
     def test_reused_adapter_pid_with_different_start_refused(self):
-        self.proc(11, 10, 999, "/fixture/FORGE/scripts/codex_telegram.py")
+        self.proc(11, 10, 999, self.adapter)
         with self.assertRaises(ValueError):
             w.codex_owner(self.args, "11:110")
 
