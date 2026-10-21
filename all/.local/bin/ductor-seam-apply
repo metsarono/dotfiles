@@ -61,6 +61,12 @@ if [ -n "$SITE_OVERRIDE" ]; then
 else
     launcher="$(command -v ductor)" || fail "ductor launcher not on PATH"
     PYTHON_BIN="$(head -n1 "$launcher" | sed -n 's/^#!\s*//p' | awk '{print $1}')"
+    # The launcher may be a `#!/usr/bin/env bash` wrapper, yielding env/bash
+    # rather than a python; fall back to a real python3 in that case.
+    case "${PYTHON_BIN##*/}" in
+        python*) : ;;
+        *) PYTHON_BIN="$(command -v python3)" || fail "python3 not found on PATH" ;;
+    esac
     [ -x "$PYTHON_BIN" ] || fail "cannot read the interpreter from $launcher"
     SITE="$(cd /tmp && "$PYTHON_BIN" -c 'import ductor_bot, os; print(os.path.dirname(os.path.dirname(ductor_bot.__file__)))')" \
         || fail "ductor_bot not importable by $PYTHON_BIN"
