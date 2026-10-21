@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Hermes command-provider adapter for the persistent local whisper.cpp model.
+# This lives outside Hermes' install tree; model weights live outside ~/.cache.
+set -euo pipefail
+
+readonly MODEL_PATH=@@MODEL_PATH@@
+readonly WHISPER_CLI=@@WHISPER_CLI@@
+
+if [[ $# -ne 4 ]]; then
+  echo "usage: hermes-stt-whispercpp INPUT OUTPUT.txt MODEL LANGUAGE" >&2
+  exit 2
+fi
+input_path=$1
+output_path=$2
+model_tier=$3
+language=$4
+
+[[ -f "$input_path" && -r "$input_path" ]] || { echo "STT input is missing or unreadable" >&2; exit 2; }
+[[ "$model_tier" == "small" ]] || { echo "only the pinned small local model is installed" >&2; exit 2; }
+[[ -s "$MODEL_PATH" ]] || { echo "persistent Whisper model is missing: $MODEL_PATH" >&2; exit 2; }
+[[ -x "$WHISPER_CLI" ]] || { echo "whisper.cpp is unavailable: $WHISPER_CLI" >&2; exit 127; }
+
+case "$output_path" in
+  *.txt) output_base=${output_path%.txt} ;;
+  *) output_base=$output_path; output_path="${output_path}.txt" ;;
+esac
+[[ ! -e "$output_path" ]] || { echo "refusing to overwrite existing STT output" >&2; exit 2; }
+mkdir -p "$(dirname "$output_path")"
+
+# Hermes' command-provider child environment may omit Guix profile data paths.
+# Preserve system Vulkan ICDs and append profile ICD paths when available.
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+profile_shares=()
+for share in "${HOME}"/.guix-extra-profiles/*/*/share; do
+  [[ -d "$share/vulkan/icd.d" ]] && profile_shares+=("$share")
+done
+if ((${#profile_shares[@]})); then
+  joined=$(IFS=:; printf '%s' "${profile_shares[*]}")
+  export XDG_DATA_DIRS="${XDG_DATA_DIRS}:${joined}"
+fi
+
+if [[ -z "$language" ]]; then language=auto; fi
+"$WHISPER_CLI" \
+  --model "$MODEL_PATH" \
+  --file "$input_path" \
+  --output-txt \
+  --output-file "$output_base" \
+  --no-prints \
+  --no-timestamps \
+  --max-context 0 \
+  --temperature 0 \
+  --temperature-inc 0.2 \
+  --language "$language" \
+  --threads 6 \
+  >&2
+
+[[ -s "$output_path" ]] || { echo "whisper.cpp completed without writing transcript: $output_path" >&2; exit 1; }

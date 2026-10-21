@@ -1,0 +1,1000 @@
+#+TITLE: Tools Loom: Hermes Whisper.cpp STT
+#+DESCRIPTION: Canonical isolated Whisper.cpp adapter, installer/checker, tests, and operator notes
+#+AUTHOR: Mètsàtron
+#+LANGUAGE: en
+#+PROPERTY: header-args :mkdirp yes :results silent
+
+* Canonical adapter template
+
+This preserves the accepted Kikin adapter behavior while rendering only the
+runtime and persistent model paths during isolated installation.  The
+installer shell-quotes both constants; the template never evaluates a config
+file or interpolates an untrusted command.
+
+#+BEGIN_SRC bash :tangle linux/.local/share/hermes-stt/hermes-stt-whispercpp.template :comments no :tangle-mode (identity #o600)
+#!/usr/bin/env bash
+# Hermes command-provider adapter for the persistent local whisper.cpp model.
+# This lives outside Hermes' install tree; model weights live outside ~/.cache.
+set -euo pipefail
+
+readonly MODEL_PATH=@@MODEL_PATH@@
+readonly WHISPER_CLI=@@WHISPER_CLI@@
+
+if [[ $# -ne 4 ]]; then
+  echo "usage: hermes-stt-whispercpp INPUT OUTPUT.txt MODEL LANGUAGE" >&2
+  exit 2
+fi
+input_path=$1
+output_path=$2
+model_tier=$3
+language=$4
+
+[[ -f "$input_path" && -r "$input_path" ]] || { echo "STT input is missing or unreadable" >&2; exit 2; }
+[[ "$model_tier" == "small" ]] || { echo "only the pinned small local model is installed" >&2; exit 2; }
+[[ -s "$MODEL_PATH" ]] || { echo "persistent Whisper model is missing: $MODEL_PATH" >&2; exit 2; }
+[[ -x "$WHISPER_CLI" ]] || { echo "whisper.cpp is unavailable: $WHISPER_CLI" >&2; exit 127; }
+
+case "$output_path" in
+  *.txt) output_base=${output_path%.txt} ;;
+  *) output_base=$output_path; output_path="${output_path}.txt" ;;
+esac
+[[ ! -e "$output_path" ]] || { echo "refusing to overwrite existing STT output" >&2; exit 2; }
+mkdir -p "$(dirname "$output_path")"
+
+# Hermes' command-provider child environment may omit Guix profile data paths.
+# Preserve system Vulkan ICDs and append profile ICD paths when available.
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+profile_shares=()
+for share in "${HOME}"/.guix-extra-profiles/*/*/share; do
+  [[ -d "$share/vulkan/icd.d" ]] && profile_shares+=("$share")
+done
+if ((${#profile_shares[@]})); then
+  joined=$(IFS=:; printf '%s' "${profile_shares[*]}")
+  export XDG_DATA_DIRS="${XDG_DATA_DIRS}:${joined}"
+fi
+
+if [[ -z "$language" ]]; then language=auto; fi
+"$WHISPER_CLI" \
+  --model "$MODEL_PATH" \
+  --file "$input_path" \
+  --output-txt \
+  --output-file "$output_base" \
+  --no-prints \
+  --no-timestamps \
+  --max-context 0 \
+  --temperature 0 \
+  --temperature-inc 0.2 \
+  --language "$language" \
+  --threads 6 \
+  >&2
+
+[[ -s "$output_path" ]] || { echo "whisper.cpp completed without writing transcript: $output_path" >&2; exit 1; }
+#+END_SRC
+
+* Idempotent installer and checker
+
+#+BEGIN_SRC python :tangle linux/.local/bin/hermes-stt-whispercpp-install :comments no :tangle-mode (identity #o700)
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+
+
+MODEL_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
+MODEL_SHA256 = "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
+MODEL_SIZE = 487_601_967
+MODEL_URL = (
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+    f"{MODEL_REVISION}/ggml-small.bin?download=true"
+)
+RUNTIME_VERSION = "1.9.1"
+TEMPLATE = Path(__file__).resolve().parents[1] / "share/hermes-stt/hermes-stt-whispercpp.template"
+
+
+class InstallError(RuntimeError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_runtime(path: Path) -> None:
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise InstallError(f"whisper.cpp runtime is missing or not executable: {path}")
+    result = subprocess.run(
+        [str(path), "--version"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0 or f"whisper.cpp version: {RUNTIME_VERSION}" not in result.stdout:
+        raise InstallError(f"whisper.cpp runtime is not the verified {RUNTIME_VERSION} build: {path}")
+
+
+def validate_model(path: Path, expected_sha256: str, expected_size: int) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise InstallError(f"model source is not a regular file: {path}")
+    actual_size = path.stat().st_size
+    if actual_size != expected_size:
+        raise InstallError(f"model size mismatch: expected {expected_size}, got {actual_size}")
+    actual_sha256 = sha256_file(path)
+    if actual_sha256 != expected_sha256:
+        raise InstallError(
+            f"model checksum mismatch: expected {expected_sha256}, got {actual_sha256}"
+        )
+
+
+def shell_quote(value: str) -> str:
+    if "\n" in value or "\r" in value:
+        raise InstallError("paths containing newlines are unsupported")
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def render_adapter(template: bytes, model: Path, runtime: Path) -> bytes:
+    text = template.decode("utf-8")
+    if text.count("@@MODEL_PATH@@") != 1 or text.count("@@WHISPER_CLI@@") != 1:
+        raise InstallError("adapter template markers are missing or ambiguous")
+    text = text.replace("@@MODEL_PATH@@", shell_quote(str(model)))
+    text = text.replace("@@WHISPER_CLI@@", shell_quote(str(runtime)))
+    return text.encode("utf-8")
+
+
+def ensure_private_dir(path: Path) -> None:
+    if path.exists():
+        if path.is_symlink() or not path.is_dir():
+            raise InstallError(f"destination directory is unsafe: {path}")
+        return
+    missing: list[Path] = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        cursor = cursor.parent
+    if cursor.is_symlink() or not cursor.is_dir():
+        raise InstallError(f"destination parent is unsafe: {cursor}")
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700)
+        os.chmod(directory, 0o700)
+
+
+def preflight_destination(path: Path, data: bytes, mode: int) -> None:
+    if path.is_symlink():
+        raise InstallError(f"refusing symlink destination: {path}")
+    if path.exists():
+        if not path.is_file():
+            raise InstallError(f"refusing non-file destination: {path}")
+        if path.read_bytes() != data:
+            raise InstallError(f"refusing to replace unexpected existing file: {path}")
+        if path.stat().st_mode & 0o777 != mode:
+            raise InstallError(f"existing file has unexpected permissions: {path}")
+
+
+def install_new_file(path: Path, data: bytes, mode: int) -> None:
+    preflight_destination(path, data, mode)
+    if path.exists():
+        return
+    ensure_private_dir(path.parent)
+    file_descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(file_descriptor, mode)
+        with os.fdopen(file_descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def preflight_model_destination(
+    path: Path,
+    expected_sha256: str,
+    expected_size: int,
+    mode: int,
+) -> None:
+    if path.is_symlink():
+        raise InstallError(f"refusing symlink destination: {path}")
+    if path.exists():
+        validate_model(path, expected_sha256, expected_size)
+        if path.stat().st_mode & 0o777 != mode:
+            raise InstallError(f"existing file has unexpected permissions: {path}")
+
+
+def install_model_file(
+    path: Path,
+    source: Path,
+    expected_sha256: str,
+    expected_size: int,
+    mode: int,
+) -> None:
+    preflight_model_destination(path, expected_sha256, expected_size, mode)
+    if path.exists():
+        return
+    ensure_private_dir(path.parent)
+    file_descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(file_descriptor, mode)
+        with source.open("rb") as input_handle, os.fdopen(file_descriptor, "wb") as output_handle:
+            shutil.copyfileobj(input_handle, output_handle, length=1024 * 1024)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+        validate_model(temporary, expected_sha256, expected_size)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def verify_installed_file(path: Path, data: bytes, mode: int) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise InstallError(f"installed file is missing or unsafe: {path}")
+    if path.read_bytes() != data:
+        raise InstallError(f"installed file content does not match: {path}")
+    if path.stat().st_mode & 0o777 != mode:
+        raise InstallError(f"installed file has unexpected permissions: {path}")
+
+
+def download_verified_model(
+    scratch: Path,
+    urlopen,
+    expected_sha256: str,
+    expected_size: int,
+) -> Path:
+    ensure_private_dir(scratch)
+    file_descriptor, temporary_name = tempfile.mkstemp(prefix="ggml-small.", dir=scratch)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(file_descriptor, 0o600)
+        with os.fdopen(file_descriptor, "wb") as output, urlopen(MODEL_URL, timeout=300) as response:
+            while chunk := response.read(1024 * 1024):
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        validate_model(temporary, expected_sha256, expected_size)
+        return temporary
+    except BaseException:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+
+
+def parser() -> argparse.ArgumentParser:
+    home = Path.home()
+    xdg_data_home = Path(os.environ.get("XDG_DATA_HOME", home / ".local/share"))
+    result = argparse.ArgumentParser(
+        description="Install or verify the pinned local Hermes whisper.cpp adapter"
+    )
+    action = result.add_mutually_exclusive_group(required=True)
+    action.add_argument("--install", action="store_true")
+    action.add_argument("--check", action="store_true")
+    result.add_argument("--prefix", type=Path, default=home / ".local")
+    result.add_argument("--data-home", type=Path, default=xdg_data_home)
+    result.add_argument("--scratch", type=Path, default=Path(os.environ.get("XDG_CACHE_HOME", home / ".cache")) / "hermes-stt/install")
+    result.add_argument("--runtime", type=Path, required=True)
+    source = result.add_mutually_exclusive_group()
+    source.add_argument("--model-source", type=Path)
+    source.add_argument("--download", action="store_true")
+    return result
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    model_sha256: str = MODEL_SHA256,
+    model_size: int = MODEL_SIZE,
+    urlopen=urllib.request.urlopen,
+) -> int:
+    args = parser().parse_args(argv)
+    try:
+        runtime = args.runtime.expanduser().absolute()
+        adapter = args.prefix.expanduser().absolute() / "bin/hermes-stt-whispercpp"
+        model = args.data_home.expanduser().absolute() / "hermes-stt/models/ggml-small.bin"
+        for destination in (adapter, model):
+            for component in (destination, *destination.parents):
+                if component.is_symlink():
+                    raise InstallError(f"refusing symlink destination component: {component}")
+        validate_runtime(runtime)
+        if not TEMPLATE.is_file() or TEMPLATE.is_symlink():
+            raise InstallError(f"adapter template is unavailable: {TEMPLATE}")
+        adapter_bytes = render_adapter(TEMPLATE.read_bytes(), model, runtime)
+
+        if args.check:
+            validate_model(model, model_sha256, model_size)
+            verify_installed_file(adapter, adapter_bytes, 0o700)
+            print(f"verified model: {model}")
+            print(f"verified adapter: {adapter}")
+            return 0
+
+        downloaded: Path | None = None
+        if args.download:
+            downloaded = download_verified_model(
+                args.scratch.expanduser().absolute(), urlopen, model_sha256, model_size
+            )
+            model_source = downloaded
+        else:
+            if args.model_source is None:
+                raise InstallError("--model-source is required unless --download is explicit")
+            model_source = args.model_source.expanduser().absolute()
+            validate_model(model_source, model_sha256, model_size)
+        try:
+            preflight_model_destination(model, model_sha256, model_size, 0o600)
+            preflight_destination(adapter, adapter_bytes, 0o700)
+            install_model_file(model, model_source, model_sha256, model_size, 0o600)
+            install_new_file(adapter, adapter_bytes, 0o700)
+        finally:
+            if downloaded is not None and downloaded.exists():
+                downloaded.unlink()
+        print(f"installed verified model: {model}")
+        print(f"installed adapter: {adapter}")
+        return 0
+    except (InstallError, OSError, subprocess.SubprocessError) as error:
+        print(f"hermes-stt-whispercpp-install: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+#+END_SRC
+
+* Operator guide
+
+#+BEGIN_SRC markdown :tangle linux/.local/share/doc/hermes-stt-whispercpp/README.md :comments no :tangle-mode (identity #o644)
+# Hermes Whisper.cpp local STT
+
+This module makes the already-working Kikin Kushi Whisper.cpp command provider
+reproducible. Hermes and Whisper.cpp execute on Kikin Kushi; Hermes files may
+reside on X230-backed NFS storage without changing the execution host. Live
+Telegram ingress has already been user-confirmed. This module does not require
+another ingress test, cross-host provisioning, a gateway restart, or a config
+redesign.
+
+## Pinned assets
+
+- Model: `ggerganov/whisper.cpp` `ggml-small.bin`
+- Upstream revision: `5359861c739e955e79d9a303bcbc70fb988958b1`
+- Size: `487601967` bytes
+- SHA-256: `1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b`
+- Runtime contract: existing `whisper-cli` version `1.9.1`
+- Pinned download: the installer uses the revision above, never floating
+  `main`, and only accesses the network when `--download` is explicit.
+
+The installer verifies the runtime and the full model size and SHA-256 before
+writing destination files. It does not install packages, edit Hermes config,
+enable STT, select a cloud fallback, restart a gateway, or modify the existing
+faster-whisper wrapper.
+
+## Isolated offline install, second run, and check
+
+Use the existing Guix runtime and the already-verified persistent model as an
+offline source. Choose a disposable root outside the live paths:
+
+```bash
+repo=/home/metsatron/DotCortex-wt-kikin/hermes-local-stt-reliability-20261021
+installer="$repo/linux/.local/bin/hermes-stt-whispercpp-install"
+runtime=/home/metsatron/.guix-extra-profiles/inference/inference/bin/whisper-cli
+model_source=/home/metsatron/.local/share/hermes-stt/models/ggml-small.bin
+# Select the physical path explicitly when a scratch alias contains symlinks.
+root=$(realpath -m /home/metsatron/.hermes/cache/scratch/hermes-stt-parent-check)
+
+"$installer" --install \
+  --prefix "$root/prefix" \
+  --data-home "$root/data" \
+  --scratch "$root/scratch" \
+  --runtime "$runtime" \
+  --model-source "$model_source"
+
+# The second install must preserve bytes and mtimes.
+"$installer" --install \
+  --prefix "$root/prefix" \
+  --data-home "$root/data" \
+  --scratch "$root/scratch" \
+  --runtime "$runtime" \
+  --model-source "$model_source"
+
+# Check mode is read-only and does not require --model-source.
+"$installer" --check \
+  --prefix "$root/prefix" \
+  --data-home "$root/data" \
+  --runtime "$runtime"
+```
+
+For a fresh acquisition, replace `--model-source "$model_source"` with
+`--download`. The download is staged under `--scratch`, validated in full, and
+only then atomically installed.
+
+Repeated offline installs preserve installed bytes and mtimes. Repeating
+`--download` currently reacquires the source and therefore still needs network
+access, even when installed files are valid. Use read-only `--check` for an
+offline health check; this limitation does not alter a valid installation.
+
+## Invoke the isolated adapter
+
+```bash
+adapter="$root/prefix/bin/hermes-stt-whispercpp"
+input=/absolute/path/to/audio.wav
+output="$root/transcript.txt"
+"$adapter" "$input" "$output" small auto
+```
+
+The adapter refuses to overwrite an existing transcript. Remove or choose a
+new output path deliberately before repeating an invocation.
+
+## Isolated Hermes config example
+
+The following is a template for a disposable `HERMES_HOME`; do not merge it
+into the active config as part of provisioning:
+
+```yaml
+stt:
+  provider: whispercpp
+  providers:
+    whispercpp:
+      type: command
+      command: "/absolute/scratch/prefix/bin/hermes-stt-whispercpp {input_path} {output_path} {model} {language}"
+      format: txt
+      model: small
+      language: auto
+      timeout: 300
+```
+
+An explicit provider selection fails locally when its adapter, runtime, or
+model is unavailable; this procedure does not configure a cloud fallback.
+
+## Recovery and rollback
+
+- The installer refuses symlink destinations, non-files, unexpected bytes,
+  corrupt models, and unexpected permissions instead of replacing them.
+- Both install and check reject symlinks in any adapter/model destination
+  component, including roots and existing parent directories. Supply an
+  explicitly chosen physical path, not a symlink alias. This is a preflight
+  check for operator-controlled roots, not protection against another process
+  maliciously replacing directories during installation.
+- File replacement is atomic and file contents are fsynced. The two-file
+  installation is not transactional or a claim of full power-loss durability;
+  after interruption, inspect the files and rerun install/check. Keep the
+  canonical source and pinned provenance backed up separately from model data.
+- Preserve and inspect an unexpected destination before removing it. After the
+  operator has identified it, move it to a backup path and rerun the installer.
+- A disposable installation rolls back by removing only its chosen `--prefix`,
+  `--data-home`, and `--scratch` roots.
+- A future live deployment must back up the live adapter first and must not
+  touch `/home/metsatron/.local/bin/hermes-local-stt`.
+- The existing Guix inference profile provisions `whisper-cli`; this helper
+  verifies that runtime but does not claim to provision it on a fresh OS.
+#+END_SRC
+
+* Contract tests
+
+#+BEGIN_SRC python :tangle linux/.local/share/hermes-stt/tests/test-hermes-stt-whispercpp.py :comments no
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import hashlib
+import io
+import importlib.machinery
+import importlib.util
+import os
+import stat
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+INSTALLER = ROOT / "linux/.local/bin/hermes-stt-whispercpp-install"
+TEMPLATE = ROOT / "linux/.local/share/hermes-stt/hermes-stt-whispercpp.template"
+MODEL_BYTES = b"fixture whisper model\n"
+MODEL_SHA256 = hashlib.sha256(MODEL_BYTES).hexdigest()
+
+
+def load_installer():
+    loader = importlib.machinery.SourceFileLoader("hermes_stt_installer", str(INSTALLER))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class HermesWhisperCppTests(unittest.TestCase):
+    def test_symlinked_destination_ancestors_are_refused_before_writes(self) -> None:
+        module = load_installer()
+        for location in ("prefix", "data", "prefix/bin", "data/hermes-stt"):
+            for children_exist in (False, True):
+                with self.subTest(location=location, children_exist=children_exist):
+                    with tempfile.TemporaryDirectory(prefix="hermes-stt-ancestor-") as tmp:
+                        root = Path(tmp).resolve()
+                        prefix, data_home = root / "prefix", root / "data"
+                        runtime = root / "whisper-cli"
+                        runtime.write_text(
+                            "#!/bin/sh\nprintf '%s\\n' 'whisper.cpp version: 1.9.1'\n",
+                            encoding="utf-8",
+                        )
+                        runtime.chmod(0o700)
+                        source = root / "model.bin"
+                        source.write_bytes(MODEL_BYTES)
+                        outside = root / "outside"
+                        outside.mkdir()
+                        link = root / location
+                        link.parent.mkdir(parents=True, exist_ok=True)
+                        link.symlink_to(outside, target_is_directory=True)
+                        if children_exist:
+                            for child in ("bin", "hermes-stt/models", "models"):
+                                (outside / child).mkdir(parents=True, exist_ok=True)
+                        before = sorted(str(p.relative_to(outside)) for p in outside.rglob("*"))
+                        result = module.main(
+                            ["--install", "--prefix", str(prefix), "--data-home", str(data_home),
+                             "--runtime", str(runtime), "--model-source", str(source)],
+                            model_sha256=MODEL_SHA256, model_size=len(MODEL_BYTES),
+                        )
+                        self.assertNotEqual(result, 0, "symlinked destination ancestor was accepted")
+                        self.assertEqual(
+                            sorted(str(p.relative_to(outside)) for p in outside.rglob("*")), before,
+                        )
+                        self.assertFalse((prefix / "bin/hermes-stt-whispercpp").exists())
+                        self.assertFalse((data_home / "hermes-stt/models/ggml-small.bin").exists())
+
+    def test_first_install_creates_private_verified_files(self) -> None:
+        module = load_installer()
+        with tempfile.TemporaryDirectory(prefix="hermes stt test ") as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix with spaces"
+            data_home = root / "data with spaces"
+            runtime = root / "runtime with spaces" / "whisper-cli"
+            runtime.parent.mkdir()
+            runtime.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'whisper.cpp version: 1.9.1'\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o700)
+            model_source = root / "model source.bin"
+            model_source.write_bytes(MODEL_BYTES)
+
+            result = module.main(
+                [
+                    "--install",
+                    "--prefix",
+                    str(prefix),
+                    "--data-home",
+                    str(data_home),
+                    "--runtime",
+                    str(runtime),
+                    "--model-source",
+                    str(model_source),
+                ],
+                model_sha256=MODEL_SHA256,
+                model_size=len(MODEL_BYTES),
+            )
+
+            adapter = prefix / "bin/hermes-stt-whispercpp"
+            model = data_home / "hermes-stt/models/ggml-small.bin"
+            self.assertEqual(result, 0)
+            self.assertTrue(adapter.is_file())
+            self.assertEqual(model.read_bytes(), MODEL_BYTES)
+            self.assertEqual(stat.S_IMODE(adapter.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(model.stat().st_mode), 0o600)
+            text = adapter.read_text(encoding="utf-8")
+            self.assertIn(str(runtime), text)
+            self.assertIn(str(model), text)
+
+    def test_missing_runtime_makes_no_installation(self) -> None:
+        module = load_installer()
+        with tempfile.TemporaryDirectory(prefix="hermes stt missing runtime ") as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix"
+            data_home = root / "data"
+            model_source = root / "model.bin"
+            model_source.write_bytes(MODEL_BYTES)
+
+            result = module.main(
+                [
+                    "--install",
+                    "--prefix",
+                    str(prefix),
+                    "--data-home",
+                    str(data_home),
+                    "--runtime",
+                    str(root / "missing-whisper-cli"),
+                    "--model-source",
+                    str(model_source),
+                ],
+                model_sha256=MODEL_SHA256,
+                model_size=len(MODEL_BYTES),
+            )
+
+            self.assertNotEqual(result, 0)
+            self.assertFalse(prefix.exists())
+            self.assertFalse(data_home.exists())
+
+    def test_bad_model_checksum_makes_no_installation(self) -> None:
+        module = load_installer()
+        with tempfile.TemporaryDirectory(prefix="hermes stt bad checksum ") as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix"
+            data_home = root / "data"
+            runtime = root / "runtime" / "whisper-cli"
+            runtime.parent.mkdir()
+            runtime.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'whisper.cpp version: 1.9.1'\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o700)
+            bad_model = root / "bad-model.bin"
+            bad_model.write_bytes(b"wrong model bytes\n")
+
+            result = module.main(
+                [
+                    "--install",
+                    "--prefix",
+                    str(prefix),
+                    "--data-home",
+                    str(data_home),
+                    "--runtime",
+                    str(runtime),
+                    "--model-source",
+                    str(bad_model),
+                ],
+                model_sha256=MODEL_SHA256,
+                model_size=len(bad_model.read_bytes()),
+            )
+
+            self.assertNotEqual(result, 0)
+            self.assertFalse(prefix.exists())
+            self.assertFalse(data_home.exists())
+
+    def test_download_is_explicit_and_uses_pinned_revision_url(self) -> None:
+        module = load_installer()
+        with tempfile.TemporaryDirectory(prefix="hermes stt download ") as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix"
+            data_home = root / "data"
+            scratch = root / "scratch"
+            runtime = root / "runtime" / "whisper-cli"
+            runtime.parent.mkdir()
+            runtime.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'whisper.cpp version: 1.9.1'\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o700)
+            seen: list[str] = []
+
+            def fake_urlopen(url: str, timeout: int):
+                self.assertEqual(
+                    url,
+                    "https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+                    "5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin?download=true",
+                )
+                seen.append(url)
+                return io.BytesIO(MODEL_BYTES)
+
+            base_args = [
+                "--prefix",
+                str(prefix),
+                "--data-home",
+                str(data_home),
+                "--scratch",
+                str(scratch),
+                "--runtime",
+                str(runtime),
+            ]
+            self.assertNotEqual(
+                module.main(
+                    ["--install", *base_args],
+                    model_sha256=MODEL_SHA256,
+                    model_size=len(MODEL_BYTES),
+                    urlopen=fake_urlopen,
+                ),
+                0,
+            )
+            self.assertEqual(seen, [])
+            self.assertFalse(prefix.exists())
+            self.assertFalse(data_home.exists())
+
+            self.assertEqual(
+                module.main(
+                    ["--install", *base_args, "--download"],
+                    model_sha256=MODEL_SHA256,
+                    model_size=len(MODEL_BYTES),
+                    urlopen=fake_urlopen,
+                ),
+                0,
+            )
+            self.assertEqual(seen, [module.MODEL_URL])
+            self.assertIn(module.MODEL_REVISION, seen[0])
+            self.assertEqual(
+                (data_home / "hermes-stt/models/ggml-small.bin").read_bytes(),
+                MODEL_BYTES,
+            )
+
+    def test_corrupt_destination_is_refused_before_any_write(self) -> None:
+        module = load_installer()
+        with tempfile.TemporaryDirectory(prefix="hermes stt corrupt destination ") as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix"
+            data_home = root / "data"
+            adapter = prefix / "bin/hermes-stt-whispercpp"
+            adapter.parent.mkdir(parents=True)
+            adapter.write_bytes(b"operator-owned unexpected adapter\n")
+            adapter.chmod(0o700)
+            original = adapter.read_bytes()
+            runtime = root / "runtime" / "whisper-cli"
+            runtime.parent.mkdir()
+            runtime.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'whisper.cpp version: 1.9.1'\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o700)
+            model_source = root / "model.bin"
+            model_source.write_bytes(MODEL_BYTES)
+
+            result = module.main(
+                [
+                    "--install",
+                    "--prefix",
+                    str(prefix),
+                    "--data-home",
+                    str(data_home),
+                    "--runtime",
+                    str(runtime),
+                    "--model-source",
+                    str(model_source),
+                ],
+                model_sha256=MODEL_SHA256,
+                model_size=len(MODEL_BYTES),
+            )
+
+            self.assertNotEqual(result, 0)
+            self.assertEqual(adapter.read_bytes(), original)
+            self.assertFalse(data_home.exists())
+
+    def test_symlink_destination_is_refused_before_any_write(self) -> None:
+        module = load_installer()
+        with tempfile.TemporaryDirectory(prefix="hermes stt symlink destination ") as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix"
+            data_home = root / "data"
+            runtime = root / "runtime" / "whisper-cli"
+            runtime.parent.mkdir()
+            runtime.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'whisper.cpp version: 1.9.1'\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o700)
+            model_source = root / "model.bin"
+            model_source.write_bytes(MODEL_BYTES)
+            model = data_home / "hermes-stt/models/ggml-small.bin"
+            adapter = prefix / "bin/hermes-stt-whispercpp"
+            adapter.parent.mkdir(parents=True)
+            target = root / "operator-owned-adapter"
+            target.write_bytes(module.render_adapter(TEMPLATE.read_bytes(), model, runtime))
+            target.chmod(0o700)
+            original = target.read_bytes()
+            adapter.symlink_to(target)
+
+            result = module.main(
+                [
+                    "--install",
+                    "--prefix",
+                    str(prefix),
+                    "--data-home",
+                    str(data_home),
+                    "--runtime",
+                    str(runtime),
+                    "--model-source",
+                    str(model_source),
+                ],
+                model_sha256=MODEL_SHA256,
+                model_size=len(MODEL_BYTES),
+            )
+
+            self.assertNotEqual(result, 0)
+            self.assertTrue(adapter.is_symlink())
+            self.assertEqual(target.read_bytes(), original)
+            self.assertFalse(data_home.exists())
+
+    def test_adapter_runs_with_space_paths(self) -> None:
+        module = load_installer()
+        with tempfile.TemporaryDirectory(prefix="hermes stt adapter spaces ") as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix with spaces"
+            data_home = root / "data with spaces"
+            runtime = root / "runtime with spaces" / "whisper-cli"
+            runtime.parent.mkdir()
+            runtime.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = --version ]; then printf '%s\\n' 'whisper.cpp version: 1.9.1'; exit 0; fi\n"
+                "output=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  case \"$1\" in --output-file) output=$2; shift 2;; *) shift;; esac\n"
+                "done\n"
+                "printf '%s' 'fixture transcript' >\"${output}.txt\"\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o700)
+            model_source = root / "model source.bin"
+            model_source.write_bytes(MODEL_BYTES)
+            self.assertEqual(
+                module.main(
+                    [
+                        "--install",
+                        "--prefix",
+                        str(prefix),
+                        "--data-home",
+                        str(data_home),
+                        "--runtime",
+                        str(runtime),
+                        "--model-source",
+                        str(model_source),
+                    ],
+                    model_sha256=MODEL_SHA256,
+                    model_size=len(MODEL_BYTES),
+                ),
+                0,
+            )
+            input_path = root / "audio input.wav"
+            input_path.write_bytes(b"audio")
+            output_path = root / "output dir" / "transcript.txt"
+
+            result = subprocess.run(
+                [
+                    str(prefix / "bin/hermes-stt-whispercpp"),
+                    str(input_path),
+                    str(output_path),
+                    "small",
+                    "",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "fixture transcript")
+
+    def test_adapter_refuses_existing_output(self) -> None:
+        module = load_installer()
+        with tempfile.TemporaryDirectory(prefix="hermes stt adapter no clobber ") as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix"
+            data_home = root / "data"
+            runtime = root / "runtime" / "whisper-cli"
+            marker = root / "runtime-was-called"
+            runtime.parent.mkdir()
+            runtime.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = --version ]; then printf '%s\\n' 'whisper.cpp version: 1.9.1'; exit 0; fi\n"
+                f": >'{marker}'\n"
+                "exit 9\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o700)
+            model_source = root / "model.bin"
+            model_source.write_bytes(MODEL_BYTES)
+            self.assertEqual(
+                module.main(
+                    [
+                        "--install",
+                        "--prefix",
+                        str(prefix),
+                        "--data-home",
+                        str(data_home),
+                        "--runtime",
+                        str(runtime),
+                        "--model-source",
+                        str(model_source),
+                    ],
+                    model_sha256=MODEL_SHA256,
+                    model_size=len(MODEL_BYTES),
+                ),
+                0,
+            )
+            input_path = root / "input.wav"
+            input_path.write_bytes(b"audio")
+            output_path = root / "transcript.txt"
+            output_path.write_text("operator-owned transcript", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    str(prefix / "bin/hermes-stt-whispercpp"),
+                    str(input_path),
+                    str(output_path),
+                    "small",
+                    "en",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("refusing to overwrite", result.stderr)
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "operator-owned transcript")
+            self.assertFalse(marker.exists())
+
+    def test_second_install_and_check_preserve_bytes_and_mtimes(self) -> None:
+        module = load_installer()
+        with tempfile.TemporaryDirectory(prefix="hermes stt idempotent ") as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix"
+            data_home = root / "data"
+            runtime = root / "runtime" / "whisper-cli"
+            runtime.parent.mkdir()
+            runtime.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'whisper.cpp version: 1.9.1'\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o700)
+            model_source = root / "model.bin"
+            model_source.write_bytes(MODEL_BYTES)
+            install_args = [
+                "--install",
+                "--prefix",
+                str(prefix),
+                "--data-home",
+                str(data_home),
+                "--runtime",
+                str(runtime),
+                "--model-source",
+                str(model_source),
+            ]
+            check_args = [
+                "--check",
+                "--prefix",
+                str(prefix),
+                "--data-home",
+                str(data_home),
+                "--runtime",
+                str(runtime),
+            ]
+            self.assertEqual(
+                module.main(install_args, model_sha256=MODEL_SHA256, model_size=len(MODEL_BYTES)),
+                0,
+            )
+            adapter = prefix / "bin/hermes-stt-whispercpp"
+            model = data_home / "hermes-stt/models/ggml-small.bin"
+            before = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (adapter, model)
+            }
+
+            self.assertEqual(
+                module.main(install_args, model_sha256=MODEL_SHA256, model_size=len(MODEL_BYTES)),
+                0,
+            )
+            self.assertEqual(
+                module.main(check_args, model_sha256=MODEL_SHA256, model_size=len(MODEL_BYTES)),
+                0,
+            )
+            after = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (adapter, model)
+            }
+            self.assertEqual(after, before)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+#+END_SRC
