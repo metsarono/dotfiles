@@ -2072,14 +2072,23 @@ exit 0
 # mode is supported — Codex has no Emacs IDE governor.
 set -u
 
-[ -n "${CODEX_IDLE_CHANNEL:-}" ] || exit 0
+channel="${CODEX_IDLE_CHANNEL:-}"
 owner="${CODEX_IDLE_OWNER:-}"
-case "$owner" in
-  pty-supervisor) ;;
-  *) exit 0 ;;
-esac
-
-[[ "$CODEX_IDLE_CHANNEL" =~ ^codex-[0-9a-f]{32}$ ]] || exit 0
+supervised=0
+if [ "${owner}" = "pty-supervisor" ] && [[ "${channel}" =~ ^codex-[0-9a-f]{32}$ ]]; then
+  supervised=1
+fi
+if [ "${supervised}" -ne 1 ]; then
+  # Outside the warm supervisor there is no lifecycle socket, but a completed
+  # compaction is still an alertable native fact when this instance has been
+  # given a TimeArk entrypoint.
+  registry="${XDG_CONFIG_HOME:-${HOME}/.config}/codex-hook/timeark-entrypoint"
+  if [ -z "${CODEX_TIMEARK_INCIDENT_ENTRYPOINT:-}" ]; then
+    [ -f "${registry}" ] || exit 0
+  else
+    [ -r "${CODEX_TIMEARK_INCIDENT_ENTRYPOINT}" ] || exit 0
+  fi
+fi
 
 payload=$(cat 2>/dev/null || true)
 command -v jq >/dev/null 2>&1 || exit 0
@@ -2108,9 +2117,8 @@ case "$session_id" in
   *[!A-Za-z0-9._:-]*) exit 0 ;;
 esac
 
-[ -n "${CODEX_IDLE_CONTROL_SOCKET:-}" ] || exit 0
-command -v python3 >/dev/null 2>&1 || exit 0
-if command -v timeout >/dev/null 2>&1; then
+if [ "${supervised}" -eq 1 ] && [ -n "${CODEX_IDLE_CONTROL_SOCKET:-}" ] \
+    && command -v python3 >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
   timeout 3s python3 - "$CODEX_IDLE_CONTROL_SOCKET" "$event_symbol" \
     "$CODEX_IDLE_CHANNEL" "$session_id" "$stop_hook_active" <<'PY' \
     >/dev/null 2>&1 || true
@@ -2160,8 +2168,8 @@ if [ "$event_symbol" = "post-compact" ] && [ -n "${entrypoint}" ] \
     payload_file=$(mktemp "${TMPDIR:-/tmp}/codex-hook-payload.XXXXXX") || exit 0
     chmod 600 "${payload_file}"
     printf '%s' "${payload}" >"${payload_file}"
-    timeout 8s python3 - "${entrypoint}" \
-      "${CODEX_IDLE_CHANNEL}" "${payload_file}" <<'PY' >/dev/null 2>&1 || true
+    timeout 4s python3 - "${entrypoint}" \
+      "${channel}" "${payload_file}" <<'PY' >/dev/null 2>&1 || true
 import base64
 import hashlib
 import json
@@ -2175,6 +2183,8 @@ from datetime import datetime, timezone
 
 entry = sys.argv[1]
 channel = sys.argv[2]
+if not channel.startswith("codex-") or len(channel) != 38:
+    channel = "codex"  # unsupervised session: no invented channel identity
 try:
     payload = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
 except (OSError, ValueError):
@@ -2246,7 +2256,7 @@ temporary.replace(path)
 try:
     done = subprocess.run([sys.executable, entry, "--incident-file", str(path),
                            "--incident-limit", "1", "--json"],
-                          capture_output=True, text=True, timeout=5, check=False)
+                          capture_output=True, text=True, timeout=3, check=False)
     if done.returncode != 0:
         raise RuntimeError(f"dispatcher exit {done.returncode}")
 except (OSError, subprocess.SubprocessError, RuntimeError) as error:
