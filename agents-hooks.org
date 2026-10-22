@@ -2142,14 +2142,25 @@ fi
 # Codex, the account identifier is hashed before it leaves this process, and
 # an undelivered occurrence is retained for inspection rather than replayed
 # against an owner queue whose state is unknown.
-if [ "$event_symbol" = "post-compact" ] \
-    && [ -n "${CODEX_TIMEARK_INCIDENT_ENTRYPOINT:-}" ] \
-    && [ -r "${CODEX_TIMEARK_INCIDENT_ENTRYPOINT}" ]; then
+if [ "$event_symbol" = "post-compact" ]; then
+  entrypoint="${CODEX_TIMEARK_INCIDENT_ENTRYPOINT:-}"
+  if [ -z "${entrypoint}" ]; then
+    # Per-instance registry so deployment does not require editing every
+    # supervisor environment. Only a private regular file is trusted.
+    registry="${XDG_CONFIG_HOME:-${HOME}/.config}/codex-hook/timeark-entrypoint"
+    if [ -f "${registry}" ] && [ ! -L "${registry}" ] \
+        && [ "$(stat -c %a "${registry}" 2>/dev/null || echo 000)" = "600" ]; then
+      entrypoint=$(head -n 1 "${registry}" 2>/dev/null || true)
+    fi
+  fi
+fi
+if [ "$event_symbol" = "post-compact" ] && [ -n "${entrypoint}" ] \
+    && [ -r "${entrypoint}" ]; then
   if command -v timeout >/dev/null 2>&1 && command -v mktemp >/dev/null 2>&1; then
     payload_file=$(mktemp "${TMPDIR:-/tmp}/codex-hook-payload.XXXXXX") || exit 0
     chmod 600 "${payload_file}"
     printf '%s' "${payload}" >"${payload_file}"
-    timeout 8s python3 - "$CODEX_TIMEARK_INCIDENT_ENTRYPOINT" \
+    timeout 8s python3 - "${entrypoint}" \
       "${CODEX_IDLE_CHANNEL}" "${payload_file}" <<'PY' >/dev/null 2>&1 || true
 import base64
 import hashlib
@@ -2219,7 +2230,10 @@ event = {
                  "auth_scope": "subscription_oauth"},
     "incident_id": event_id, "state_revision": 1, "severity": "info",
     "summary": "Codex completed native context compaction under the installed lifecycle hook.",
-    "evidence": {"basis": "lifecycle_hook", "source_ref": "codex-hook:post-compact:" + session,
+    # PostCompact is Codex's own completion signal, so the basis is the same
+    # native_completion TimeArk requires for this kind; the source_ref keeps
+    # the hook's provenance distinct from the adapter's app-server observation.
+    "evidence": {"basis": "native_completion", "source_ref": "codex-hook:post-compact:" + session,
                  "sha256": occurrence},
 }
 root = pathlib.Path(os.environ.get("XDG_STATE_HOME") or pathlib.Path.home() / ".local/state") / "codex-hook/compaction-incidents"
