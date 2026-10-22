@@ -2134,6 +2134,115 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
     connection.recv(4096)
 PY
 fi
+
+# A completed native compaction also reaches TimeArk when the fleet incident
+# entrypoint is configured.  This is the same incident kind the Telegram
+# adapter publishes, so compactions by other Codex owners are covered without
+# that adapter.  Best-effort and bounded: a hook must never delay or disturb
+# Codex, the account identifier is hashed before it leaves this process, and
+# an undelivered occurrence is retained for inspection rather than replayed
+# against an owner queue whose state is unknown.
+if [ "$event_symbol" = "post-compact" ] \
+    && [ -n "${CODEX_TIMEARK_INCIDENT_ENTRYPOINT:-}" ] \
+    && [ -r "${CODEX_TIMEARK_INCIDENT_ENTRYPOINT}" ]; then
+  if command -v timeout >/dev/null 2>&1 && command -v mktemp >/dev/null 2>&1; then
+    payload_file=$(mktemp "${TMPDIR:-/tmp}/codex-hook-payload.XXXXXX") || exit 0
+    chmod 600 "${payload_file}"
+    printf '%s' "${payload}" >"${payload_file}"
+    timeout 8s python3 - "$CODEX_TIMEARK_INCIDENT_ENTRYPOINT" \
+      "${CODEX_IDLE_CHANNEL}" "${payload_file}" <<'PY' >/dev/null 2>&1 || true
+import base64
+import hashlib
+import json
+import os
+import pathlib
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+entry = sys.argv[1]
+channel = sys.argv[2]
+try:
+    payload = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(0)
+session = payload.get("session_id")
+if not isinstance(session, str) or not session:
+    raise SystemExit(0)
+
+home = pathlib.Path(os.environ.get("CODEX_HOME") or pathlib.Path.home() / ".codex")
+
+
+def chatgpt_account_id():
+    """Read only the account claim; tokens never leave this function."""
+    try:
+        auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    tokens = auth.get("tokens") if isinstance(auth.get("tokens"), dict) else {}
+    for name in ("id_token", "access_token"):
+        token = tokens.get(name)
+        if not isinstance(token, str) or token.count(".") != 2:
+            continue
+        body = token.split(".")[1]
+        body += "=" * (-len(body) % 4)
+        try:
+            claims = json.loads(base64.urlsafe_b64decode(body))
+        except (ValueError, TypeError):
+            continue
+        scoped = claims.get("https://api.openai.com/auth")
+        if isinstance(scoped, dict) and isinstance(scoped.get("chatgpt_account_id"), str):
+            return scoped["chatgpt_account_id"]
+    return None
+
+
+account = chatgpt_account_id()
+if not account:
+    raise SystemExit(0)  # unverified subscription is not an alertable fact
+
+observed = time.time()
+stamp = datetime.fromtimestamp(observed, timezone.utc).isoformat()
+occurrence = hashlib.sha256(f"{session}/{int(observed)}".encode()).hexdigest()
+event_id = "codex-compaction:" + hashlib.sha256(
+    (hashlib.sha256(account.encode()).hexdigest() + "/" + session + "/hook").encode()
+).hexdigest()
+model = payload.get("model")
+event = {
+    "schema": "timeark.fleet-incident.v1", "event_id": event_id,
+    "kind": "context_compaction_completed", "occurred_at": stamp, "observed_at": stamp,
+    "identity": {"host": socket.gethostname(), "owner": "codex-hook", "agent": channel,
+                 "account": hashlib.sha256(account.encode()).hexdigest(), "provider": "openai",
+                 "endpoint": "openai-codex-oauth",
+                 "model": model if isinstance(model, str) and model else "unknown",
+                 "auth_scope": "subscription_oauth"},
+    "incident_id": event_id, "state_revision": 1, "severity": "info",
+    "summary": "Codex completed native context compaction under the installed lifecycle hook.",
+    "evidence": {"basis": "lifecycle_hook", "source_ref": "codex-hook:post-compact:" + session,
+                 "sha256": occurrence},
+}
+root = pathlib.Path(os.environ.get("XDG_STATE_HOME") or pathlib.Path.home() / ".local/state") / "codex-hook/compaction-incidents"
+root.mkdir(parents=True, exist_ok=True, mode=0o700)
+path = root / (occurrence + ".json")
+temporary = path.with_suffix(".tmp")
+temporary.write_text(json.dumps(event, sort_keys=True), encoding="utf-8")
+os.chmod(temporary, 0o600)
+temporary.replace(path)
+try:
+    done = subprocess.run([sys.executable, entry, "--incident-file", str(path),
+                           "--incident-limit", "1", "--json"],
+                          capture_output=True, text=True, timeout=5, check=False)
+    if done.returncode != 0:
+        raise RuntimeError(f"dispatcher exit {done.returncode}")
+except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+    log = root.parent / "dispatch.log"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(f"{stamp} retained={path.name} reason={error}\n")
+PY
+    rm -f -- "${payload_file}"
+  fi
+fi
 exit 0
 #+END_SRC
 
