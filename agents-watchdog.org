@@ -641,6 +641,57 @@ def renew_release_accepted(args: argparse.Namespace, request: dict, pin: dict, o
         raise ValueError("adapter has not durably accepted release")
 
 
+CODEX_TRAINER = "HelmAstra"
+
+
+def renew_exp_link(args: argparse.Namespace, request: dict, pin: dict) -> dict:
+    """Prove the successor session accrues EXP to its trainer's partner.
+
+    Renewal replaces the session. If the new id is not linked to the same
+    partner, EXP silently stops accruing even though the bounce looks healthy.
+    Read-only: it never blocks or reverts a committed renewal, but an unlinked
+    or unreadable result is recorded and surfaced in the renew_done event.
+    """
+    record = {
+        "schema": "codex.telegram.renew-exp-link.v1",
+        "request_id": request.get("id"),
+        "new_thread_id": pin.get("new_thread_id"),
+        "expected_consort": CODEX_TRAINER,
+        "checked_at": None,
+        "exit": None,
+        "linked": None,
+        "partner_key": None,
+        "partner_consort": None,
+        "exp": None,
+        "exp_updated_at": None,
+        "reason": None,
+        "error": None,
+    }
+    pokedex = shutil.which("pokedex") or str(Path.home() / "HelmCortex/FORGE/bin/pokedex")
+    thread = pin.get("new_thread_id")
+    try:
+        done = subprocess.run(
+            [pokedex, "exp-link", "--session", str(thread), "--consort", CODEX_TRAINER, "--json"],
+            capture_output=True, text=True, timeout=25, check=False)
+        record["exit"] = done.returncode
+        if done.stdout.strip():
+            payload = json.loads(done.stdout)
+            data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+            for key in ("linked", "partner_key", "partner_consort", "exp", "exp_updated_at", "reason", "resolved_key"):
+                if isinstance(data, dict) and key in data:
+                    record[key] = data[key]
+        elif done.returncode != 0:
+            record["error"] = (done.stderr or "exp-link failed").strip()[:200]
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        record["error"] = type(exc).__name__
+    record["checked_at"] = time.time()
+    try:
+        renew_journal_write(Path(args.state_dir) / "renewals" / f"exp-link.{request.get('id')}.json", record)
+    except Exception:
+        pass
+    return record
+
+
 def process_renewal(args: argparse.Namespace, request: dict, path: Path,
                     host: str, state: dict, when: dt.datetime, now: float) -> list[dict]:
     """Adapter pause -> committed pin -> once-only external bounce -> release.
@@ -762,7 +813,14 @@ def process_renewal(args: argparse.Namespace, request: dict, path: Path,
             renew_cooldown(args, now)
             state.setdefault("revive", {})["codex"] = int(now)
             path.unlink(missing_ok=True)
-            return event("renew_done", "Seeded pin and external bounce verified; successor durably accepted release", "notice")
+            link = renew_exp_link(args, request, pin)
+            if link.get("linked"):
+                detail = f"trainer link verified ({link.get('partner_key') or CODEX_TRAINER}, exp={link.get('exp')})"
+                severity = "notice"
+            else:
+                detail = f"trainer link NOT verified ({link.get('reason') or link.get('error') or 'unknown'})"
+                severity = "warning"
+            return event("renew_done", f"Seeded pin and external bounce verified; successor durably accepted release; {detail}", severity)
         renew_task_delivered(args, request["task_id"], request["id"])
         if args.dry_run:
             return []
