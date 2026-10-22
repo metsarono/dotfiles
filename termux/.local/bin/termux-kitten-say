@@ -82,8 +82,10 @@ else
   # produced dead plays that never reached the truth log below, the exact
   # failures the log exists to catch.
   RC=0
+  ERR="$(mktemp "${TMPDIR:-/tmp}/kitten-say-XXXXXX.err")"
   printf '%s' "$TEXT" | proot-distro login debian -- bash -lc \
     "\$HOME/kitten-venv/bin/python \$HOME/kitten-say.py --stream --voice '$VOICE' --speed '$SPEED'" \
+    2>"$ERR" \
     | pvox-pcm-start-gate \
     | sox -q -t raw -r 24000 -e signed -b 16 -c 1 - -d || RC=$?
   emit_receipt player_exited
@@ -91,10 +93,13 @@ else
   # phone-side truth log (silent-skip law): the fleet hook's "rendered=
   # on-device" only certifies text delivery + spawn — a render that dies
   # HERE (mid-rebuild venv, broken enclave) was invisible until this line.
-  # One line per say, success or failure, so the next swallowed message
-  # names itself in ~/.cache/kitten-say.log instead of arriving as silence.
+  # One line per say, success or failure, and a renderer summary when one was
+  # emitted. A non-zero skipped count identifies partial audio even when the
+  # downstream player itself exits zero.
   mkdir -p "$HOME/.cache" 2>/dev/null || true
-  printf '%s voice=%s speed=%s chars=%s rc=%s\n' "$(date '+%F %T')" "$VOICE" "$SPEED" "${#TEXT}" "$RC" >> "$HOME/.cache/kitten-say.log" 2>/dev/null || true
+  SUMMARY="$(sed -n 's/^\[kitten-say\] summary //p' "$ERR" | tail -n 1 || true)"
+  printf '%s voice=%s speed=%s chars=%s rc=%s %s\n' "$(date '+%F %T')" "$VOICE" "$SPEED" "${#TEXT}" "$RC" "$SUMMARY" >> "$HOME/.cache/kitten-say.log" 2>/dev/null || true
+  rm -f "$ERR"
   exit $RC
 fi
 # Kitten TTS in the enclave (on-device consort voices):2 ends here

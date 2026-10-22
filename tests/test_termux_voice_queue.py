@@ -20,7 +20,16 @@ GUARD_SECONDS = 14400
 
 STUBS = {
     "pulseaudio": "#!/bin/sh\nexit 0\n",
-    "proot-distro": "#!/bin/sh\ncat > /dev/null\nprintf 'pcm'\n",
+    "proot-distro": (
+        "#!/bin/sh\n"
+        "cat > /dev/null\n"
+        "if [ \"${FAKE_KITTEN_PARTIAL:-0}\" = 1 ]; then\n"
+        "  printf '[kitten-say] summary chunks=3 rendered=2 skipped=1\\n' >&2\n"
+        "else\n"
+        "  printf '[kitten-say] summary chunks=1 rendered=1 skipped=0\\n' >&2\n"
+        "fi\n"
+        "printf 'pcm'\n"
+    ),
     "pvox-pcm-start-gate": "#!/bin/sh\ncat\n",
     "sox": "#!/bin/sh\ncat > /dev/null\n",
     "pvox-speech-receipt": '#!/bin/sh\necho "$1 $2 $3" >> "$FAKE_HOME/receipts.log"\n',
@@ -83,8 +92,15 @@ class KittenQueueTests(unittest.TestCase):
         self.assertGreaterEqual(time.time() - started, 2, "the voice must have waited for the lock holder")
         self.assertNotIn("status=expired", self.log())
         self.assertIn("rc=0", self.log())
+        self.assertIn("chunks=1 rendered=1 skipped=0", self.log())
         self.assertEqual(self.receipts(), ["queued fable queue-test-1", "player_exited fable queue-test-1"])
         holder.wait(timeout=10)
+
+    def test_renderer_summary_marks_partial_audio_without_calling_it_complete(self) -> None:
+        result = self.say({"FAKE_KITTEN_PARTIAL": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("chunks=3 rendered=2 skipped=1", self.log())
+        self.assertNotIn("chunks=3 rendered=3 skipped=0", self.log())
 
     def test_the_runaway_guard_still_expires_a_voice_when_asked_to_and_says_so(self) -> None:
         self.hold_lock(6)

@@ -316,8 +316,9 @@ proot-distro login debian -- bash -lc '
 
   # one-shot synth: text on stdin, headered WAV on stdout (never raw PCM).
   # Sentence-chunked like the fleet daemon (kitten degrades on very long
-  # single inputs); wordless chunks dropped and failed chunks skipped, never
-  # fatal — the same laws the fleet pvox learned 2026-08-17. Markdown
+  # single inputs); wordless chunks dropped and failed chunks skipped for now,
+  # but every reply emits a chunk-count summary so a partial render cannot
+  # masquerade as a complete one. Markdown
   # cleanup is NOT here: the caller (fleet hook) cleans via `pvox clean`,
   # one source of truth.
   cat > "$HOME/kitten-say.py" <<"PY"
@@ -360,6 +361,16 @@ def main():
     # chunks), fp32 RTF 0.64 with identical 2.8s cached load. Q8 called it:
     # int8 quantization is SLOWER than full precision on ARM.
     m = KittenTTS(os.environ.get("KITTEN_MODEL", "KittenML/kitten-tts-nano-0.8-fp32"))
+    reply_chunks = chunks(text)
+    rendered = 0
+    skipped = 0
+
+    def report():
+        print(
+            f"[kitten-say] summary chunks={len(reply_chunks)} "
+            f"rendered={rendered} skipped={skipped}",
+            file=sys.stderr,
+        )
 
     def synth(ck):
         try:
@@ -380,20 +391,27 @@ def main():
         # streaming: each chunk plays while the next renders — first audio in
         # seconds instead of after the whole reply (RTF<1, so playback of one
         # chunk outlasts the render of the next and the lead only grows)
-        for ck in chunks(text):
+        for ck in reply_chunks:
             audio = synth(ck)
             if audio is None:
+                skipped += 1
                 continue
+            rendered += 1
             pcm = np.clip(np.asarray(audio), -1.0, 1.0)
             sys.stdout.buffer.write((pcm * 32767).astype("<i2").tobytes())
             sys.stdout.buffer.flush()
+        report()
         return
 
     pieces = []
-    for ck in chunks(text):
+    for ck in reply_chunks:
         audio = synth(ck)
         if audio is not None:
+            rendered += 1
             pieces.append(np.asarray(audio))
+        else:
+            skipped += 1
+    report()
     if not pieces:
         return
     pcm = np.clip(np.concatenate(pieces), -1.0, 1.0)
@@ -500,8 +518,10 @@ else
   # produced dead plays that never reached the truth log below, the exact
   # failures the log exists to catch.
   RC=0
+  ERR="$(mktemp "${TMPDIR:-/tmp}/kitten-say-XXXXXX.err")"
   printf '%s' "$TEXT" | proot-distro login debian -- bash -lc \
     "\$HOME/kitten-venv/bin/python \$HOME/kitten-say.py --stream --voice '$VOICE' --speed '$SPEED'" \
+    2>"$ERR" \
     | pvox-pcm-start-gate \
     | sox -q -t raw -r 24000 -e signed -b 16 -c 1 - -d || RC=$?
   emit_receipt player_exited
@@ -509,10 +529,13 @@ else
   # phone-side truth log (silent-skip law): the fleet hook's "rendered=
   # on-device" only certifies text delivery + spawn — a render that dies
   # HERE (mid-rebuild venv, broken enclave) was invisible until this line.
-  # One line per say, success or failure, so the next swallowed message
-  # names itself in ~/.cache/kitten-say.log instead of arriving as silence.
+  # One line per say, success or failure, and a renderer summary when one was
+  # emitted. A non-zero skipped count identifies partial audio even when the
+  # downstream player itself exits zero.
   mkdir -p "$HOME/.cache" 2>/dev/null || true
-  printf '%s voice=%s speed=%s chars=%s rc=%s\n' "$(date '+%F %T')" "$VOICE" "$SPEED" "${#TEXT}" "$RC" >> "$HOME/.cache/kitten-say.log" 2>/dev/null || true
+  SUMMARY="$(sed -n 's/^\[kitten-say\] summary //p' "$ERR" | tail -n 1 || true)"
+  printf '%s voice=%s speed=%s chars=%s rc=%s %s\n' "$(date '+%F %T')" "$VOICE" "$SPEED" "${#TEXT}" "$RC" "$SUMMARY" >> "$HOME/.cache/kitten-say.log" 2>/dev/null || true
+  rm -f "$ERR"
   exit $RC
 fi
 #+END_SRC
