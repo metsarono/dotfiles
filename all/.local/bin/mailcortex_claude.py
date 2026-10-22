@@ -14,6 +14,7 @@ import select
 import signal
 import socket
 import stat
+import shutil
 import subprocess
 import sys
 import threading
@@ -259,7 +260,13 @@ def private_tmux_socket(path):
 def descendant(pid, ancestor):
     for _ in range(32):
         path = Path(f"/proc/{pid}")
-        if path.stat().st_uid != os.getuid():
+        try:
+            owner_uid = path.stat().st_uid
+        except FileNotFoundError:
+            # Dead supervisor recorded in a stale state directory. Not a
+            # descendant, and never a reason to abort discovery for the seat.
+            return False
+        if owner_uid != os.getuid():
             return False
         if pid == ancestor:
             return True
@@ -270,10 +277,30 @@ def descendant(pid, ancestor):
     return False
 
 
+def tmux_binary() -> str:
+    """Locate tmux without assuming it lives in /usr/bin.
+
+    This host runs tmux from the Guix profile. A hardcoded /usr/bin/tmux raised
+    FileNotFoundError inside resolve_owner, which the watcher surfaced as
+    "Claude local conditional idle authority unavailable" and every wake for the
+    seat stayed queued - a fail-closed that looked like a wedged receipt.
+    """
+    candidates = [
+        shutil.which("tmux"),
+        "/usr/bin/tmux",
+        "/usr/local/bin/tmux",
+        str(Path.home() / ".guix-extra-profiles/core/core/bin/tmux"),
+    ]
+    for candidate in candidates:
+        if candidate and os.access(candidate, os.X_OK):
+            return candidate
+    raise FileNotFoundError("tmux not found; Claude wake authority unavailable")
+
+
 def resolve_owner(target):
     validate_target(target)
     private_tmux_socket(Path(target["tmux_socket"]))
-    result = subprocess.run(["/usr/bin/tmux", "-S", target["tmux_socket"], "list-panes", "-s",
+    result = subprocess.run([tmux_binary(), "-S", target["tmux_socket"], "list-panes", "-s",
         "-t", "=" + target["tmux_session"], "-F",
         "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_tty}\t#{pane_dead}\t#{pane_in_mode}"],
         text=True, capture_output=True, check=True, timeout=3)
@@ -295,7 +322,13 @@ def resolve_owner(target):
         if type(supervisor) is not int or supervisor <= 0 or not descendant(supervisor, int(pid)):
             continue
         started = state.get("supervisor_start_time")
-        if started != process_start_time(supervisor):
+        try:
+            current_start = process_start_time(supervisor)
+        except OSError:
+            # Stale state directory for a supervisor that has exited. Skip it
+            # instead of letting discovery die on a dead pid.
+            continue
+        if started != current_start:
             continue
         owner = {"channel": state["channel"], "session_id": state["session_id"],
                  "supervisor_pid": supervisor, "supervisor_start_time": started,
