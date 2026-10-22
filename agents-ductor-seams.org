@@ -27,6 +27,7 @@ Rules the seam keeps:
 - A session already past its cache window is skipped and marked; compacting it would pay the uncached price the seam exists to avoid.
 - The per-session lock is held for the whole compaction and a busy chat defers, so a user message waits instead of racing a second writer onto the transcript.
 - The compaction does not touch =last_active=, so Ductor's own session freshness still counts from the last real turn.
+- Codex compaction verifies its own native ChatGPT subscription route on the same =app-server= connection before it sends =thread/resume= or =thread/compact/start=. An API-key profile, a custom provider, or any base-url override suppresses the compaction and is logged as =suppressed=, never reported as a completed compaction, because the cached-price premise would be false.
 - Settings come from an optional =idle_compaction= object in =config.json= (=AgentConfig= ignores unknown keys): =enabled=, =claude_idle_minutes=, =claude_cache_minutes=, =codex_idle_minutes=, =codex_cache_minutes=, =tick_seconds=, =timeout_seconds=.
 
 Both mechanisms were proven on throwaway sessions before this module was written (2026-09-26, kikin): Claude =/compact= in print mode emitted =compact_boundary= (22,638 → 2,856 tokens), kept the session id and still recalled a planted word; the Codex app-server compaction completed and the resumed thread still recalled its planted word.
@@ -61,6 +62,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -230,31 +232,37 @@ class IdleCompactor:
                 )
                 state[sid] = session.last_active
                 continue
-            done = await self._compact_locked(session, settings)
-            if done:
+            outcome = await self._compact_locked(session, settings)
+            if outcome != "deferred":
                 state[sid] = session.last_active
         stale = [sid for sid in state if sid not in live_ids]
         for sid in stale:
             del state[sid]
         self._save_state(state)
 
-    async def _compact_locked(self, session: SessionData, settings: IdleCompactSettings) -> bool:
+    async def _compact_locked(self, session: SessionData, settings: IdleCompactSettings) -> str:
+        """Compact under the session lock and report what actually happened.
+
+        ``deferred`` leaves the session unmarked so the next tick re-evaluates;
+        ``done``, ``failed``, ``suppressed`` and ``replaced`` mark it so a
+        failure or a refused subscription never retries on every tick.
+        """
         orch = self._orch
         key = session.session_key
         if orch._lock_pool is None:
-            return False
+            return "deferred"
         if orch.is_chat_busy(key.chat_id, key.topic_id):
             logger.debug("Idle compaction deferred: chat busy session=%s", session.session_id)
-            return False
+            return "deferred"
         lock = orch._lock_pool.get(key.lock_key)
         if lock.locked():
-            return False
+            return "deferred"
         async with lock:
             current = await orch._sessions.get_active(key)
             if current is None or current.session_id != session.session_id:
-                return True  # replaced or reset: nothing left to compact
+                return "replaced"  # replaced or reset: nothing left to compact
             if current.last_active != session.last_active:
-                return False  # a turn landed meanwhile; re-evaluate next tick
+                return "deferred"  # a turn landed meanwhile; re-evaluate next tick
             logger.info(
                 "Idle compaction start provider=%s session=%s model=%s",
                 session.provider,
@@ -271,16 +279,14 @@ class IdleCompactor:
                 raise
             except Exception:
                 logger.exception("Idle compaction failed session=%s", session.session_id)
-                return True  # do not retry a failing compaction every tick
+                return "failed"  # do not retry a failing compaction every tick
             finally:
                 self._compacting.discard(key.storage_key)
             logger.info(
                 "Idle compaction %s provider=%s session=%s",
-                "done" if ok else "failed",
-                session.provider,
-                session.session_id,
+                ok, session.provider, session.session_id,
             )
-            return True
+            return ok
 
     # -- providers ------------------------------------------------------------
 
@@ -301,24 +307,82 @@ class IdleCompactor:
         response = await self._orch._cli_service.execute(request)
         if response.is_error:
             logger.warning("Claude idle compaction error: %s", response.result[:200])
-            return False
+            return "failed"
         if response.session_id and response.session_id != session.session_id:
             logger.warning(
                 "Claude idle compaction returned a new session id %s (kept %s)",
                 response.session_id,
                 session.session_id,
             )
-        return True
+        return "done"
 
-    async def _compact_codex(self, session: SessionData, settings: IdleCompactSettings) -> bool:
+    async def _subscription_identity(self, client: "_CodexAppServer") -> dict[str, Any] | None:
+        """Verify the native ChatGPT subscription route on this connection.
+
+        Idle compaction runs a model turn at what the fleet treats as a cached
+        price. That is only true on the native subscription route, so an API-key
+        profile, a custom provider, or any base-url override must not authorize
+        it. The account identifier is hashed and never leaves this method.
+        """
+        try:
+            account = await asyncio.wait_for(
+                client.request("account/read", {"refreshToken": False}), 30
+            )
+            config = await asyncio.wait_for(
+                client.request("config/read", {"includeLayers": False,
+                                               "cwd": str(self._orch._paths.workspace)}), 30
+            )
+            if (not isinstance(account, dict) or account.get("requiresOpenaiAuth") is not True
+                    or not isinstance(account.get("account"), dict)
+                    or account["account"].get("type") != "chatgpt"):
+                return None
+            route = account.get("workspaceRouting")
+            if (not isinstance(route, dict) or route.get("backendOrigin") != "https://chatgpt.com"
+                    or not isinstance(route.get("chatgptAccountId"), str)
+                    or not route["chatgptAccountId"]):
+                return None
+            effective = config.get("config") if isinstance(config, dict) else None
+            if not isinstance(effective, dict) or effective.get("model_provider") not in (None, "openai"):
+                return None
+            custom = effective.get("model_providers")
+            if custom is not None and (not isinstance(custom, dict) or custom.get("openai") is not None):
+                return None
+            if any(effective.get(name) is not None for name in
+                   ("base_url", "openai_base_url", "api_base", "api_key")):
+                return None
+            chatgpt_base_url = effective.get("chatgpt_base_url")
+            origins = config.get("origins")
+            # Native config/read materializes this built-in default even when no
+            # operator override exists; that one value is accepted only when its
+            # provenance is not an explicit override layer.
+            if chatgpt_base_url is not None and (
+                    chatgpt_base_url != "https://chatgpt.com/backend-api/"
+                    or not isinstance(origins, dict) or "chatgpt_base_url" in origins):
+                return None
+            return {"account_key": hashlib.sha256(route["chatgptAccountId"].encode()).hexdigest(),
+                    "auth_mode": "chatgpt", "backend_origin": "https://chatgpt.com"}
+        except (OSError, ValueError, TypeError, KeyError, asyncio.TimeoutError):
+            return None
+
+    async def _compact_codex(self, session: SessionData, settings: IdleCompactSettings) -> str:
         cli = shutil.which("codex")
         if cli is None:
             logger.warning("Codex idle compaction skipped: codex CLI not on PATH")
-            return False
+            return "failed"
         cwd = str(self._orch._paths.workspace)
         client = _CodexAppServer(cli, cwd)
         try:
             await client.start()
+            # Verify before any resume or compaction request. An unverified
+            # subscription is suppressed, never reported as a completed
+            # compaction, because the cache-price premise would be false.
+            identity = await self._subscription_identity(client)
+            if identity is None:
+                logger.warning(
+                    "Idle compaction suppressed provider=codex session=%s reason=subscription-unverified",
+                    session.session_id,
+                )
+                return "suppressed"
             resume: dict[str, Any] = {"threadId": session.session_id, "excludeTurns": True}
             if session.model:
                 resume["model"] = session.model
@@ -328,9 +392,18 @@ class IdleCompactor:
             await asyncio.wait_for(
                 client.request("thread/compact/start", {"threadId": session.session_id}), 120
             )
-            return await asyncio.wait_for(
+            completed = await asyncio.wait_for(
                 client.wait_compaction(session.session_id), settings.timeout_seconds
             )
+            if not completed:
+                return "failed"
+            if await self._subscription_identity(client) != identity:
+                logger.warning(
+                    "Idle compaction failed provider=codex session=%s reason=subscription-identity-changed",
+                    session.session_id,
+                )
+                return "failed"
+            return "done"
         finally:
             await client.close()
 
@@ -1385,6 +1458,33 @@ def ago(minutes: float) -> str:
     return (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
 
 
+class FakeCodexClient:
+    """Canned app-server replies: no subprocess, no network."""
+
+    def __init__(self, account, config):
+        self._account = account
+        self._config = config
+        self.calls: list[str] = []
+
+    async def start(self):
+        self.calls.append("start")
+
+    async def close(self):
+        self.calls.append("close")
+
+    async def request(self, method, params=None, **kwargs):
+        self.calls.append(method)
+        if method == "account/read":
+            return self._account
+        if method == "config/read":
+            return self._config
+        return {}
+
+    async def wait_compaction(self, session_id, timeout=None):
+        self.calls.append("wait_compaction")
+        return True
+
+
 class IdleCompactTests(unittest.IsolatedAsyncioTestCase):
     def make(self, sessions, config=None, busy=False):
         tmp = Path(tempfile.mkdtemp())
@@ -1433,6 +1533,79 @@ class IdleCompactTests(unittest.IsolatedAsyncioTestCase):
         await self.tick(comp)
         self.assertEqual(codex, ["x1"])
         self.assertEqual(cli.calls, [])
+
+    # -- native subscription gate ---------------------------------------------
+
+    def native_account(self, **overrides):
+        account = {"type": "chatgpt", "chatgptAccountId": "acct-123"}
+        account.update(overrides)
+        return {"requiresOpenaiAuth": True, "account": account,
+                "workspaceRouting": {"backendOrigin": "https://chatgpt.com",
+                                     "chatgptAccountId": account["chatgptAccountId"]}}
+
+    def native_config(self, effective=None, origins=None):
+        return {"config": effective if effective is not None else {},
+                "origins": origins if origins is not None else {}}
+
+    async def identity(self, account=None, config=None):
+        comp, _, _, _ = self.make([])
+        client = FakeCodexClient(account or self.native_account(),
+                                 config or self.native_config())
+        return await comp._subscription_identity(client), client
+
+    async def test_native_chatgpt_subscription_is_accepted(self):
+        identity, _ = await self.identity()
+        self.assertEqual(identity["auth_mode"], "chatgpt")
+        self.assertEqual(len(identity["account_key"]), 64)
+        self.assertNotIn("acct-123", json.dumps(identity))
+
+    async def test_api_key_profile_is_not_a_subscription(self):
+        identity, _ = await self.identity(account={
+            "requiresOpenaiAuth": True,
+            "account": {"type": "apiKey"},
+            "workspaceRouting": {"backendOrigin": "https://chatgpt.com",
+                                 "chatgptAccountId": "acct-123"}})
+        self.assertIsNone(identity)
+
+    async def test_custom_provider_route_is_rejected(self):
+        identity, _ = await self.identity(config=self.native_config(
+            {"model_provider": "azure", "base_url": "https://example.invalid"}))
+        self.assertIsNone(identity)
+
+    async def test_api_key_override_is_rejected(self):
+        identity, _ = await self.identity(config=self.native_config({"api_key": "sk-x"}))
+        self.assertIsNone(identity)
+
+    async def test_foreign_backend_origin_is_rejected(self):
+        identity, _ = await self.identity(account={
+            "requiresOpenaiAuth": True, "account": {"type": "chatgpt"},
+            "workspaceRouting": {"backendOrigin": "https://api.openai.com",
+                                 "chatgptAccountId": "acct-123"}})
+        self.assertIsNone(identity)
+
+    async def test_unverified_subscription_suppresses_and_never_compacts(self):
+        comp, _, _, _ = self.make([])
+        session = FakeSession("x1", "codex", ago(26))
+        settings = comp._settings()
+        client = FakeCodexClient({"requiresOpenaiAuth": True, "account": {"type": "apiKey"},
+                                  "workspaceRouting": {}}, self.native_config())
+        with mock.patch.object(ic.shutil, "which", return_value="/usr/bin/codex"), \
+                mock.patch.object(ic, "_CodexAppServer", lambda cli, cwd: client):
+            outcome = await ic.IdleCompactor._compact_codex(comp, session, settings)
+        self.assertEqual(outcome, "suppressed")
+        self.assertEqual(client.calls[:3], ["start", "account/read", "config/read"])
+        self.assertNotIn("thread/resume", client.calls)
+        self.assertNotIn("thread/compact/start", client.calls)
+
+    async def test_verified_subscription_compacts_and_reports_done(self):
+        comp, _, _, _ = self.make([])
+        session = FakeSession("x1", "codex", ago(26))
+        client = FakeCodexClient(self.native_account(), self.native_config())
+        with mock.patch.object(ic.shutil, "which", return_value="/usr/bin/codex"), \
+                mock.patch.object(ic, "_CodexAppServer", lambda cli, cwd: client):
+            outcome = await ic.IdleCompactor._compact_codex(comp, session, comp._settings())
+        self.assertEqual(outcome, "done")
+        self.assertIn("thread/compact/start", client.calls)
 
     async def test_expired_cache_is_skipped_and_marked(self):
         comp, cli, codex, tmp = self.make(

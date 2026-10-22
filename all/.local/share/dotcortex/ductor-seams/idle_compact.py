@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -195,31 +196,37 @@ class IdleCompactor:
                 )
                 state[sid] = session.last_active
                 continue
-            done = await self._compact_locked(session, settings)
-            if done:
+            outcome = await self._compact_locked(session, settings)
+            if outcome != "deferred":
                 state[sid] = session.last_active
         stale = [sid for sid in state if sid not in live_ids]
         for sid in stale:
             del state[sid]
         self._save_state(state)
 
-    async def _compact_locked(self, session: SessionData, settings: IdleCompactSettings) -> bool:
+    async def _compact_locked(self, session: SessionData, settings: IdleCompactSettings) -> str:
+        """Compact under the session lock and report what actually happened.
+
+        ``deferred`` leaves the session unmarked so the next tick re-evaluates;
+        ``done``, ``failed``, ``suppressed`` and ``replaced`` mark it so a
+        failure or a refused subscription never retries on every tick.
+        """
         orch = self._orch
         key = session.session_key
         if orch._lock_pool is None:
-            return False
+            return "deferred"
         if orch.is_chat_busy(key.chat_id, key.topic_id):
             logger.debug("Idle compaction deferred: chat busy session=%s", session.session_id)
-            return False
+            return "deferred"
         lock = orch._lock_pool.get(key.lock_key)
         if lock.locked():
-            return False
+            return "deferred"
         async with lock:
             current = await orch._sessions.get_active(key)
             if current is None or current.session_id != session.session_id:
-                return True  # replaced or reset: nothing left to compact
+                return "replaced"  # replaced or reset: nothing left to compact
             if current.last_active != session.last_active:
-                return False  # a turn landed meanwhile; re-evaluate next tick
+                return "deferred"  # a turn landed meanwhile; re-evaluate next tick
             logger.info(
                 "Idle compaction start provider=%s session=%s model=%s",
                 session.provider,
@@ -236,16 +243,14 @@ class IdleCompactor:
                 raise
             except Exception:
                 logger.exception("Idle compaction failed session=%s", session.session_id)
-                return True  # do not retry a failing compaction every tick
+                return "failed"  # do not retry a failing compaction every tick
             finally:
                 self._compacting.discard(key.storage_key)
             logger.info(
                 "Idle compaction %s provider=%s session=%s",
-                "done" if ok else "failed",
-                session.provider,
-                session.session_id,
+                ok, session.provider, session.session_id,
             )
-            return True
+            return ok
 
     # -- providers ------------------------------------------------------------
 
@@ -266,24 +271,82 @@ class IdleCompactor:
         response = await self._orch._cli_service.execute(request)
         if response.is_error:
             logger.warning("Claude idle compaction error: %s", response.result[:200])
-            return False
+            return "failed"
         if response.session_id and response.session_id != session.session_id:
             logger.warning(
                 "Claude idle compaction returned a new session id %s (kept %s)",
                 response.session_id,
                 session.session_id,
             )
-        return True
+        return "done"
 
-    async def _compact_codex(self, session: SessionData, settings: IdleCompactSettings) -> bool:
+    async def _subscription_identity(self, client: "_CodexAppServer") -> dict[str, Any] | None:
+        """Verify the native ChatGPT subscription route on this connection.
+
+        Idle compaction runs a model turn at what the fleet treats as a cached
+        price. That is only true on the native subscription route, so an API-key
+        profile, a custom provider, or any base-url override must not authorize
+        it. The account identifier is hashed and never leaves this method.
+        """
+        try:
+            account = await asyncio.wait_for(
+                client.request("account/read", {"refreshToken": False}), 30
+            )
+            config = await asyncio.wait_for(
+                client.request("config/read", {"includeLayers": False,
+                                               "cwd": str(self._orch._paths.workspace)}), 30
+            )
+            if (not isinstance(account, dict) or account.get("requiresOpenaiAuth") is not True
+                    or not isinstance(account.get("account"), dict)
+                    or account["account"].get("type") != "chatgpt"):
+                return None
+            route = account.get("workspaceRouting")
+            if (not isinstance(route, dict) or route.get("backendOrigin") != "https://chatgpt.com"
+                    or not isinstance(route.get("chatgptAccountId"), str)
+                    or not route["chatgptAccountId"]):
+                return None
+            effective = config.get("config") if isinstance(config, dict) else None
+            if not isinstance(effective, dict) or effective.get("model_provider") not in (None, "openai"):
+                return None
+            custom = effective.get("model_providers")
+            if custom is not None and (not isinstance(custom, dict) or custom.get("openai") is not None):
+                return None
+            if any(effective.get(name) is not None for name in
+                   ("base_url", "openai_base_url", "api_base", "api_key")):
+                return None
+            chatgpt_base_url = effective.get("chatgpt_base_url")
+            origins = config.get("origins")
+            # Native config/read materializes this built-in default even when no
+            # operator override exists; that one value is accepted only when its
+            # provenance is not an explicit override layer.
+            if chatgpt_base_url is not None and (
+                    chatgpt_base_url != "https://chatgpt.com/backend-api/"
+                    or not isinstance(origins, dict) or "chatgpt_base_url" in origins):
+                return None
+            return {"account_key": hashlib.sha256(route["chatgptAccountId"].encode()).hexdigest(),
+                    "auth_mode": "chatgpt", "backend_origin": "https://chatgpt.com"}
+        except (OSError, ValueError, TypeError, KeyError, asyncio.TimeoutError):
+            return None
+
+    async def _compact_codex(self, session: SessionData, settings: IdleCompactSettings) -> str:
         cli = shutil.which("codex")
         if cli is None:
             logger.warning("Codex idle compaction skipped: codex CLI not on PATH")
-            return False
+            return "failed"
         cwd = str(self._orch._paths.workspace)
         client = _CodexAppServer(cli, cwd)
         try:
             await client.start()
+            # Verify before any resume or compaction request. An unverified
+            # subscription is suppressed, never reported as a completed
+            # compaction, because the cache-price premise would be false.
+            identity = await self._subscription_identity(client)
+            if identity is None:
+                logger.warning(
+                    "Idle compaction suppressed provider=codex session=%s reason=subscription-unverified",
+                    session.session_id,
+                )
+                return "suppressed"
             resume: dict[str, Any] = {"threadId": session.session_id, "excludeTurns": True}
             if session.model:
                 resume["model"] = session.model
@@ -293,9 +356,18 @@ class IdleCompactor:
             await asyncio.wait_for(
                 client.request("thread/compact/start", {"threadId": session.session_id}), 120
             )
-            return await asyncio.wait_for(
+            completed = await asyncio.wait_for(
                 client.wait_compaction(session.session_id), settings.timeout_seconds
             )
+            if not completed:
+                return "failed"
+            if await self._subscription_identity(client) != identity:
+                logger.warning(
+                    "Idle compaction failed provider=codex session=%s reason=subscription-identity-changed",
+                    session.session_id,
+                )
+                return "failed"
+            return "done"
         finally:
             await client.close()
 

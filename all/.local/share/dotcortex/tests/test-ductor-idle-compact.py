@@ -82,6 +82,33 @@ def ago(minutes: float) -> str:
     return (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
 
 
+class FakeCodexClient:
+    """Canned app-server replies: no subprocess, no network."""
+
+    def __init__(self, account, config):
+        self._account = account
+        self._config = config
+        self.calls: list[str] = []
+
+    async def start(self):
+        self.calls.append("start")
+
+    async def close(self):
+        self.calls.append("close")
+
+    async def request(self, method, params=None, **kwargs):
+        self.calls.append(method)
+        if method == "account/read":
+            return self._account
+        if method == "config/read":
+            return self._config
+        return {}
+
+    async def wait_compaction(self, session_id, timeout=None):
+        self.calls.append("wait_compaction")
+        return True
+
+
 class IdleCompactTests(unittest.IsolatedAsyncioTestCase):
     def make(self, sessions, config=None, busy=False):
         tmp = Path(tempfile.mkdtemp())
@@ -130,6 +157,79 @@ class IdleCompactTests(unittest.IsolatedAsyncioTestCase):
         await self.tick(comp)
         self.assertEqual(codex, ["x1"])
         self.assertEqual(cli.calls, [])
+
+    # -- native subscription gate ---------------------------------------------
+
+    def native_account(self, **overrides):
+        account = {"type": "chatgpt", "chatgptAccountId": "acct-123"}
+        account.update(overrides)
+        return {"requiresOpenaiAuth": True, "account": account,
+                "workspaceRouting": {"backendOrigin": "https://chatgpt.com",
+                                     "chatgptAccountId": account["chatgptAccountId"]}}
+
+    def native_config(self, effective=None, origins=None):
+        return {"config": effective if effective is not None else {},
+                "origins": origins if origins is not None else {}}
+
+    async def identity(self, account=None, config=None):
+        comp, _, _, _ = self.make([])
+        client = FakeCodexClient(account or self.native_account(),
+                                 config or self.native_config())
+        return await comp._subscription_identity(client), client
+
+    async def test_native_chatgpt_subscription_is_accepted(self):
+        identity, _ = await self.identity()
+        self.assertEqual(identity["auth_mode"], "chatgpt")
+        self.assertEqual(len(identity["account_key"]), 64)
+        self.assertNotIn("acct-123", json.dumps(identity))
+
+    async def test_api_key_profile_is_not_a_subscription(self):
+        identity, _ = await self.identity(account={
+            "requiresOpenaiAuth": True,
+            "account": {"type": "apiKey"},
+            "workspaceRouting": {"backendOrigin": "https://chatgpt.com",
+                                 "chatgptAccountId": "acct-123"}})
+        self.assertIsNone(identity)
+
+    async def test_custom_provider_route_is_rejected(self):
+        identity, _ = await self.identity(config=self.native_config(
+            {"model_provider": "azure", "base_url": "https://example.invalid"}))
+        self.assertIsNone(identity)
+
+    async def test_api_key_override_is_rejected(self):
+        identity, _ = await self.identity(config=self.native_config({"api_key": "sk-x"}))
+        self.assertIsNone(identity)
+
+    async def test_foreign_backend_origin_is_rejected(self):
+        identity, _ = await self.identity(account={
+            "requiresOpenaiAuth": True, "account": {"type": "chatgpt"},
+            "workspaceRouting": {"backendOrigin": "https://api.openai.com",
+                                 "chatgptAccountId": "acct-123"}})
+        self.assertIsNone(identity)
+
+    async def test_unverified_subscription_suppresses_and_never_compacts(self):
+        comp, _, _, _ = self.make([])
+        session = FakeSession("x1", "codex", ago(26))
+        settings = comp._settings()
+        client = FakeCodexClient({"requiresOpenaiAuth": True, "account": {"type": "apiKey"},
+                                  "workspaceRouting": {}}, self.native_config())
+        with mock.patch.object(ic.shutil, "which", return_value="/usr/bin/codex"), \
+                mock.patch.object(ic, "_CodexAppServer", lambda cli, cwd: client):
+            outcome = await ic.IdleCompactor._compact_codex(comp, session, settings)
+        self.assertEqual(outcome, "suppressed")
+        self.assertEqual(client.calls[:3], ["start", "account/read", "config/read"])
+        self.assertNotIn("thread/resume", client.calls)
+        self.assertNotIn("thread/compact/start", client.calls)
+
+    async def test_verified_subscription_compacts_and_reports_done(self):
+        comp, _, _, _ = self.make([])
+        session = FakeSession("x1", "codex", ago(26))
+        client = FakeCodexClient(self.native_account(), self.native_config())
+        with mock.patch.object(ic.shutil, "which", return_value="/usr/bin/codex"), \
+                mock.patch.object(ic, "_CodexAppServer", lambda cli, cwd: client):
+            outcome = await ic.IdleCompactor._compact_codex(comp, session, comp._settings())
+        self.assertEqual(outcome, "done")
+        self.assertIn("thread/compact/start", client.calls)
 
     async def test_expired_cache_is_skipped_and_marked(self):
         comp, cli, codex, tmp = self.make(
