@@ -31,6 +31,35 @@ kikin-kushi nala open-code "web app + CLI instead (deb pkg name is open-code)"
 kikin-kushi appimage claude-desktop "web app + CLI instead"
 kikin-kushi appimage claude-devtools "web app + CLI instead"
 kikin-kushi appimage opencode-desktop "web app + CLI instead"
+# Flatpak GUI apps dropped on headless kikin to reclaim their old runtimes (Mètsàtron 2026-10-22).
+# Kept in the global manifest for machines that use them; only kikin excludes them.
+kikin-kushi flatpak org.wezfurlong.wezterm "terminal kept on other machines; frees freedesktop 23.08 here"
+kikin-kushi flatpak com.mikeasoft.pied "voice-model GUI not used on kikin; frees freedesktop 24.08 here"
+kikin-kushi flatpak com.snes9x.Snes9x "Redstone NT is kikin-only; SNES emu dropped here; frees freedesktop 24.08"
+# GUI/gaming flatpaks in the global manifest that headless kikin never had installed — excluded so
+# flatpak-apply reconciles cleanly instead of installing them (drift fix, Mètsàtron 2026-10-22). The
+# gaming set (PCSX2/RPCS3/DuckStation/PPSSPP/Moonlight/pupgui2) is not installed; this declares intent
+# and can be re-added deliberately if kikin ever carries that sanctuary with disk headroom.
+kikin-kushi flatpak app.zen_browser.zen "headless: GUI browser"
+kikin-kushi flatpak cc.arduino.IDE2 "headless: GUI IDE"
+kikin-kushi flatpak com.discordapp.Discord "headless: GUI chat"
+kikin-kushi flatpak com.leinardi.gwe "headless: NVIDIA GPU GUI, no such GPU on kikin"
+kikin-kushi flatpak com.logseq.Logseq "headless: note GUI"
+kikin-kushi flatpak com.moonlight_stream.Moonlight "headless: game-streaming GUI client"
+kikin-kushi flatpak io.github.dgsasha.Remembrance "headless: reminders GUI"
+kikin-kushi flatpak io.github.josephmawa.Bella "headless: GUI app"
+kikin-kushi flatpak io.github.qwersyk.Newelle "headless: GUI assistant"
+kikin-kushi flatpak io.github.webcamoid.Webcamoid "headless: webcam GUI"
+kikin-kushi flatpak me.mitya57.ReText "headless: markdown editor GUI"
+kikin-kushi flatpak net.davidotek.pupgui2 "headless: Proton/Wine GUI manager (gaming)"
+kikin-kushi flatpak net.pcsx2.PCSX2 "headless: PS2 emulator (Redstone NT gaming; re-add deliberately)"
+kikin-kushi flatpak net.rpcs3.RPCS3 "headless: PS3 emulator (Redstone NT gaming; re-add deliberately)"
+kikin-kushi flatpak net.xmind.XMind "headless: mind-map GUI"
+kikin-kushi flatpak one.ablaze.floorp "headless: GUI browser"
+kikin-kushi flatpak org.duckstation.DuckStation "headless: PS1 emulator (Redstone NT gaming; re-add deliberately)"
+kikin-kushi flatpak org.ppsspp.PPSSPP "headless: PSP emulator (Redstone NT gaming; re-add deliberately)"
+kikin-kushi flatpak org.zotero.Zotero "headless: reference manager GUI"
+kikin-kushi flatpak us.zoom.Zoom "headless: video-conferencing GUI"
 # host-desktop build toolchains — inert on headless kikin (no host xfce4-panel, no host dock).
 # ONLY the panel/plank-SPECIFIC dev headers are excluded; the general build tools in the same
 # manifest groups (valac, meson, ninja-build, libx11-dev, python3-pil, libxi-dev, libxfixes-dev)
