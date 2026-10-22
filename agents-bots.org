@@ -336,6 +336,14 @@ commented so a fresh machine fails closed until provisioned.
       "contextWindowTokens": 200000,
       "temperature": 0.1,
       "reasoningEffort": "high"
+    },
+    "opencode-go": {
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "provider": "opencode_go",
+      "maxTokens": 384000,
+      "contextWindowTokens": 1000000,
+      "temperature": 0.1,
+      "reasoningEffort": "high"
     }
   },
   "channels": {
