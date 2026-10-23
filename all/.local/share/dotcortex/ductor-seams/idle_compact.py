@@ -9,7 +9,9 @@ has its own idle threshold:
 - Claude: ``/compact`` through the normal CLI path (``claude -p --resume``),
   which keeps the session id.  Default 55 minutes idle (1-hour cache).
 - Codex: ``thread/compact/start`` through a short-lived ``codex app-server``.
-  Default 25 minutes idle (the Codex cache lasts about 30 minutes).
+  Conservative default 25/30 minutes for API/custom/unverified routes.
+  Verified ChatGPT subscriptions suppress this idle-cache action; the reviewed
+  provider assurance does not establish physical cache residency.
 
 A session is compacted at most once per idle period: the ``last_active``
 value it was compacted at is persisted, so a restart never repeats it.  A
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -45,6 +48,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _STATE_FILE = "idle_compaction.json"
+_SUBSCRIPTION_CACHE_SOURCE = "https://x.com/thsottiaux/status/2112712984644784534"
+_SUBSCRIPTION_CACHE_EFFECTIVE = 1792545002.0  # 2026-10-21T01:10:02Z
+_SUBSCRIPTION_SUPPRESSED = "subscription_idle_suppressed"
+_SUBSCRIPTION_ROUTE_ENV = frozenset({
+    "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_KEY", "CODEX_API_KEY",
+    "CHATGPT_BASE_URL", "CODEX_CHATGPT_BASE_URL", "CODEX_BASE_URL", "AZURE_OPENAI_ENDPOINT",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +251,8 @@ class IdleCompactor:
                 self._compacting.discard(key.storage_key)
             logger.info(
                 "Idle compaction %s provider=%s session=%s",
-                "done" if ok else "failed",
+                "suppressed (verified subscription cache assurance)" if ok == _SUBSCRIPTION_SUPPRESSED
+                else "done" if ok else "failed",
                 session.provider,
                 session.session_id,
             )
@@ -275,7 +286,7 @@ class IdleCompactor:
             )
         return True
 
-    async def _compact_codex(self, session: SessionData, settings: IdleCompactSettings) -> bool:
+    async def _compact_codex(self, session: SessionData, settings: IdleCompactSettings) -> bool | str:
         cli = shutil.which("codex")
         if cli is None:
             logger.warning("Codex idle compaction skipped: codex CLI not on PATH")
@@ -284,6 +295,8 @@ class IdleCompactor:
         client = _CodexAppServer(cli, cwd)
         try:
             await client.start()
+            if await client.verified_subscription_identity() is not None:
+                return _SUBSCRIPTION_SUPPRESSED
             resume: dict[str, Any] = {"threadId": session.session_id, "excludeTurns": True}
             if session.model:
                 resume["model"] = session.model
@@ -311,12 +324,15 @@ class _CodexAppServer:
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._notes: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._reader: asyncio.Task[None] | None = None
+        self._environment: dict[str, str] | None = None
 
     async def start(self) -> None:
+        self._environment = os.environ.copy()
         self._proc = await asyncio.create_subprocess_exec(
             self._cli,
             "app-server",
             cwd=self._cwd,
+            env=self._environment,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -331,6 +347,63 @@ class _CodexAppServer:
             60,
         )
         await self._send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+    async def verified_subscription_identity(self) -> dict[str, Any] | None:
+        """Read metadata on this idle owner's connection; never refresh or run a turn."""
+        proc, reader, environment = self._proc, self._reader, self._environment
+        def same_connection() -> bool:
+            return (proc is not None and self._proc is proc and proc.returncode is None
+                    and reader is not None and self._reader is reader and not reader.done())
+        async def read(method: str, params: dict[str, Any]) -> Any:
+            if not same_connection():
+                raise ValueError("idle management connection changed")
+            result = await asyncio.wait_for(self.request(method, params), 5)
+            if not same_connection():
+                raise ValueError("idle management connection changed")
+            return result
+        try:
+            if (environment is None or any(environment.get(k) for k in _SUBSCRIPTION_ROUTE_ENV)
+                    or datetime.now(UTC).timestamp() < _SUBSCRIPTION_CACHE_EFFECTIVE):
+                return None
+            account = await read("account/read", {"refreshToken": False})
+            config = await read("config/read", {"includeLayers": False, "cwd": self._cwd})
+            limits = await read("account/rateLimits/read", {})
+            if (not isinstance(account, dict) or account.get("requiresOpenaiAuth") is not True
+                    or not isinstance(account.get("account"), dict)
+                    or account["account"].get("type") != "chatgpt"):
+                return None
+            route = account.get("workspaceRouting")
+            if (not isinstance(route, dict) or route.get("backendOrigin") != "https://chatgpt.com"
+                    or not isinstance(route.get("chatgptAccountId"), str)
+                    or not route["chatgptAccountId"] or not isinstance(limits, dict)
+                    or limits.get("accountId") != route["chatgptAccountId"]):
+                return None
+            effective = config.get("config") if isinstance(config, dict) else None
+            if not isinstance(effective, dict) or effective.get("model_provider") not in (None, "openai"):
+                return None
+            custom = effective.get("model_providers")
+            if custom is not None and (not isinstance(custom, dict) or custom.get("openai") is not None):
+                return None
+            base = effective.get("chatgpt_base_url")
+            # Native config/read materializes this default without an origin.
+            origins = config.get("origins")
+            if base is not None and (base != "https://chatgpt.com/backend-api/"
+                    or not isinstance(origins, dict) or "chatgpt_base_url" in origins):
+                return None
+            if any(effective.get(k) is not None for k in ("base_url", "openai_base_url", "api_base", "api_key")):
+                return None
+            # Re-read auth after the other RPCs to refuse account/route switches.
+            latest = await read("account/read", {"refreshToken": False})
+            if (not isinstance(latest, dict) or latest.get("requiresOpenaiAuth") is not True
+                    or latest.get("account") != account["account"]
+                    or latest.get("workspaceRouting") != route):
+                return None
+            return {"account_key": hashlib.sha256(route["chatgptAccountId"].encode()).hexdigest(),
+                    "auth_mode": "chatgpt", "endpoint_id": "openai-codex-oauth",
+                    "backend_origin": "https://chatgpt.com", "source_url": _SUBSCRIPTION_CACHE_SOURCE,
+                    "effective_at": _SUBSCRIPTION_CACHE_EFFECTIVE, "physical_expiry_known": False}
+        except (OSError, ValueError, TypeError, RuntimeError, TimeoutError):
+            return None
 
     async def _send(self, message: dict[str, Any]) -> None:
         assert self._proc is not None and self._proc.stdin is not None

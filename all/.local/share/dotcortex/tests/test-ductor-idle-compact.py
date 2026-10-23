@@ -190,5 +190,114 @@ class IdleCompactTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(settings.window("codex", "gpt-5.6-sol"), (1500.0, 1800.0))
 
 
+class SubscriptionIdleTests(IdleCompactTests):
+    def native(self):
+        client = ic._CodexAppServer("codex", "/fixture/workspace")
+        client._proc = SimpleNamespace(returncode=None)
+        client._reader = SimpleNamespace(done=lambda: False)
+        client._environment = {}
+        account = {"requiresOpenaiAuth": True, "account": {"type": "chatgpt"},
+                   "workspaceRouting": {"backendOrigin": "https://chatgpt.com",
+                       "chatgptAccountId": "fixture-account", "accountRoutingOverride": "NO_CONSTRAINT"}}
+        config = {"config": {"model_provider": None, "model_providers": {},
+            "chatgpt_base_url": "https://chatgpt.com/backend-api/", "base_url": None,
+            "openai_base_url": None, "api_base": None, "api_key": None}, "origins": {}}
+        limits = {"accountId": "fixture-account"}
+        async def request(method, params):
+            return {"account/read": account, "config/read": config,
+                    "account/rateLimits/read": limits}[method]
+        client.request = mock.AsyncMock(side_effect=request)
+        client.start = mock.AsyncMock()
+        client.close = mock.AsyncMock()
+        client.wait_compaction = mock.AsyncMock(return_value=True)
+        return client, account, config, limits
+
+    async def test_native_defaults_verify_without_physical_expiry_claim(self):
+        client, _, _, _ = self.native()
+        result = await client.verified_subscription_identity()
+        self.assertEqual(len(result["account_key"]), 64)
+        self.assertFalse(result["physical_expiry_known"])
+        self.assertEqual(result["source_url"], ic._SUBSCRIPTION_CACHE_SOURCE)
+        self.assertEqual(client.request.await_args_list[1].args,
+            ("config/read", {"includeLayers": False, "cwd": "/fixture/workspace"}))
+        for call in client.request.await_args_list:
+            if call.args[0] == "account/read":
+                self.assertEqual(call.args[1], {"refreshToken": False})
+
+    async def test_verified_subscription_suppresses_before_resume_once(self):
+        session = FakeSession("x1", "codex", ago(26))
+        comp, _, _, tmp = self.make([session])
+        comp._compact_codex = ic.IdleCompactor._compact_codex.__get__(comp)
+        client, _, _, _ = self.native()
+        with mock.patch.object(ic, "_CodexAppServer", return_value=client), \
+                mock.patch.object(ic.shutil, "which", return_value="codex"), \
+                self.assertLogs(ic.logger, "INFO") as logs:
+            await self.tick(comp)
+            await self.tick(comp)
+        methods = [c.args[0] for c in client.request.await_args_list]
+        self.assertNotIn("thread/resume", methods)
+        self.assertNotIn("thread/compact/start", methods)
+        client.start.assert_awaited_once()
+        client.wait_compaction.assert_not_awaited()
+        client.close.assert_awaited_once()
+        self.assertTrue(any("suppressed" in row for row in logs.output))
+        self.assertFalse(any("Idle compaction done" in row for row in logs.output))
+        self.assertEqual(session.last_active, json.loads((tmp / "idle_compaction.json").read_text())["x1"])
+        self.assertEqual(comp._compacting, set())
+        self.assertEqual(session.session_id, "x1")
+
+    async def test_api_custom_mismatch_and_overrides_do_not_verify(self):
+        for case in ("api", "provider", "custom", "backend", "account", "origin",
+                     "origins_missing", "base", "key", "environment", "malformed"):
+            with self.subTest(case=case):
+                client, account, config, limits = self.native()
+                if case == "api": account["account"]["type"] = "apiKey"
+                elif case == "provider": config["config"]["model_provider"] = "custom"
+                elif case == "custom": config["config"]["model_providers"]["openai"] = {}
+                elif case == "backend": account["workspaceRouting"]["backendOrigin"] = "https://custom.invalid"
+                elif case == "account": limits["accountId"] = "another-account"
+                elif case == "origin": config["origins"]["chatgpt_base_url"] = {}
+                elif case == "origins_missing": config.pop("origins")
+                elif case == "base": config["config"]["chatgpt_base_url"] = "https://custom.invalid"
+                elif case == "key": config["config"]["api_key"] = "fixture-key"
+                elif case == "environment": client._environment["OPENAI_API_KEY"] = "fixture-key"
+                elif case == "malformed": account["account"] = None
+                self.assertIsNone(await client.verified_subscription_identity())
+
+    async def test_failure_dead_or_replaced_connection_never_verifies(self):
+        for case in ("rpc_error", "timeout", "exit", "replacement", "reader_exit", "account_switch"):
+            with self.subTest(case=case):
+                client, _, _, _ = self.native()
+                original = client.request.side_effect
+                async def request(method, params):
+                    if case == "rpc_error": raise RuntimeError("fixture RPC failure")
+                    if case == "timeout": raise TimeoutError()
+                    result = await original(method, params)
+                    if case == "exit": client._proc.returncode = 1
+                    if case == "replacement": client._proc = SimpleNamespace(returncode=None)
+                    if case == "reader_exit": client._reader = SimpleNamespace(done=lambda: True)
+                    if case == "account_switch" and client.request.await_count == 4:
+                        return {"requiresOpenaiAuth": True, "account": {"type": "chatgpt"},
+                                "workspaceRouting": {"chatgptAccountId": "another-account"}}
+                    return result
+                client.request.side_effect = request
+                self.assertIsNone(await client.verified_subscription_identity())
+
+    async def test_unverified_scope_retains_original_compaction_path(self):
+        comp, _, _, _ = self.make([])
+        client, _, _, _ = self.native()
+        client.verified_subscription_identity = mock.AsyncMock(return_value=None)
+        client.request = mock.AsyncMock(return_value={})
+        with mock.patch.object(ic, "_CodexAppServer", return_value=client), \
+                mock.patch.object(ic.shutil, "which", return_value="codex"):
+            result = await ic.IdleCompactor._compact_codex(comp,
+                FakeSession("x1", "codex", ago(26)), ic.IdleCompactSettings())
+        self.assertIs(result, True)
+        self.assertEqual([c.args[0] for c in client.request.await_args_list],
+                         ["thread/resume", "thread/compact/start"])
+        client.wait_compaction.assert_awaited_once_with("x1")
+        client.close.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()

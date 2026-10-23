@@ -20,6 +20,16 @@ A resumed session whose provider cache has expired is re-read in full at the unc
 
 Mètsàtron's ruling (2026-09-26): Codex compacts before 30 minutes idle and Claude before an hour, because that is when each cache expires; the context window size itself is not the concern, since a large window that stays cached can cost less than a small one that compacts and re-reads more often. The fleet's other Codex governors (=codex-warm=, the HelmAstra adapter) use 27 minutes; Ductor uses 25 by his ruling.
 
+The reviewed Codex subscription policy supersedes the historical idle-expiry
+assumption for verified ChatGPT connections from 2026-10-21T01:10:02Z. The
+owner checks native account, workspace route, effective config and live account
+identity on its own management connection before resuming any idle session.
+For that verified scope it suppresses idle-cache compaction under the provider's
+[commercial cache-hit assurance](https://x.com/thsottiaux/status/2112712984644784534).
+Physical cache expiry remains unknown. API, custom and unverified routes retain
+the conservative behavior below. Native context compaction and manual compaction
+are unchanged; no keepalive or model turn is used for verification.
+
 Rules the seam keeps:
 
 - Main sessions only (=sessions.json=); background task workers are one-shot and are not compacted.
@@ -44,7 +54,9 @@ has its own idle threshold:
 - Claude: ``/compact`` through the normal CLI path (``claude -p --resume``),
   which keeps the session id.  Default 55 minutes idle (1-hour cache).
 - Codex: ``thread/compact/start`` through a short-lived ``codex app-server``.
-  Default 25 minutes idle (the Codex cache lasts about 30 minutes).
+  Conservative default 25/30 minutes for API/custom/unverified routes.
+  Verified ChatGPT subscriptions suppress this idle-cache action; the reviewed
+  provider assurance does not establish physical cache residency.
 
 A session is compacted at most once per idle period: the ``last_active``
 value it was compacted at is persisted, so a restart never repeats it.  A
@@ -61,6 +73,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -80,6 +93,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _STATE_FILE = "idle_compaction.json"
+_SUBSCRIPTION_CACHE_SOURCE = "https://x.com/thsottiaux/status/2112712984644784534"
+_SUBSCRIPTION_CACHE_EFFECTIVE = 1792545002.0  # 2026-10-21T01:10:02Z
+_SUBSCRIPTION_SUPPRESSED = "subscription_idle_suppressed"
+_SUBSCRIPTION_ROUTE_ENV = frozenset({
+    "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_KEY", "CODEX_API_KEY",
+    "CHATGPT_BASE_URL", "CODEX_CHATGPT_BASE_URL", "CODEX_BASE_URL", "AZURE_OPENAI_ENDPOINT",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,7 +296,8 @@ class IdleCompactor:
                 self._compacting.discard(key.storage_key)
             logger.info(
                 "Idle compaction %s provider=%s session=%s",
-                "done" if ok else "failed",
+                "suppressed (verified subscription cache assurance)" if ok == _SUBSCRIPTION_SUPPRESSED
+                else "done" if ok else "failed",
                 session.provider,
                 session.session_id,
             )
@@ -310,7 +331,7 @@ class IdleCompactor:
             )
         return True
 
-    async def _compact_codex(self, session: SessionData, settings: IdleCompactSettings) -> bool:
+    async def _compact_codex(self, session: SessionData, settings: IdleCompactSettings) -> bool | str:
         cli = shutil.which("codex")
         if cli is None:
             logger.warning("Codex idle compaction skipped: codex CLI not on PATH")
@@ -319,6 +340,8 @@ class IdleCompactor:
         client = _CodexAppServer(cli, cwd)
         try:
             await client.start()
+            if await client.verified_subscription_identity() is not None:
+                return _SUBSCRIPTION_SUPPRESSED
             resume: dict[str, Any] = {"threadId": session.session_id, "excludeTurns": True}
             if session.model:
                 resume["model"] = session.model
@@ -346,12 +369,15 @@ class _CodexAppServer:
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._notes: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._reader: asyncio.Task[None] | None = None
+        self._environment: dict[str, str] | None = None
 
     async def start(self) -> None:
+        self._environment = os.environ.copy()
         self._proc = await asyncio.create_subprocess_exec(
             self._cli,
             "app-server",
             cwd=self._cwd,
+            env=self._environment,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -366,6 +392,63 @@ class _CodexAppServer:
             60,
         )
         await self._send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+    async def verified_subscription_identity(self) -> dict[str, Any] | None:
+        """Read metadata on this idle owner's connection; never refresh or run a turn."""
+        proc, reader, environment = self._proc, self._reader, self._environment
+        def same_connection() -> bool:
+            return (proc is not None and self._proc is proc and proc.returncode is None
+                    and reader is not None and self._reader is reader and not reader.done())
+        async def read(method: str, params: dict[str, Any]) -> Any:
+            if not same_connection():
+                raise ValueError("idle management connection changed")
+            result = await asyncio.wait_for(self.request(method, params), 5)
+            if not same_connection():
+                raise ValueError("idle management connection changed")
+            return result
+        try:
+            if (environment is None or any(environment.get(k) for k in _SUBSCRIPTION_ROUTE_ENV)
+                    or datetime.now(UTC).timestamp() < _SUBSCRIPTION_CACHE_EFFECTIVE):
+                return None
+            account = await read("account/read", {"refreshToken": False})
+            config = await read("config/read", {"includeLayers": False, "cwd": self._cwd})
+            limits = await read("account/rateLimits/read", {})
+            if (not isinstance(account, dict) or account.get("requiresOpenaiAuth") is not True
+                    or not isinstance(account.get("account"), dict)
+                    or account["account"].get("type") != "chatgpt"):
+                return None
+            route = account.get("workspaceRouting")
+            if (not isinstance(route, dict) or route.get("backendOrigin") != "https://chatgpt.com"
+                    or not isinstance(route.get("chatgptAccountId"), str)
+                    or not route["chatgptAccountId"] or not isinstance(limits, dict)
+                    or limits.get("accountId") != route["chatgptAccountId"]):
+                return None
+            effective = config.get("config") if isinstance(config, dict) else None
+            if not isinstance(effective, dict) or effective.get("model_provider") not in (None, "openai"):
+                return None
+            custom = effective.get("model_providers")
+            if custom is not None and (not isinstance(custom, dict) or custom.get("openai") is not None):
+                return None
+            base = effective.get("chatgpt_base_url")
+            # Native config/read materializes this default without an origin.
+            origins = config.get("origins")
+            if base is not None and (base != "https://chatgpt.com/backend-api/"
+                    or not isinstance(origins, dict) or "chatgpt_base_url" in origins):
+                return None
+            if any(effective.get(k) is not None for k in ("base_url", "openai_base_url", "api_base", "api_key")):
+                return None
+            # Re-read auth after the other RPCs to refuse account/route switches.
+            latest = await read("account/read", {"refreshToken": False})
+            if (not isinstance(latest, dict) or latest.get("requiresOpenaiAuth") is not True
+                    or latest.get("account") != account["account"]
+                    or latest.get("workspaceRouting") != route):
+                return None
+            return {"account_key": hashlib.sha256(route["chatgptAccountId"].encode()).hexdigest(),
+                    "auth_mode": "chatgpt", "endpoint_id": "openai-codex-oauth",
+                    "backend_origin": "https://chatgpt.com", "source_url": _SUBSCRIPTION_CACHE_SOURCE,
+                    "effective_at": _SUBSCRIPTION_CACHE_EFFECTIVE, "physical_expiry_known": False}
+        except (OSError, ValueError, TypeError, RuntimeError, TimeoutError):
+            return None
 
     async def _send(self, message: dict[str, Any]) -> None:
         assert self._proc is not None and self._proc.stdin is not None
@@ -1491,6 +1574,115 @@ class IdleCompactTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
         with mock.patch.object(ic.subprocess, "run", side_effect=OSError("offline")):
             self.assertEqual(settings.window("codex", "gpt-5.6-sol"), (1500.0, 1800.0))
+
+
+class SubscriptionIdleTests(IdleCompactTests):
+    def native(self):
+        client = ic._CodexAppServer("codex", "/fixture/workspace")
+        client._proc = SimpleNamespace(returncode=None)
+        client._reader = SimpleNamespace(done=lambda: False)
+        client._environment = {}
+        account = {"requiresOpenaiAuth": True, "account": {"type": "chatgpt"},
+                   "workspaceRouting": {"backendOrigin": "https://chatgpt.com",
+                       "chatgptAccountId": "fixture-account", "accountRoutingOverride": "NO_CONSTRAINT"}}
+        config = {"config": {"model_provider": None, "model_providers": {},
+            "chatgpt_base_url": "https://chatgpt.com/backend-api/", "base_url": None,
+            "openai_base_url": None, "api_base": None, "api_key": None}, "origins": {}}
+        limits = {"accountId": "fixture-account"}
+        async def request(method, params):
+            return {"account/read": account, "config/read": config,
+                    "account/rateLimits/read": limits}[method]
+        client.request = mock.AsyncMock(side_effect=request)
+        client.start = mock.AsyncMock()
+        client.close = mock.AsyncMock()
+        client.wait_compaction = mock.AsyncMock(return_value=True)
+        return client, account, config, limits
+
+    async def test_native_defaults_verify_without_physical_expiry_claim(self):
+        client, _, _, _ = self.native()
+        result = await client.verified_subscription_identity()
+        self.assertEqual(len(result["account_key"]), 64)
+        self.assertFalse(result["physical_expiry_known"])
+        self.assertEqual(result["source_url"], ic._SUBSCRIPTION_CACHE_SOURCE)
+        self.assertEqual(client.request.await_args_list[1].args,
+            ("config/read", {"includeLayers": False, "cwd": "/fixture/workspace"}))
+        for call in client.request.await_args_list:
+            if call.args[0] == "account/read":
+                self.assertEqual(call.args[1], {"refreshToken": False})
+
+    async def test_verified_subscription_suppresses_before_resume_once(self):
+        session = FakeSession("x1", "codex", ago(26))
+        comp, _, _, tmp = self.make([session])
+        comp._compact_codex = ic.IdleCompactor._compact_codex.__get__(comp)
+        client, _, _, _ = self.native()
+        with mock.patch.object(ic, "_CodexAppServer", return_value=client), \
+                mock.patch.object(ic.shutil, "which", return_value="codex"), \
+                self.assertLogs(ic.logger, "INFO") as logs:
+            await self.tick(comp)
+            await self.tick(comp)
+        methods = [c.args[0] for c in client.request.await_args_list]
+        self.assertNotIn("thread/resume", methods)
+        self.assertNotIn("thread/compact/start", methods)
+        client.start.assert_awaited_once()
+        client.wait_compaction.assert_not_awaited()
+        client.close.assert_awaited_once()
+        self.assertTrue(any("suppressed" in row for row in logs.output))
+        self.assertFalse(any("Idle compaction done" in row for row in logs.output))
+        self.assertEqual(session.last_active, json.loads((tmp / "idle_compaction.json").read_text())["x1"])
+        self.assertEqual(comp._compacting, set())
+        self.assertEqual(session.session_id, "x1")
+
+    async def test_api_custom_mismatch_and_overrides_do_not_verify(self):
+        for case in ("api", "provider", "custom", "backend", "account", "origin",
+                     "origins_missing", "base", "key", "environment", "malformed"):
+            with self.subTest(case=case):
+                client, account, config, limits = self.native()
+                if case == "api": account["account"]["type"] = "apiKey"
+                elif case == "provider": config["config"]["model_provider"] = "custom"
+                elif case == "custom": config["config"]["model_providers"]["openai"] = {}
+                elif case == "backend": account["workspaceRouting"]["backendOrigin"] = "https://custom.invalid"
+                elif case == "account": limits["accountId"] = "another-account"
+                elif case == "origin": config["origins"]["chatgpt_base_url"] = {}
+                elif case == "origins_missing": config.pop("origins")
+                elif case == "base": config["config"]["chatgpt_base_url"] = "https://custom.invalid"
+                elif case == "key": config["config"]["api_key"] = "fixture-key"
+                elif case == "environment": client._environment["OPENAI_API_KEY"] = "fixture-key"
+                elif case == "malformed": account["account"] = None
+                self.assertIsNone(await client.verified_subscription_identity())
+
+    async def test_failure_dead_or_replaced_connection_never_verifies(self):
+        for case in ("rpc_error", "timeout", "exit", "replacement", "reader_exit", "account_switch"):
+            with self.subTest(case=case):
+                client, _, _, _ = self.native()
+                original = client.request.side_effect
+                async def request(method, params):
+                    if case == "rpc_error": raise RuntimeError("fixture RPC failure")
+                    if case == "timeout": raise TimeoutError()
+                    result = await original(method, params)
+                    if case == "exit": client._proc.returncode = 1
+                    if case == "replacement": client._proc = SimpleNamespace(returncode=None)
+                    if case == "reader_exit": client._reader = SimpleNamespace(done=lambda: True)
+                    if case == "account_switch" and client.request.await_count == 4:
+                        return {"requiresOpenaiAuth": True, "account": {"type": "chatgpt"},
+                                "workspaceRouting": {"chatgptAccountId": "another-account"}}
+                    return result
+                client.request.side_effect = request
+                self.assertIsNone(await client.verified_subscription_identity())
+
+    async def test_unverified_scope_retains_original_compaction_path(self):
+        comp, _, _, _ = self.make([])
+        client, _, _, _ = self.native()
+        client.verified_subscription_identity = mock.AsyncMock(return_value=None)
+        client.request = mock.AsyncMock(return_value={})
+        with mock.patch.object(ic, "_CodexAppServer", return_value=client), \
+                mock.patch.object(ic.shutil, "which", return_value="codex"):
+            result = await ic.IdleCompactor._compact_codex(comp,
+                FakeSession("x1", "codex", ago(26)), ic.IdleCompactSettings())
+        self.assertIs(result, True)
+        self.assertEqual([c.args[0] for c in client.request.await_args_list],
+                         ["thread/resume", "thread/compact/start"])
+        client.wait_compaction.assert_awaited_once_with("x1")
+        client.close.assert_awaited_once()
 
 
 if __name__ == "__main__":
