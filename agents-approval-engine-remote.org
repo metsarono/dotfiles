@@ -1449,7 +1449,9 @@ def _decide_request(event, manifest):
             return nested
     allow, reason = _decide_deterministic(event, manifest)
     if allow:
-        if reason == 'decider_allow':
+        if reason == 'engine-timeout-failed-open-under-inversion':
+            extras.update(decision_path='engine_timeout_fail_open', judge_verdict='unavailable')
+        elif reason == 'decider_allow':
             extras.update(decision_path='judge', judge_verdict=extras.get('verdict', 'allow'))
         else:
             extras.update(decision_path='deterministic',
@@ -1538,7 +1540,9 @@ def _decide_deterministic(event, manifest):
                         raise
                     _decider_allow, status, latency_ms, verdict = True, 'unavailable', 0, 'allow'
                 _log_decision.extras = {'decider_status': status, 'verdict': verdict, 'latency_ms': latency_ms}
-                if verdict == 'risky':
+                if status in {'timeout', 'unavailable'}:
+                    reason = 'engine-timeout-failed-open-under-inversion'
+                elif verdict == 'risky':
                     allow, reason = False, 'decider_risky'
         elif config is not None:
             if config['mode'] == 'single' and _write_capable(event):
@@ -2172,12 +2176,34 @@ def main():
         _coordinator_proof_cache = {}
         allow, reason = _decide_request(event, manifest)
     except Exception as exc:
-        allow, reason = False, f'error:{type(exc).__name__}'
+        timed_out = isinstance(exc, TimeoutError)
+        fail_open = False
+        floor_preserved = False
+        if (timed_out and isinstance(event, dict) and isinstance(manifest, dict)
+                and _inversion_scope(event, manifest)):
+            # The deterministic classifier runs before the Decider. Recheck
+            # its hard floor on a deadline failure; only the non-floor,
+            # inverted dimension is permitted to fail open.
+            try:
+                floor_allow, floor_reason = classify(event, manifest)
+            except Exception:
+                floor_allow, floor_reason = True, None
+            if floor_allow or not _hard_refusal(floor_reason):
+                allow, reason = True, 'engine-timeout-failed-open-under-inversion'
+                fail_open = True
+            else:
+                allow, reason = False, floor_reason
+                floor_preserved = True
+        if not fail_open and not floor_preserved:
+            allow, reason = False, f'error:{type(exc).__name__}'
         if not isinstance(getattr(_log_decision, 'extras', None), dict):
             _log_decision.extras = {}
-        timed_out = isinstance(exc, TimeoutError)
-        _log_decision.extras.setdefault('decision_path', 'judge' if timed_out else 'initialization')
-        _log_decision.extras.setdefault('judge_verdict', 'unavailable' if timed_out else 'not_consulted')
+        if fail_open:
+            _log_decision.extras.update(decision_path='engine_timeout_fail_open',
+                                        judge_verdict='unavailable', decider_status='timeout')
+        else:
+            _log_decision.extras.setdefault('decision_path', 'judge' if timed_out else 'initialization')
+            _log_decision.extras.setdefault('judge_verdict', 'unavailable' if timed_out else 'not_consulted')
     finally:
         _approval_deadline = None
         _coordinator_proof_cache = None

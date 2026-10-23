@@ -117,6 +117,22 @@ class GateInversionTests(unittest.TestCase):
                 self.assertEqual(self.run_hook(self.event('make test'), answers=answer, status=status)['behavior'], 'allow')
         self.assertEqual(self.run_hook(self.event('make test'), side_effect=TimeoutError())['behavior'], 'allow')
 
+    def test_engine_timeout_fails_open_but_hard_floor_still_blocks(self):
+        self.enable_decider()
+        cases = [('make test', 'allow', 'engine-timeout-failed-open-under-inversion'),
+                 ('cd . && touch marker', 'deny', 'true_floor'),
+                 ('printf %s "$(touch marker)"', 'deny', 'substitution_refused')]
+        for command, expected, reason_prefix in cases:
+            with self.subTest(command=command), mock.patch.object(e, '_decide_request', side_effect=TimeoutError('fixture')):
+                decision = self.run_hook(self.event(command))
+            self.assertEqual(decision['behavior'], expected)
+            record = json.loads(self.log.read_text().splitlines()[-1])
+            self.assertTrue(record['reason'] == reason_prefix or record['reason'].startswith(reason_prefix))
+            if expected == 'allow':
+                self.assertEqual(record['decision_path'], 'engine_timeout_fail_open')
+            else:
+                self.assertNotEqual(record['decision'], 'allow')
+
     def test_true_floor_wins_against_always_allow_decider_day_and_night(self):
         self.enable_decider()
         commands = ['git push --force origin master', 'git reset --soft HEAD', 'git reset HEAD',
@@ -296,6 +312,7 @@ class GateInversionTests(unittest.TestCase):
 
     def test_wrapper_missing_broken_and_legacy_silent_engine_never_prompt(self):
         wrapper = REPO / 'all/.local/bin/claude-hook-approval-inverted'
+        self.manifest['gate_inversion']['enabled'] = False
         for body in [None, 'this is not valid Python!', 'pass', 'print("{}")']:
             candidate = self.base / 'engine.py'
             if body is None:
@@ -371,7 +388,8 @@ class GateInversionTests(unittest.TestCase):
                 for error in (TimeoutError('fixture'), ValueError('fixture')):
                     with self.subTest(mode=mode, away=away, error=type(error).__name__), \
                             mock.patch.object(e, 'classify', side_effect=error):
-                            self.assertEqual(self.run_hook(self.event('unknown-command'))['behavior'], 'deny' if away else mode)
+                            expected = 'allow' if isinstance(error, TimeoutError) else ('deny' if away else mode)
+                            self.assertEqual(self.run_hook(self.event('unknown-command'))['behavior'], expected)
                 if away:
                     self.flag.unlink()
 
@@ -416,7 +434,8 @@ class GateInversionTests(unittest.TestCase):
                             candidate.write_text('pass' if body == 'timeout' else body)
                         self.path.write_text(json.dumps(self.manifest))
                         env = {'DOTCORTEX_KIKIN_APPROVAL_ENGINE': str(candidate),
-                               'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+                               'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.log),
+                               'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
                         before = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
                         out = io.StringIO()
                         original_run = wrapper.subprocess.run
@@ -429,9 +448,9 @@ class GateInversionTests(unittest.TestCase):
                         with mock.patch.dict(os.environ, env), mock.patch.object(wrapper.sys, 'stdin', io.StringIO(json.dumps(self.event()))), \
                                 mock.patch.object(wrapper.subprocess, 'run', side_effect=run), contextlib.redirect_stdout(out):
                             self.assertEqual(wrapper.main(), 0)
-                        # An unavailable candidate engine must fail closed to
-                        # the same queued denial rather than emit a silent ask.
-                        expected = 'deny'
+                        # Inversion makes an unavailable engine fail open; the
+                        # legacy gate remains queued and fail closed.
+                        expected = 'allow' if self.manifest['gate_inversion'].get('enabled') is True else 'deny'
                         result = json.loads(out.getvalue())['hookSpecificOutput']['decision'] if out.getvalue().strip() else {'behavior': 'ask'}
                         self.assertEqual(result['behavior'], expected)
                         after = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
@@ -443,16 +462,34 @@ class GateInversionTests(unittest.TestCase):
                             record = json.loads(self.queue.read_text().splitlines()[-1])
                             self.assertEqual(record['request'], self.event())
                             self.assertEqual(record['away_reason'], 'away_flag' if away else 'presence')
+                        else:
+                            self.assertFalse(sink.exists())
+                            self.assertEqual(json.loads(self.log.read_text().splitlines()[-1])['reason'],
+                                             'engine-timeout-failed-open-under-inversion')
                 if away:
                     self.flag.unlink()
 
-    def test_wrapper_default_ask_and_stale_presence_queues(self):
+    def test_wrapper_timeout_fail_open_is_gated_by_inversion(self):
         import datetime as dt
         wrapper = self.wrapper_module()
         self.manifest['gate_inversion'].pop('present_refusal')
         self.stamp.unlink()
         self.path.write_text(json.dumps(self.manifest))
-        env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.log),
+               'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        with mock.patch.dict(os.environ, env):
+            decision = wrapper.defer(json.dumps(self.event()))
+        self.assertEqual(decision['hookSpecificOutput']['decision']['behavior'], 'allow')
+        self.assertFalse(self.queue.exists())
+        self.assertEqual(json.loads(self.log.read_text().splitlines()[-1])['reason'],
+                         'engine-timeout-failed-open-under-inversion')
+        with mock.patch.dict(os.environ, env):
+            decision = wrapper.defer(json.dumps(self.event('cd . && touch marker')))
+        self.assertEqual(decision['hookSpecificOutput']['decision']['behavior'], 'deny')
+        self.assertTrue(self.queue.exists())
+        self.queue.unlink()
+        self.manifest['gate_inversion']['enabled'] = False
+        self.path.write_text(json.dumps(self.manifest))
         with mock.patch.dict(os.environ, env):
             decision = wrapper.defer(json.dumps(self.event()))
         self.assertEqual(decision['hookSpecificOutput']['decision']['behavior'], 'deny')
