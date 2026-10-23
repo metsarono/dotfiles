@@ -17,6 +17,10 @@ if [[ ! -r "$package/package.json" || ! -x "$pi_bin" ]]; then
     exit 1
 fi
 if [[ $# -eq 0 ]]; then
-    set -- --provider antigravity
+    # Select a concrete extension model before Pi considers saved defaults.
+    # This is an authentication/bootstrap choice, not an entitlement assertion.
+    # The Telegram adapter supplies its own explicit arguments and is unchanged.
+    set -- --provider antigravity --model antigravity/gemini-3.8-flash \
+        --no-session --no-skills --no-prompt-templates --no-context-files
 fi
 exec "$pi_bin" --extension "$package" "$@"

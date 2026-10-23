@@ -134,6 +134,12 @@ install dependencies or modify her existing provider configuration.
 
 =gemma-google= uses the same private Pi directory as Gemma's Telegram adapter.
 Run it interactively, then =/login antigravity= to sign in with Google.
+The no-argument launcher is a minimal, non-persisted sign-in session with an
+explicit =antigravity/gemini-3.8-flash= bootstrap model. It disables project
+context, skills and prompt templates so an unrelated slash-command expansion
+cannot start an API-key request. This bootstrap model is not a claim that the
+account is entitled to it; select an advertised model after authentication.
+Explicit arguments from the Telegram adapter are preserved unchanged.
 After sign-in, =/antigravity.refresh= and =/antigravity.models= discover the
 account's actual entitlements. Select =antigravity/gemini-4-argon= only when
 advertised. The Telegram adapter can use this launcher as =PI_EXECUTABLE=;
@@ -164,7 +170,11 @@ if [[ ! -r "$package/package.json" || ! -x "$pi_bin" ]]; then
     exit 1
 fi
 if [[ $# -eq 0 ]]; then
-    set -- --provider antigravity
+    # Select a concrete extension model before Pi considers saved defaults.
+    # This is an authentication/bootstrap choice, not an entitlement assertion.
+    # The Telegram adapter supplies its own explicit arguments and is unchanged.
+    set -- --provider antigravity --model antigravity/gemini-3.8-flash \
+        --no-session --no-skills --no-prompt-templates --no-context-files
 fi
 exec "$pi_bin" --extension "$package" "$@"
 #+END_SRC
