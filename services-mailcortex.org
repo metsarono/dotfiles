@@ -113,6 +113,15 @@ refused before delivery. Total raw attachments are capped at 25 MiB. Types are
 guessed from filenames, falling back to =application/octet-stream=. Without
 =--attach= the original single-part wire format is unchanged.
 
+** Existing OpenCode seats
+
+The CLI delivers to the same provisioned Maildir for every harness. The
+OpenCode wake transport and placeholder registry contract live in
+[[file:services-mailcortex-watcher.org][the seat watcher module]]. The private seat registry is deliberately not
+tangled: host topology, session IDs and exact session directories remain
+operator-provisioned. Provision the selected seat with =mailcortex provision=
+and confirm the live Telegram session binding before enabling its watcher.
+
 ** BBS fleet alerts
 
 =mailcortex bbs alert= extends the existing read-only BBS with a small durable

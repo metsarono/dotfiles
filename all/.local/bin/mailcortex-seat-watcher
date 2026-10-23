@@ -38,7 +38,7 @@ SPEC.loader.exec_module(MAILCORTEX)
 
 SAFE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 PANE = re.compile(r"w[0-9A-Za-z]+:p[0-9A-Za-z]+\Z")
-TRANSPORTS = {"herdr", "hermes", "nanobot", "ductor", "deepseek", "claude-ssh", "claude-local"}
+TRANSPORTS = {"opencode", "herdr", "hermes", "nanobot", "ductor", "deepseek", "claude-ssh", "claude-local"}
 
 
 class WatcherError(Exception):
@@ -127,6 +127,7 @@ def load_registry(path: Path, host: str) -> dict:
             "host", "mailbox", "harness", "transport", "rate_limit_seconds",
         } | {
             "herdr": {"herdr_session", "herdr_target"},
+            "opencode": {"opencode_url", "opencode_session", "opencode_directory"},
             "hermes": {"hermes_url", "hermes_api_key_file", "hermes_target"},
             "nanobot": {"nanobot_url", "nanobot_api_token_file", "nanobot_target"},
             "ductor": {"ductor_config"},
@@ -140,7 +141,7 @@ def load_registry(path: Path, host: str) -> dict:
             record["host"] != host
             or record["mailbox"] not in {f"seats/{seat}", f"consorts/{seat}"}
             or not isinstance(record["harness"], str)
-            or record["harness"] not in {"claude", "codex", "hermes", "nanobot", "ductor", "deepseek"}
+            or record["harness"] not in {"opencode", "claude", "codex", "hermes", "nanobot", "ductor", "deepseek"}
         ):
             raise WatcherError("seat registry ownership or transport mismatch")
         if transport == "herdr":
@@ -189,6 +190,10 @@ def load_registry(path: Path, host: str) -> dict:
                     or not 1 <= len(target["chat_id"]) <= 256
                     or target.get("session_key") != f"telegram:{target['chat_id']}"):
                 raise WatcherError("invalid Nano target")
+        elif transport == "opencode":
+            if record["harness"] != "opencode":
+                raise WatcherError("OpenCode transport requires OpenCode harness")
+            OpenCodeAdapter.validate_target(record)
         elif transport == "ductor":
             if record["harness"] != "ductor" or not isinstance(record["ductor_config"], str) or not record["ductor_config"] or len(record["ductor_config"]) > 512:
                 raise WatcherError("invalid Ductor configuration path")
@@ -254,7 +259,7 @@ def wake_prompt(record: dict, path: Path, mailback_error: str | None = None) -> 
         return preamble + "\nOpen the mailbox now with: /inbox"
     if record["transport"] in {"hermes", "nanobot"}:
         return preamble + "\nOpen the mailbox now and follow the mail's instructions."
-    if record["transport"] == "ductor":
+    if record["transport"] in {"ductor", "opencode"}:
         return (preamble + f"Subject: {message.get('Subject', '')}\n\n{body.strip()}\n\n"
                 "MailCortex has delivered the message content here. Use your harness tools "
                 "to handle it and reply. This wake lane does not publish an automatic mail reply.")
@@ -641,6 +646,84 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class OpenCodeAdapter:
+    """Durable queued input into an explicitly bound, existing OpenCode session.
+
+    Wire contract comes from the running server's /doc, v2.session.prompt.
+    Queue delivery is essential: a turn beginning after the idle observation
+    must retain its execution, rather than receive a steering interruption.
+    """
+
+    def __init__(self, opener=None):
+        self.opener = opener or urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), NoRedirect()).open
+
+    @staticmethod
+    def validate_target(record: dict) -> None:
+        base = record.get("opencode_url")
+        session = record.get("opencode_session")
+        directory = record.get("opencode_directory")
+        if not isinstance(base, str) or not 1 <= len(base) <= 512:
+            raise WatcherError("invalid OpenCode URL")
+        loopback_url(base, "OpenCode URL")
+        parsed = urllib.parse.urlsplit(base)
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise WatcherError("OpenCode URL must be a loopback origin")
+        if not isinstance(session, str) or not re.fullmatch(r"ses_[A-Za-z0-9]{1,128}", session):
+            raise WatcherError("invalid OpenCode session")
+        if (not isinstance(directory, str) or not directory.startswith("/")
+                or len(directory) > 4096 or any(ord(c) < 32 for c in directory)
+                or str(Path(directory)) != directory or ".." in Path(directory).parts):
+            raise WatcherError("invalid OpenCode session directory")
+
+    def _request(self, record: dict, method: str, route: str, payload=None) -> dict:
+        self.validate_target(record)
+        request = urllib.request.Request(
+            loopback_url(record["opencode_url"], "OpenCode URL") + route,
+            data=None if payload is None else json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method=method)
+        try:
+            with self.opener(request, timeout=15) as response:
+                if response.status != 200:
+                    raise WatcherError("OpenCode API refused the request")
+                value = json.loads(response.read())
+        except (OSError, ValueError, urllib.error.URLError) as error:
+            raise WatcherError("OpenCode API unavailable or admission outcome unknown") from error
+        if not isinstance(value, dict) or not isinstance(value.get("data"), dict):
+            raise WatcherError("OpenCode API response is invalid")
+        return value["data"]
+
+    def _bound_session(self, record: dict) -> str:
+        target = record["opencode_session"]
+        session = self._request(record, "GET", f"/api/session/{target}")
+        if (session.get("id") != target
+                or session.get("location", {}).get("directory") != record["opencode_directory"]):
+            raise WatcherError("OpenCode session identity or directory mismatch")
+        return target
+
+    def resolve_idle_pane(self, record: dict) -> str | None:
+        target = self._bound_session(record)
+        active = self._request(record, "GET", "/api/session/active")
+        if any(not isinstance(v, dict) or v.get("type") != "running" for v in active.values()):
+            raise WatcherError("OpenCode activity response is invalid")
+        return None if target in active else target
+
+    def deliver(self, record: dict, target: str, prompt: str) -> None:
+        if target != record["opencode_session"]:
+            raise PromptNotAdmittedError("unavailable")
+        # Rebind immediately before input; never create, resume another ID,
+        # steer, abort, or retry an ambiguous admission.
+        self._bound_session(record)
+        request_id = "msg_" + uuid.uuid4().hex
+        value = self._request(record, "POST", f"/api/session/{target}/prompt", {
+            "id": request_id, "prompt": {"text": prompt},
+            "delivery": "queue", "resume": True})
+        if (value.get("id") != request_id or value.get("sessionID") != target
+                or value.get("delivery") != "queue"
+                or type(value.get("admittedSeq")) is not int or value["admittedSeq"] < 0):
+            raise WatcherError("OpenCode admission outcome is unknown")
+
+
 class DuctorAdapter:
     """Private config, authoritative observation, then encrypted conditional admission."""
 
@@ -884,6 +967,7 @@ class TransportAdapters:
             "herdr": HerdrAdapter(),
             "hermes": HermesAdapter(),
             "nanobot": NanobotAdapter(),
+            "opencode": OpenCodeAdapter(),
             "ductor": DuctorAdapter(),
             "deepseek": DeepSeekAdapter(),
             "claude-local": ClaudeLocalAdapter(),
@@ -1029,7 +1113,7 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
             try:
                 pane_id = transport_adapter.resolve_idle_pane(record)
             except Exception as error:
-                if record["transport"] not in {"deepseek", "ductor", "hermes", "nanobot", "claude-local"}:
+                if record["transport"] not in {"deepseek", "ductor", "hermes", "nanobot", "opencode", "claude-local"}:
                     raise
                 MAILCORTEX.write_wake_receipt(seat, mid, "queued", reason="transport_unavailable",
                                               wake_error=diagnostic(error), wake_updated_at=now)
@@ -1075,7 +1159,7 @@ def scan_seats(registry: dict, adapter: object, now: float | None = None) -> int
                     seat, mid, "delivery_unknown", filename=path.name,
                     pane_id=pane_id, reason="delivery_error", wake_updated_at=now,
                 )
-                if record["transport"] in {"deepseek", "ductor", "hermes", "nanobot", "claude-local"}:
+                if record["transport"] in {"deepseek", "ductor", "hermes", "nanobot", "opencode", "claude-local"}:
                     report_error(seat, path.name, error)
                     continue
                 if isinstance(error, WatcherError):
@@ -1095,7 +1179,7 @@ def scan_once(registry: dict, adapter: object, now: float | None = None) -> int:
         try:
             count += scan_seats({"seats": {seat: record}}, adapter, now=now)
         except Exception as error:
-            if record.get("transport") not in {"deepseek", "ductor", "hermes", "nanobot", "claude-ssh", "claude-local"}:
+            if record.get("transport") not in {"deepseek", "ductor", "hermes", "nanobot", "opencode", "claude-ssh", "claude-local"}:
                 raise
             report_error(seat, "scan", error)
     return count
@@ -1122,8 +1206,8 @@ def main() -> int:
     parser.add_argument("--interval", type=float, default=2.0)
     args = parser.parse_args()
     try:
-        registry = load_registry(Path(args.registry).expanduser(), os.environ.get("MAILCORTEX_HOSTNAME", socket.gethostname()))
         while True:
+            registry = load_registry(Path(args.registry).expanduser(), os.environ.get("MAILCORTEX_HOSTNAME", socket.gethostname()))
             locked_scan(registry, TransportAdapters())
             if args.once:
                 return 0

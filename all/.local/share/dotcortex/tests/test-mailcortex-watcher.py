@@ -90,6 +90,102 @@ class WatcherTests(unittest.TestCase):
     def receipt(self, mid):
         return self.watcher.MAILCORTEX.load_receipt("builder", mid)
 
+    def opencode_fixture(self, *, busy=False, post_failure=False, wrong_ack=False):
+        record = {
+            "host": "test-host", "mailbox": "seats/builder", "harness": "opencode",
+            "transport": "opencode", "opencode_url": "http://localhost",
+            "opencode_session": "ses_fixture", "opencode_directory": "/fixture/project",
+            "rate_limit_seconds": 0,
+        }
+        self.registry["seats"]["builder"] = record
+        calls = []
+
+        def opener(request, **kwargs):
+            calls.append(request)
+            if request.method == "POST":
+                payload = json.loads(request.data)
+                if post_failure:
+                    raise OSError("lost ACK after admission")
+                return FakeHTTPResponse({"data": {
+                    "id": payload["id"], "sessionID": "ses_wrong" if wrong_ack else "ses_fixture",
+                    "delivery": payload["delivery"], "admittedSeq": 1}})
+            if request.full_url.endswith("/active"):
+                return FakeHTTPResponse({"data": {"ses_fixture": {"type": "running"}} if busy else {}})
+            return FakeHTTPResponse({"data": {"id": "ses_fixture",
+                "location": {"directory": "/fixture/project"}}})
+
+        return record, self.watcher.OpenCodeAdapter(opener=opener), calls
+
+    def test_opencode_queued_input_has_exact_target_and_injects_once(self):
+        record, adapter, calls = self.opencode_fixture()
+        self.mail("<open@node.helm>", "open")
+        self.assertEqual(self.watcher.locked_scan(self.registry, adapter, now=10), 1)
+        self.assertEqual(self.watcher.locked_scan(self.registry, adapter, now=11), 0)
+        posts = [r for r in calls if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].full_url, "http://localhost/api/session/ses_fixture/prompt")
+        payload = json.loads(posts[0].data)
+        self.assertEqual(payload["delivery"], "queue")
+        self.assertIs(payload["resume"], True)
+        self.assertIn("<open@node.helm>", payload["prompt"]["text"])
+        self.assertIn("hello", payload["prompt"]["text"])
+        self.assertIn("does not publish an automatic mail reply", payload["prompt"]["text"])
+        self.assertEqual(self.receipt("<open@node.helm>")["wake_state"], "injected")
+
+    def test_registry_updates_are_revalidated_between_scans(self):
+        first = {"seats": {"first": {}}}
+        second = {"seats": {"second": {}}}
+        with mock.patch.object(self.watcher.sys, "argv", ["watcher"]), \
+             mock.patch.object(self.watcher, "load_registry", side_effect=[first, second]) as load, \
+             mock.patch.object(self.watcher, "locked_scan", side_effect=[0, OSError("fixture stop")]) as scan, \
+             mock.patch.object(self.watcher.time, "sleep"):
+            self.assertEqual(self.watcher.main(), 2)
+        self.assertEqual(load.call_count, 2)
+        self.assertIs(scan.call_args_list[0].args[0], first)
+        self.assertIs(scan.call_args_list[1].args[0], second)
+
+    def test_opencode_busy_does_not_post(self):
+        _, adapter, calls = self.opencode_fixture(busy=True)
+        self.mail("<busy-open@node.helm>", "open")
+        self.assertEqual(self.watcher.locked_scan(self.registry, adapter, now=10), 0)
+        self.assertEqual(self.receipt("<busy-open@node.helm>")["reason"], "busy")
+        self.assertFalse(any(r.method == "POST" for r in calls))
+
+    def test_opencode_lost_or_wrong_ack_is_unknown_and_never_replayed(self):
+        for failure in ("post_failure", "wrong_ack"):
+            with self.subTest(failure=failure):
+                _, adapter, calls = self.opencode_fixture(**{failure: True})
+                mid = f"<{failure}@node.helm>"
+                self.mail(mid, failure)
+                self.assertEqual(self.watcher.locked_scan(self.registry, adapter, now=10), 0)
+                self.assertEqual(self.receipt(mid)["wake_state"], "delivery_unknown")
+                self.assertEqual(self.watcher.locked_scan(self.registry, adapter, now=11), 0)
+                self.assertEqual(len([r for r in calls if r.method == "POST"]), 1)
+
+    def test_opencode_directory_mismatch_cannot_deliver(self):
+        record, adapter, calls = self.opencode_fixture()
+        record["opencode_directory"] = "/different/project"
+        self.mail("<mismatch@node.helm>", "open")
+        self.assertEqual(self.watcher.locked_scan(self.registry, adapter, now=10), 0)
+        self.assertEqual(self.receipt("<mismatch@node.helm>")["wake_state"], "queued")
+        self.assertFalse(any(r.method == "POST" for r in calls))
+
+    def test_opencode_registry_rejects_unsafe_target_and_wrong_harness(self):
+        record, _, _ = self.opencode_fixture()
+        path = self.base / "opencode-registry.json"
+        for changes in ({}, {"harness": "codex"}, {"opencode_url": "http://outside.invalid"},
+                        {"opencode_url": "http://localhost/redirect"},
+                        {"opencode_session": "ses_bad/path"},
+                        {"opencode_directory": "/fixture/../project"}):
+            with self.subTest(changes=changes):
+                self.registry["seats"]["builder"] = record | changes
+                path.write_text(json.dumps(self.registry)); path.chmod(0o600)
+                if changes:
+                    with self.assertRaises(self.watcher.WatcherError):
+                        self.watcher.load_registry(path, "test-host")
+                else:
+                    self.assertEqual(self.watcher.load_registry(path, "test-host"), self.registry)
+
     def test_idle_injects_once_and_duplicate_filename_does_not_repeat(self):
         self.mail("<same@node.helm>", "a")
         self.mail("<same@node.helm>", "b")
