@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export PI_CODING_AGENT_DIR="${GEMMA_PI_AGENT_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.config/gemma-pi-telegram/pi-agent}}"
+prefix="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"
+package="$prefix/lib/node_modules/pi-antigravity"
+pi_bin="${PI_ANTIGRAVITY_EXECUTABLE:-$prefix/bin/pi}"
+if [[ ! -r "$package/package.json" || ! -x "$pi_bin" ]]; then
+    echo 'gemma-google: install the declared Pi packages through DotCortex first.' >&2
+    exit 1
+fi
+if [[ $# -eq 0 ]]; then
+    set -- --provider antigravity
+fi
+exec "$pi_bin" --extension "$package" "$@"

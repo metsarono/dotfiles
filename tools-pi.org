@@ -124,3 +124,39 @@ Three traps found live, all recorded for the next traveller:
   "defaultModel": "mistral-large-4"
 }
 #+END_SRC
+
+* Gemma Google / Antigravity lane
+
+The =pi-antigravity= extension is declared in [[file:package-npm.org][package-npm.org]].
+Apply only that package with =ONLY=pi-antigravity loom npm:sync=.
+The launcher loads the installed local package, so starting Gemma does not
+install dependencies or modify her existing provider configuration.
+
+=gemma-google= uses the same private Pi directory as Gemma's Telegram adapter.
+Run it interactively, then =/login antigravity= to sign in with Google.
+After sign-in, =/antigravity.refresh= and =/antigravity.models= discover the
+account's actual entitlements. Select =antigravity/gemini-4-argon= only when
+advertised. The Telegram adapter can use this launcher as =PI_EXECUTABLE=;
+its existing explicit provider/model arguments remain authoritative until
+an authenticated model is selected in its private environment file.
+
+OAuth credentials, account records, discovery caches, sessions, and the bot
+environment remain private mutable state. They are never emitted by DotCortex.
+This sign-in TUI starts a separate session and does not resume the Telegram
+transcript. Gemma's existing adapter still owns the Telegram session.
+
+#+BEGIN_SRC bash :tangle all/.local/bin/gemma-google :shebang "#!/usr/bin/env bash" :comments no
+set -euo pipefail
+export PI_CODING_AGENT_DIR="${GEMMA_PI_AGENT_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.config/gemma-pi-telegram/pi-agent}}"
+prefix="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"
+package="$prefix/lib/node_modules/pi-antigravity"
+pi_bin="${PI_ANTIGRAVITY_EXECUTABLE:-$prefix/bin/pi}"
+if [[ ! -r "$package/package.json" || ! -x "$pi_bin" ]]; then
+    echo 'gemma-google: install the declared Pi packages through DotCortex first.' >&2
+    exit 1
+fi
+if [[ $# -eq 0 ]]; then
+    set -- --provider antigravity
+fi
+exec "$pi_bin" --extension "$package" "$@"
+#+END_SRC
