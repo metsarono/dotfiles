@@ -44,7 +44,7 @@ class GateInversionTests(unittest.TestCase):
         self.manifest['decider'].update(enabled=False)
         self.manifest['unattended'] = {
             'enabled': True, 'away_flag': str(self.flag), 'presence_file': str(self.stamp),
-            'presence_window_minutes': 20, 'quiet_hours': {'enabled': False}}
+            'presence_window_minutes': 10, 'quiet_hours': {'enabled': False}}
         for item in self.manifest['classes']:
             item['enabled'] = False
 

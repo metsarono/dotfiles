@@ -153,7 +153,7 @@ authorize local Kikin reads or writes.
     "enabled": false,
     "away_flag": "~/.config/dotcortex/approval-away",
     "presence_file": "~/.local/state/dotcortex/admiral-last-seen",
-    "presence_window_minutes": 20,
+    "presence_window_minutes": 10,
     "hold_timeout_minutes": 10,
     "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
     "desk_approval_window_hours": 24,
@@ -402,7 +402,7 @@ class GateInversionTests(unittest.TestCase):
         self.manifest['decider'].update(enabled=False)
         self.manifest['unattended'] = {
             'enabled': True, 'away_flag': str(self.flag), 'presence_file': str(self.stamp),
-            'presence_window_minutes': 20, 'quiet_hours': {'enabled': False}}
+            'presence_window_minutes': 10, 'quiet_hours': {'enabled': False}}
         for item in self.manifest['classes']:
             item['enabled'] = False
 
@@ -1256,7 +1256,7 @@ restart, installation, pull or push is performed by this review branch.
     "enabled": false,
     "away_flag": "~/.config/dotcortex/approval-away",
     "presence_file": "~/.local/state/dotcortex/admiral-last-seen",
-    "presence_window_minutes": 20,
+    "presence_window_minutes": 10,
     "hold_timeout_minutes": 10,
     "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
     "desk_approval_window_hours": 24,

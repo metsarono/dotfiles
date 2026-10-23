@@ -33,7 +33,7 @@ class RemotePresenceTests(unittest.TestCase):
     def configure(self):
         self.stamp = self.base / 'last-seen'
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'ask'}
-        self.manifest['unattended'].update(presence_file=str(self.stamp), presence_window_minutes=20,
+        self.manifest['unattended'].update(presence_file=str(self.stamp), presence_window_minutes=10,
             hold_timeout_minutes=0.001, admiral_telegram_user_id='123456')
         self.manifest['coordinator_ops']['peer_host'] = 'YOUR_PEER_HOST'
         self.manifest['classes'][0]['enabled'] = True
@@ -48,6 +48,20 @@ class RemotePresenceTests(unittest.TestCase):
                 mock.patch.object(e, '_hold_admiral', return_value=hold or ('timeout', None)):
             self.assertEqual(e.main(), 0)
         return json.loads(out.getvalue())['hookSpecificOutput']['decision'] if out.getvalue().strip() else {'behavior': 'ask'}
+
+    def idle_hook(self, event):
+        self.path.write_text(json.dumps(self.manifest))
+        env = os.environ.copy()
+        env.update({
+            'PATH': str(REPO / 'all/.local/bin') + ':' + env.get('PATH', ''),
+            'SO_APPROVAL_KIKIN_MANIFEST': str(self.path),
+            'CLAUDE_IDLE_CHANNEL': 'claude-' + 'a' * 32,
+            'CLAUDE_IDLE_OWNER': 'emacs',
+        })
+        return subprocess.run(
+            [str(REPO / 'all/.local/bin/claude-hook-idle-event')],
+            input=json.dumps(event), env=env, capture_output=True, text=True,
+            timeout=SUBPROCESS_TIMEOUT, check=False)
 
     @contextlib.contextmanager
     def queue_env(self):
@@ -327,7 +341,7 @@ class RemotePresenceTests(unittest.TestCase):
             self.assertEqual(self.records()[0]['id'], item)
 
 
-    def test_presence_authentication_and_future_stamp(self):
+    def test_presence_authentication_fresh_stale_and_missing(self):
         self.configure()
         self.stamp.unlink()
         for event in [self.event('',hook_event_name='UserPromptSubmit',prompt='<channel source="telegram" user_id="999">hi</channel>'),
@@ -337,10 +351,29 @@ class RemotePresenceTests(unittest.TestCase):
             self.assertFalse(self.stamp.exists())
         for prompt in ['terminal input','<channel source="plugin:telegram:telegram" user_id="123456">hi</channel>']:
             self.assertTrue(e._presence_prompt(self.event('',hook_event_name='UserPromptSubmit',prompt=prompt),self.loaded()))
-        self.manifest['unattended']['quiet_hours']['enabled']=True
         now=dt.datetime(2026,1,2,14,tzinfo=dt.timezone.utc)
-        os.utime(self.stamp,(now.timestamp()+60,now.timestamp()+60))
+        os.utime(self.stamp,(now.timestamp()-60,now.timestamp()-60))
+        self.assertEqual(e._away_status(self.loaded(),now=now),(False,'presence'))
+        os.utime(self.stamp,(now.timestamp()-601,now.timestamp()-601))
         self.assertEqual(e._away_status(self.loaded(),now=now),(True,'away'))
+        self.stamp.unlink()
+        self.assertEqual(e._away_status(self.loaded(),now=now),(True,'away'))
+
+    def test_idle_hook_stamps_human_but_not_synthetic_prompt(self):
+        self.configure()
+        self.stamp.unlink()
+        human = self.event('', hook_event_name='UserPromptSubmit',
+                           prompt='human terminal prompt', source='terminal')
+        result = self.idle_hook(human)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.stamp.exists())
+
+        self.stamp.unlink()
+        synthetic = self.event('', hook_event_name='UserPromptSubmit',
+                               prompt='<task-notification>agent result</task-notification>')
+        result = self.idle_hook(synthetic)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.stamp.exists())
 
     def test_presence_peer_uses_one_authority_for_read_and_stamp(self):
         self.configure()

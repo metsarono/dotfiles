@@ -8,6 +8,26 @@
 # remain harmless no-ops.
 set -u
 
+payload=$(cat 2>/dev/null || true)
+command -v jq >/dev/null 2>&1 || exit 0
+[ -n "$payload" ] || exit 0
+jq -e . >/dev/null 2>&1 <<<"$payload" || exit 0
+
+event=$(jq -r '.hook_event_name // empty' <<<"$payload" 2>/dev/null || true)
+
+# Presence must ride a hook already registered in warm Claude sessions: a
+# settings change alone would wait for every session to be bounced.  Delegate
+# the human/non-human discrimination to the shared runtime, and fail open so a
+# missing private manifest or a stamp failure can never break idle signalling.
+if [ "$event" = "UserPromptSubmit" ]; then
+  presence_manifest="${SO_APPROVAL_KIKIN_MANIFEST:-${HOME:-}/.config/dotcortex/claude-approval-canary.kikin.v1.local.json}"
+  presence_hook=$(command -v claude-hook-admiral-presence 2>/dev/null || true)
+  if [ -n "$presence_hook" ]; then
+    printf '%s' "$payload" | SO_APPROVAL_KIKIN_MANIFEST="$presence_manifest" \
+      "$presence_hook" >/dev/null 2>&1 || true
+  fi
+fi
+
 [ -n "${CLAUDE_IDLE_CHANNEL:-}" ] || exit 0
 owner="${CLAUDE_IDLE_OWNER:-}"
 case "$owner" in
@@ -17,12 +37,6 @@ esac
 
 [[ "$CLAUDE_IDLE_CHANNEL" =~ ^claude-[0-9a-f]{32}$ ]] || exit 0
 
-payload=$(cat 2>/dev/null || true)
-command -v jq >/dev/null 2>&1 || exit 0
-[ -n "$payload" ] || exit 0
-jq -e . >/dev/null 2>&1 <<<"$payload" || exit 0
-
-event=$(jq -r '.hook_event_name // empty' <<<"$payload" 2>/dev/null || true)
 session_id=$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null || true)
 transcript_path=$(jq -r '.transcript_path // empty' <<<"$payload" 2>/dev/null || true)
 stop_hook_active=$(jq -r 'if has("stop_hook_active") then .stop_hook_active else empty end' \

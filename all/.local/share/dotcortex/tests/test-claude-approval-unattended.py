@@ -72,7 +72,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         }
         self.manifest['unattended'] = {
             'enabled': True, 'away_flag': str(self.flag),
-            'presence_file': str(self.stamp), 'presence_window_minutes': 20,
+            'presence_file': str(self.stamp), 'presence_window_minutes': 10,
             'quiet_hours': {'enabled': False, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'},
         }
         self.path = self.base / 'manifest.json'

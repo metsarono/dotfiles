@@ -119,7 +119,7 @@
     "enabled": false,
     "away_flag": "~/.config/dotcortex/approval-away",
     "presence_file": "~/.local/state/dotcortex/admiral-last-seen",
-    "presence_window_minutes": 20,
+    "presence_window_minutes": 10,
     "hold_timeout_minutes": 10,
     "admiral_telegram_user_id": "YOUR_ADMIRAL_USER_ID",
     "desk_approval_window_hours": 24,

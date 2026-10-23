@@ -80,7 +80,7 @@ def _away_status(manifest, now=None):
         if Path(flag).expanduser().exists():
             return True, 'away_flag'
         current = now or datetime.datetime.now(datetime.timezone.utc)
-        window = _minutes(section, 'presence_window_minutes', 20) * 60
+        window = _minutes(section, 'presence_window_minutes', 10) * 60
         stamp = _presence_mtime(manifest)
         if stamp is not None and 0 <= current.timestamp() - stamp <= window:
             return False, 'presence'
