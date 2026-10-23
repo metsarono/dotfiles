@@ -153,12 +153,27 @@ class RemotePresenceTests(unittest.TestCase):
         os.utime(self.stamp, (now.timestamp(), now.timestamp()))
         self.assertEqual(e._away_status(self.loaded(), now=now), (False, 'presence'))
         os.utime(self.stamp, (now.timestamp()-1201, now.timestamp()-1201))
-        self.assertEqual(e._away_status(self.loaded(), now=now), (True, 'quiet_hours'))
+        self.assertEqual(e._away_status(self.loaded(), now=now), (True, 'away'))
         self.stamp.unlink()
-        self.assertEqual(e._away_status(self.loaded(), now=now + dt.timedelta(hours=12)), (False, 'present'))
+        self.assertEqual(e._away_status(self.loaded(), now=now + dt.timedelta(hours=12)), (True, 'away'))
         self.stamp.touch()
         self.flag.touch()
         self.assertEqual(e._away_status(self.loaded(), now=now), (True, 'away_flag'))
+
+    def test_authenticated_telegram_verdict_refreshes_presence(self):
+        self.configure()
+        self.stamp.unlink()
+        self.path.write_text(json.dumps(self.manifest))
+        sender = self.manifest['unattended']['admiral_telegram_user_id']
+        payload = {'id': 'synthetic-item', 'nonce': 'synthetic-nonce',
+                   'behavior': 'allow', 'sender': sender}
+        env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path),
+               'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(e.sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                mock.patch.object(e, '_queue_answer', return_value=True):
+            self.assertEqual(e.verdict_main(), 0)
+        self.assertTrue(self.stamp.exists())
 
     def test_present_hold_timeout_queues_and_note_has_id(self):
         # pty-hold-20261012: the Telegram plugin hold is gone. When the
@@ -314,6 +329,7 @@ class RemotePresenceTests(unittest.TestCase):
 
     def test_presence_authentication_and_future_stamp(self):
         self.configure()
+        self.stamp.unlink()
         for event in [self.event('',hook_event_name='UserPromptSubmit',prompt='<channel source="telegram" user_id="999">hi</channel>'),
                       self.event('',hook_event_name='UserPromptSubmit',prompt='scheduled work',source='scheduler'),
                       self.event('',hook_event_name='UserPromptSubmit',prompt='<task-notification>peer result</task-notification>')]:
@@ -324,7 +340,7 @@ class RemotePresenceTests(unittest.TestCase):
         self.manifest['unattended']['quiet_hours']['enabled']=True
         now=dt.datetime(2026,1,2,14,tzinfo=dt.timezone.utc)
         os.utime(self.stamp,(now.timestamp()+60,now.timestamp()+60))
-        self.assertEqual(e._away_status(self.loaded(),now=now),(True,'quiet_hours'))
+        self.assertEqual(e._away_status(self.loaded(),now=now),(True,'away'))
 
     def test_presence_peer_uses_one_authority_for_read_and_stamp(self):
         self.configure()
@@ -336,7 +352,7 @@ class RemotePresenceTests(unittest.TestCase):
             self.assertTrue(e._presence_stamp(self.loaded()))
             self.assertEqual(run.call_args.args[0][-2:],['example.invalid','approval-presence stamp'])
         with mock.patch.object(e.subprocess,'run',side_effect=subprocess.TimeoutExpired('ssh',.7)):
-            self.assertEqual(e._away_status(self.loaded(),now=now),(True,'quiet_hours'))
+            self.assertEqual(e._away_status(self.loaded(),now=now),(True,'away'))
 
     def test_first_human_allow_auto_clears_away_with_receipt(self):
         self.configure()

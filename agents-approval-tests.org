@@ -1359,6 +1359,8 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         os.chmod(self.message, 0o600)
         self.log = self.scratch / 'worker.log'
         self.flag = self.base / 'away'
+        self.stamp = self.base / 'last-seen'
+        self.stamp.touch()
         self.queue = self.base / 'queue.jsonl'
         self.ledger = self.base / 'ledger.jsonl'
         self.git('init', '-b', 'master')
@@ -1387,6 +1389,7 @@ class UnattendedCoordinatorTests(unittest.TestCase):
         }
         self.manifest['unattended'] = {
             'enabled': True, 'away_flag': str(self.flag),
+            'presence_file': str(self.stamp), 'presence_window_minutes': 20,
             'quiet_hours': {'enabled': False, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'},
         }
         self.path = self.base / 'manifest.json'
@@ -1463,22 +1466,24 @@ class UnattendedCoordinatorTests(unittest.TestCase):
 
     def test_quiet_hours_boundaries_timezone_and_flag_or(self):
         self.manifest['unattended']['quiet_hours']['enabled'] = True
+        self.stamp.unlink()
         manifest = self.loaded()
-        for hour, minute, expected in [(22, 59, False), (23, 0, True), (7, 59, True), (8, 0, False)]:
+        for hour, minute in [(22, 59), (23, 0), (7, 59), (8, 0)]:
             with self.subTest(hour=hour, minute=minute):
                 # January UTC +11: these values are Melbourne-local.
                 instant = dt.datetime(2026, 1, 2, hour, minute, tzinfo=dt.timezone(dt.timedelta(hours=11)))
-                self.assertEqual(e._away_status(manifest, now=instant)[0], expected)
+                self.assertEqual(e._away_status(manifest, now=instant), (True, 'away'))
         self.flag.touch()
         self.assertTrue(e._away_status(manifest, now=dt.datetime(2026, 1, 2, 12, tzinfo=dt.timezone(dt.timedelta(hours=11))))[0])
 
     def test_quiet_hours_day_window_and_dst(self):
         q = self.manifest['unattended']['quiet_hours']
         q.update(enabled=True, start='09:00', end='17:00')
+        self.stamp.unlink()
         m = self.loaded()
-        for utc, expected in [(dt.datetime(2026, 7, 1, 0, tzinfo=dt.timezone.utc), True),
-                              (dt.datetime(2026, 7, 1, 7, tzinfo=dt.timezone.utc), False)]:
-            self.assertEqual(e._away_status(m, now=utc)[0], expected)
+        for utc in [dt.datetime(2026, 7, 1, 0, tzinfo=dt.timezone.utc),
+                    dt.datetime(2026, 7, 1, 7, tzinfo=dt.timezone.utc)]:
+            self.assertEqual(e._away_status(m, now=utc), (True, 'away'))
 
     def test_queue_symlink_failure_still_denies(self):
         self.flag.touch()

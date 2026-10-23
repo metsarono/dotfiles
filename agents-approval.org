@@ -12,9 +12,10 @@ confident Decider danger verdict may veto. A fresh Admiral presence stamp
 selects a bounded Telegram hold for refusals, even during quiet hours. An
 explicit authenticated human answer is the only way a held refusal becomes an
 allow. Timeout or failed delivery denies with interrupt:false and leaves one
-open smart queue item. The away flag always forces away. With a stale/missing
-stamp, quiet hours are the fallback; daytime keeps the existing presentation
-switch. Presence never broadens automatic authority.
+open smart queue item. The away flag always forces away. A stale or missing
+stamp is fail-safe away and queues plus notifies the Admiral; only a fresh
+stamp selects the bounded present hold. Presence never broadens automatic
+authority.
 
 The shared unattended runtime is in agents-approval-unattended.org. The paired
 Telegram seam and complete candidate preflight are in agents-approval-telegram.org.
@@ -239,13 +240,13 @@ unchanged; it cannot implement unattended mode.
 #+END_EXAMPLE
 
 Enable =unattended.enabled= in each seat's PRIVATE manifest. The away flag
-=~/.config/dotcortex/approval-away= OR the configured half-open quiet window
-(default 23:00 to 08:00 Australia/Melbourne, with DST) decides away. Disabling
-quiet hours leaves the flag available; removing the flag during quiet hours
-still means away. A manifest without this section retains its old behavior
-except for the explicit default away flag. Published templates stay disabled
-until their private copies are reviewed. Away changes only a final ASK into
-DENY, including floor refusals and errors/timeouts; ALLOW is unchanged.
+=~/.config/dotcortex/approval-away= always decides away; a fresh presence stamp
+selects the bounded present path, while a stale or missing stamp is fail-safe
+away. Quiet-hours shape remains validated but does not infer presence. A
+manifest without this section retains its old behavior except for the explicit
+default away flag. Published templates stay disabled until their private copies
+are reviewed. Away changes only a final ASK into DENY, including floor refusals
+and errors/timeouts; ALLOW is unchanged.
 
 The full original request, tool, command, cwd, session, UTC timestamp, refusal
 reason and away reason append to =~/.local/state/dotcortex/approval-morning-queue.jsonl=.
@@ -264,7 +265,7 @@ and preserves Claude Code's native prompt, relayed to Telegram with Allow
 buttons. It does not queue or send a second notification. True-floor refusals
 also follow this switch: they never become automatic allows. Keep =ask= until
 the separately built Desk consumer can honour an approval once and wake the
-seat; then explicitly opt into =deny=. Away/quiet hours always deny, queue and
+seat; then explicitly opt into =deny=. Away or stale presence always denies, queues and
 notify regardless of this switch.
 
 ** Coordinator class boundary
@@ -388,6 +389,8 @@ class GateInversionTests(unittest.TestCase):
         self.queue = self.base / 'queue.jsonl'
         self.log = self.base / 'ledger.jsonl'
         self.flag = self.base / 'away'
+        self.stamp = self.base / 'last-seen'
+        self.stamp.touch()
         self.manifest = json.loads((REPO / 'all/.config/dotcortex/claude-approval-canary.kikin.v1.json').read_text())
         self.manifest['roots'] = [str(self.root), str(self.worktree)]
         self.manifest['scratch_roots'] = [str(self.root)]
@@ -397,7 +400,9 @@ class GateInversionTests(unittest.TestCase):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
         self.manifest['notifications'] = {'argv': ['YOUR_SEAT_TELEGRAM_NOTIFIER']}
         self.manifest['decider'].update(enabled=False)
-        self.manifest['unattended'] = {'enabled': True, 'away_flag': str(self.flag), 'quiet_hours': {'enabled': False}}
+        self.manifest['unattended'] = {
+            'enabled': True, 'away_flag': str(self.flag), 'presence_file': str(self.stamp),
+            'presence_window_minutes': 20, 'quiet_hours': {'enabled': False}}
         for item in self.manifest['classes']:
             item['enabled'] = False
 
@@ -740,7 +745,7 @@ class GateInversionTests(unittest.TestCase):
                     mock.patch.object(e, '_notify_admiral', return_value='sent') as notify:
                 self.assertEqual(self.run_hook(self.event('rm README.org'))['behavior'], 'deny')
                 self.assertTrue(notify.call_args.args[2])
-                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'quiet_hours')
+                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'away')
 
     def wrapper_module(self):
         from importlib.machinery import SourceFileLoader
@@ -782,7 +787,9 @@ class GateInversionTests(unittest.TestCase):
                         with mock.patch.dict(os.environ, env), mock.patch.object(wrapper.sys, 'stdin', io.StringIO(json.dumps(self.event()))), \
                                 mock.patch.object(wrapper.subprocess, 'run', side_effect=run), contextlib.redirect_stdout(out):
                             self.assertEqual(wrapper.main(), 0)
-                        expected = 'deny' if away or mode == 'deny' else 'ask'
+                        # An unavailable candidate engine must fail closed to
+                        # the same queued denial rather than emit a silent ask.
+                        expected = 'deny'
                         result = json.loads(out.getvalue())['hookSpecificOutput']['decision'] if out.getvalue().strip() else {'behavior': 'ask'}
                         self.assertEqual(result['behavior'], expected)
                         after = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
@@ -793,19 +800,21 @@ class GateInversionTests(unittest.TestCase):
                             self.assertEqual(json.loads(sink.read_text())['away'], away)
                             record = json.loads(self.queue.read_text().splitlines()[-1])
                             self.assertEqual(record['request'], self.event())
-                            self.assertEqual(record['away_reason'], 'away_flag' if away else 'present')
+                            self.assertEqual(record['away_reason'], 'away_flag' if away else 'presence')
                 if away:
                     self.flag.unlink()
 
-    def test_wrapper_default_ask_and_quiet_hours_fallback(self):
+    def test_wrapper_default_ask_and_stale_presence_queues(self):
         import datetime as dt
         wrapper = self.wrapper_module()
         self.manifest['gate_inversion'].pop('present_refusal')
+        self.stamp.unlink()
         self.path.write_text(json.dumps(self.manifest))
         env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
         with mock.patch.dict(os.environ, env):
-            self.assertIsNone(wrapper.defer(json.dumps(self.event())))
-        self.assertFalse(self.queue.exists())
+            decision = wrapper.defer(json.dumps(self.event()))
+        self.assertEqual(decision['hookSpecificOutput']['decision']['behavior'], 'deny')
+        self.assertTrue(self.queue.exists())
         self.manifest['unattended']['quiet_hours'] = {
             'enabled': True, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'}
         status = wrapper._away_status
@@ -817,9 +826,11 @@ class GateInversionTests(unittest.TestCase):
                 decision = wrapper.defer(json.dumps(self.event()))['hookSpecificOutput']['decision']
                 self.assertEqual(decision['behavior'], 'deny')
                 self.assertIn('morning review', decision['message'])
-                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'quiet_hours')
+                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'away')
 
     def test_wrapper_preserves_native_ask_from_candidate_engine(self):
+        self.manifest['unattended']['enabled'] = False
+        self.stamp.unlink()
         self.manifest['gate_inversion']['present_refusal'] = 'ask'
         self.path.write_text(json.dumps(self.manifest))
         env = {**os.environ, 'DOTCORTEX_KIKIN_APPROVAL_ENGINE': str(REPO / 'all/.local/lib/dotcortex/claude_approval_kikin.py'),
@@ -871,7 +882,7 @@ failure, deterministic timeout and true floor, follows =present_refusal= while
 present. Default =ask= returns no decision so the native Telegram Allow buttons
 remain usable. Explicit =deny= has =interrupt: false=, appends the complete
 private request to the queue and attempts Telegram via a fixed private
-=notifications.argv= bridge. Away/quiet hours always use DENY/queue/notify.
+=notifications.argv= bridge. Away or stale presence always uses DENY/queue/notify.
 Daytime deny notes say =awaiting the Admiral's approval on the Desk/Telegram=;
 away notes retain morning review. Queue or notification failure still denies
 in deny mode; failure is explicit in the note and hashed ledger. ASK records an
@@ -1114,13 +1125,15 @@ PermissionRequest outer timeout to hold_timeout_minutes*60+9 (609 seconds for
 the default ten minutes). The wrapper allows six seconds beyond the bounded
 hold for classification and queue/notification work. Missing or failed engines
 use the same shared presence decision and smart queue; a fresh stamp fails
-closed to queued denial when the engine cannot validate the request. Stale
-native daytime asks retain their existing relay, and successful PostToolUse
-observations record live approvals and resolve matching queued items.
+closed to queued denial when the engine cannot validate the request. Missing or
+stale presence follows the away queue-and-notify path, and successful
+PostToolUse observations record live approvals and resolve matching queued
+items.
 
 Keep quiet hours disabled until both seats use the shared presence authority
 and the staged Telegram seam passes the deployment smoke test. Afterwards,
-quiet hours may be enabled as the fallback for a stale stamp. No live apply,
+quiet hours may be enabled for validation, but never infer presence from a
+stale stamp. No live apply,
 restart, installation, pull or push is performed by this review branch.
 
 * Reviewed Honey seat manifest
@@ -1323,18 +1336,20 @@ staged Telegram bridge; deploying the engine alone does not provide the hold.
 * Presence and smart queue superseding contract (2026-10-12)
 
 Fresh presence overrides quiet hours and the presentation switch; the away flag
-always wins. Missing/stale daytime presence retains the existing switch. With
-fresh presence a refusal is HELD by the hook, relayed to the paired Telegram
-plugin, and answered by the authenticated Admiral once. Timeout defaults to ten
-minutes, then DENY with interrupt:false and an open smart queue item. There is
-no terminal-only fallback. Use a hook timeout of hold_timeout_minutes*60+9.
+always wins. Missing/stale presence is fail-safe away, so the refusal is queued
+and notified rather than silently held nowhere. With fresh presence a refusal
+is HELD by the hook, relayed to the paired Telegram plugin, and answered by the
+authenticated Admiral once. Timeout defaults to ten minutes, then DENY with
+interrupt:false and an open smart queue item. There is no terminal-only
+fallback. Use a hook timeout of hold_timeout_minutes*60+9.
 
 One shared =agents-approval-unattended.org= body provides all presence decisions
 to the engine, wrapper and helpers. A remote seat may set presence_host to the
 authority SSH alias; that helper stamps and reads the authority file so a message
 to ANY seat counts for all seats. Leave quiet hours disabled until both seats
 can reach that authority and the Telegram hold smoke test passes. Quiet hours
-then become only the fallback for a missing/stale stamp.
+remain configuration validation and do not infer presence from a missing/stale
+stamp.
 
 The private JSONL queue is a revision journal; =approval-queue list --json= folds
 latest items by ID. Dedupe uses seat plus normalized request (quoting, newlines,

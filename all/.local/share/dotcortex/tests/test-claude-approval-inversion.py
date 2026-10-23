@@ -31,6 +31,8 @@ class GateInversionTests(unittest.TestCase):
         self.queue = self.base / 'queue.jsonl'
         self.log = self.base / 'ledger.jsonl'
         self.flag = self.base / 'away'
+        self.stamp = self.base / 'last-seen'
+        self.stamp.touch()
         self.manifest = json.loads((REPO / 'all/.config/dotcortex/claude-approval-canary.kikin.v1.json').read_text())
         self.manifest['roots'] = [str(self.root), str(self.worktree)]
         self.manifest['scratch_roots'] = [str(self.root)]
@@ -40,7 +42,9 @@ class GateInversionTests(unittest.TestCase):
         self.manifest['gate_inversion'] = {'enabled': True, 'present_refusal': 'deny'}
         self.manifest['notifications'] = {'argv': ['YOUR_SEAT_TELEGRAM_NOTIFIER']}
         self.manifest['decider'].update(enabled=False)
-        self.manifest['unattended'] = {'enabled': True, 'away_flag': str(self.flag), 'quiet_hours': {'enabled': False}}
+        self.manifest['unattended'] = {
+            'enabled': True, 'away_flag': str(self.flag), 'presence_file': str(self.stamp),
+            'presence_window_minutes': 20, 'quiet_hours': {'enabled': False}}
         for item in self.manifest['classes']:
             item['enabled'] = False
 
@@ -383,7 +387,7 @@ class GateInversionTests(unittest.TestCase):
                     mock.patch.object(e, '_notify_admiral', return_value='sent') as notify:
                 self.assertEqual(self.run_hook(self.event('rm README.org'))['behavior'], 'deny')
                 self.assertTrue(notify.call_args.args[2])
-                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'quiet_hours')
+                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'away')
 
     def wrapper_module(self):
         from importlib.machinery import SourceFileLoader
@@ -425,7 +429,9 @@ class GateInversionTests(unittest.TestCase):
                         with mock.patch.dict(os.environ, env), mock.patch.object(wrapper.sys, 'stdin', io.StringIO(json.dumps(self.event()))), \
                                 mock.patch.object(wrapper.subprocess, 'run', side_effect=run), contextlib.redirect_stdout(out):
                             self.assertEqual(wrapper.main(), 0)
-                        expected = 'deny' if away or mode == 'deny' else 'ask'
+                        # An unavailable candidate engine must fail closed to
+                        # the same queued denial rather than emit a silent ask.
+                        expected = 'deny'
                         result = json.loads(out.getvalue())['hookSpecificOutput']['decision'] if out.getvalue().strip() else {'behavior': 'ask'}
                         self.assertEqual(result['behavior'], expected)
                         after = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
@@ -436,19 +442,21 @@ class GateInversionTests(unittest.TestCase):
                             self.assertEqual(json.loads(sink.read_text())['away'], away)
                             record = json.loads(self.queue.read_text().splitlines()[-1])
                             self.assertEqual(record['request'], self.event())
-                            self.assertEqual(record['away_reason'], 'away_flag' if away else 'present')
+                            self.assertEqual(record['away_reason'], 'away_flag' if away else 'presence')
                 if away:
                     self.flag.unlink()
 
-    def test_wrapper_default_ask_and_quiet_hours_fallback(self):
+    def test_wrapper_default_ask_and_stale_presence_queues(self):
         import datetime as dt
         wrapper = self.wrapper_module()
         self.manifest['gate_inversion'].pop('present_refusal')
+        self.stamp.unlink()
         self.path.write_text(json.dumps(self.manifest))
         env = {'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_MORNING_QUEUE': str(self.queue)}
         with mock.patch.dict(os.environ, env):
-            self.assertIsNone(wrapper.defer(json.dumps(self.event())))
-        self.assertFalse(self.queue.exists())
+            decision = wrapper.defer(json.dumps(self.event()))
+        self.assertEqual(decision['hookSpecificOutput']['decision']['behavior'], 'deny')
+        self.assertTrue(self.queue.exists())
         self.manifest['unattended']['quiet_hours'] = {
             'enabled': True, 'start': '23:00', 'end': '08:00', 'timezone': 'Australia/Melbourne'}
         status = wrapper._away_status
@@ -460,9 +468,11 @@ class GateInversionTests(unittest.TestCase):
                 decision = wrapper.defer(json.dumps(self.event()))['hookSpecificOutput']['decision']
                 self.assertEqual(decision['behavior'], 'deny')
                 self.assertIn('morning review', decision['message'])
-                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'quiet_hours')
+                self.assertEqual(json.loads(self.queue.read_text().splitlines()[-1])['away_reason'], 'away')
 
     def test_wrapper_preserves_native_ask_from_candidate_engine(self):
+        self.manifest['unattended']['enabled'] = False
+        self.stamp.unlink()
         self.manifest['gate_inversion']['present_refusal'] = 'ask'
         self.path.write_text(json.dumps(self.manifest))
         env = {**os.environ, 'DOTCORTEX_KIKIN_APPROVAL_ENGINE': str(REPO / 'all/.local/lib/dotcortex/claude_approval_kikin.py'),

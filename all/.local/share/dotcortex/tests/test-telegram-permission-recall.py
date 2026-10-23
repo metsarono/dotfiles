@@ -156,6 +156,17 @@ class RecallTests(unittest.TestCase):
         self.assertEqual(self.run_sweep(fake, tool='WebFetch', tools=('Bash', 'WebFetch')), [102])
         self.assertEqual(sorted(fake.messages), [])
 
+    def test_sibling_pending_prompt_survives_an_allowed_sweep(self):
+        # The allowed Bash request must not strip the still-pending WebFetch
+        # card while its sibling is waiting for the Admiral.
+        fake = FakeTelegram({
+            101: {'kind': 'bot', 'text': '\U0001f510 Permission: Bash', 'buttons': True, 'date': self.now},
+            102: {'kind': 'bot', 'text': '\U0001f510 Permission: WebFetch', 'buttons': True, 'date': self.now},
+        })
+        self.assertEqual(self.run_sweep(fake, tool='Bash', tools=('Bash', 'WebFetch')), [101])
+        self.assertIn(102, fake.messages)
+        self.assertEqual(fake.stripped, [101])
+
     def test_prompt_that_arrives_late_is_still_caught(self):
         fake = FakeTelegram({})
         timer = threading.Timer(0.4, lambda: fake.messages.__setitem__(101, {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now}))
@@ -169,7 +180,7 @@ class RecallTests(unittest.TestCase):
             101: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now},
             102: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now},
         })
-        self.assertEqual(self.run_sweep(fake), [])
+        self.assertEqual(self.run_sweep(fake, tools=('Bash', 'Bash')), [])
         self.assertIn(101, fake.messages)
         self.assertIn(102, fake.messages)
 
@@ -191,7 +202,7 @@ class RecallTests(unittest.TestCase):
             102: {'kind': 'bot', 'text': PERM, 'buttons': True, 'date': self.now + 30},
         })
         self.assertEqual(self.run_sweep(fake), [])
-        self.assertEqual(sorted(fake.stripped), [101, 102])
+        self.assertEqual(sorted(fake.stripped), [101])
         self.assertIn(101, fake.messages)
         self.assertIn(102, fake.messages)
 
