@@ -33,7 +33,7 @@ defuddle "" "" "global" "registry" "" "" ""
 @grinev/opencode-telegram-bot "" "" "global" "registry" "" "" ""
 @earendil-works/pi-coding-agent "" "" "global" "registry" "" "" ""
 # Google OAuth provider for Gemma; loaded by tools-pi.org, credentials stay private.
-pi-antigravity 0.11.0 "--ignore-scripts" "global" "registry" "" "" ""
+pi-antigravity 0.11.0 --ignore-scripts "global" "registry" "" "" ""
 @deepseek-ai/dsh "" "" "global" "registry" "" "" ""
 pnpm 11.7.0 "" "global" "registry" "" "" ""
 # ACP adapter for Emacs agent-shell (xenodium). Speaks Agent Client Protocol to

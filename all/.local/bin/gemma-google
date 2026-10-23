@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
+case "${1:-}" in
+    -h|--help)
+        printf '%s\n' 'Usage: gemma-google [Pi options]' \
+            'Uses Gemma private Pi profile; does not change her Telegram model.' \
+            'In interactive Pi: /login antigravity, then /antigravity.refresh and /antigravity.models.' \
+            'Complete Google sign-in in your own browser. Paste callback URLs only into the local Pi prompt, never chat.'
+        exit 0 ;;
+esac
 export PI_CODING_AGENT_DIR="${GEMMA_PI_AGENT_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.config/gemma-pi-telegram/pi-agent}}"
 prefix="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}"
 package="$prefix/lib/node_modules/pi-antigravity"
