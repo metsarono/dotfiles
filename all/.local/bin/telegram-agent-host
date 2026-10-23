@@ -258,8 +258,27 @@ ductor_running() {
     pid_file_has_command "$STATE_DIR/ductor-supervise.pid" ductor-supervise
 }
 
+ductor_child_ready() {
+    local supervisor_pid child_pid child_parent argument
+    local found_entrypoint=0
+    ductor_running || return 1
+    IFS= read -r supervisor_pid < "$STATE_DIR/ductor-supervise.pid" || return 1
+    IFS= read -r child_pid < "$STATE_DIR/ductor-child.pid" || return 1
+    case "$supervisor_pid" in ''|*[!0-9]*) return 1 ;; esac
+    case "$child_pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ -r "/proc/$child_pid/cmdline" ] || return 1
+    child_parent="$(awk '/^PPid:/ { print $2; exit }' "/proc/$child_pid/status" 2>/dev/null)" || return 1
+    [ "$child_parent" = "$supervisor_pid" ] || return 1
+    while IFS= read -r -d '' argument; do
+        case "${argument##*/}" in
+            ductor|ductor.unmanaged) found_entrypoint=1 ;;
+        esac
+    done < "/proc/$child_pid/cmdline"
+    [ "$found_entrypoint" -eq 1 ]
+}
+
 ductor_ready() {
-    ductor_running && pid_file_has_command "$STATE_DIR/ductor-child.pid" ductor
+    ductor_child_ready
 }
 
 wait_ductor_ready() {
