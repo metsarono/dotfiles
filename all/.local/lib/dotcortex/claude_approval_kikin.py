@@ -2587,6 +2587,12 @@ def _unattended(manifest):
     return section
 
 
+def _gate_inversion_enabled(manifest):
+    """Return the canonical root-default-allow switch for every gate path."""
+    section = manifest.get('gate_inversion', {'enabled': True}) if isinstance(manifest, dict) else {}
+    return isinstance(section, dict) and section.get('enabled') is True
+
+
 def _minutes(section, key, default):
     value = section.get(key, default)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= 1440:
@@ -5022,8 +5028,7 @@ def _coordinator_match(event, manifest):
 
 
 def _inversion_enabled(manifest):
-    section = manifest.get('gate_inversion', {'enabled': True})
-    return isinstance(section, dict) and section.get('enabled') is True
+    return _gate_inversion_enabled(manifest)
 
 
 def _policy_roots(manifest):

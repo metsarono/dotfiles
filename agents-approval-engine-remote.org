@@ -1053,8 +1053,7 @@ def _coordinator_match(event, manifest):
 
 
 def _inversion_enabled(manifest):
-    section = manifest.get('gate_inversion', {'enabled': True})
-    return isinstance(section, dict) and section.get('enabled') is True
+    return _gate_inversion_enabled(manifest)
 
 
 def _policy_roots(manifest):

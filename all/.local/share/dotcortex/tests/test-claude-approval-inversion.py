@@ -450,7 +450,8 @@ class GateInversionTests(unittest.TestCase):
                             self.assertEqual(wrapper.main(), 0)
                         # Inversion makes an unavailable engine fail open; the
                         # legacy gate remains queued and fail closed.
-                        expected = 'allow' if self.manifest['gate_inversion'].get('enabled') is True else 'deny'
+                        expected = ('ask' if body == 'pass' and mode == 'ask' and not away else
+                                    ('allow' if self.manifest['gate_inversion'].get('enabled') is True else 'deny'))
                         result = json.loads(out.getvalue())['hookSpecificOutput']['decision'] if out.getvalue().strip() else {'behavior': 'ask'}
                         self.assertEqual(result['behavior'], expected)
                         after = len(self.queue.read_text().splitlines()) if self.queue.exists() else 0
@@ -464,8 +465,9 @@ class GateInversionTests(unittest.TestCase):
                             self.assertEqual(record['away_reason'], 'away_flag' if away else 'presence')
                         else:
                             self.assertFalse(sink.exists())
-                            self.assertEqual(json.loads(self.log.read_text().splitlines()[-1])['reason'],
-                                             'engine-timeout-failed-open-under-inversion')
+                            if expected == 'allow':
+                                self.assertEqual(json.loads(self.log.read_text().splitlines()[-1])['reason'],
+                                                 'engine-timeout-failed-open-under-inversion')
                 if away:
                     self.flag.unlink()
 
@@ -519,6 +521,41 @@ class GateInversionTests(unittest.TestCase):
             input=json.dumps(self.event('rm README.org')), env=env, capture_output=True, text=True, timeout=6, check=True)
         self.assertEqual(result.stdout, '')
         self.assertFalse(self.queue.exists())
+
+    def test_wrapper_present_empty_engine_prompts_but_away_queues(self):
+        wrapper = self.wrapper_module()
+        self.manifest['gate_inversion'] = {'enabled': False, 'present_refusal': 'ask'}
+        self.manifest['unattended']['enabled'] = True
+        env = {**os.environ, 'DOTCORTEX_KIKIN_APPROVAL_ENGINE': str(self.base / 'empty-engine.py'),
+               'SO_APPROVAL_KIKIN_MANIFEST': str(self.path), 'SO_APPROVAL_KIKIN_LOG': str(self.log),
+               'SO_APPROVAL_MORNING_QUEUE': str(self.queue), 'TELEGRAM_STATE_DIR': ''}
+        (self.base / 'empty-engine.py').write_text('pass\n')
+        for present in (True, False):
+            with self.subTest(present=present):
+                if present:
+                    self.stamp.touch()
+                elif self.stamp.exists():
+                    self.stamp.unlink()
+                self.path.write_text(json.dumps(self.manifest))
+                result = subprocess.run(['/usr/bin/python3', str(REPO / 'all/.local/bin/claude-hook-approval-inverted')],
+                                        input=json.dumps(self.event('for item in one; do printf %s "$item"; done\n')),
+                                        env=env, capture_output=True, text=True, timeout=6, check=True)
+                if present:
+                    self.assertEqual(result.stdout, '')
+                    self.assertFalse(self.queue.exists())
+                else:
+                    decision = json.loads(result.stdout)['hookSpecificOutput']['decision']
+                    self.assertEqual(decision['behavior'], 'deny')
+                    self.assertIs(decision['interrupt'], False)
+                    self.assertIn('morning review', decision['message'])
+                    self.assertTrue(self.queue.exists())
+
+    def test_wrapper_and_engine_share_inversion_switch(self):
+        wrapper = self.wrapper_module()
+        for section in ({}, {'enabled': True}, {'enabled': False}, {'enabled': False, 'present_refusal': 'ask'}):
+            with self.subTest(section=section):
+                manifest = {'gate_inversion': section}
+                self.assertEqual(wrapper._inversion_enabled(manifest), e._inversion_enabled(manifest))
 
     def test_wrapper_forwards_valid_candidate_decision(self):
         self.path.write_text(json.dumps(self.manifest))

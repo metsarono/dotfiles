@@ -20,13 +20,11 @@ import subprocess
 _runtime = runtime()
 _away_status = _runtime._away_status
 _present_refusal = _runtime._present_refusal
+_gate_inversion_enabled = _runtime._gate_inversion_enabled
 
 
 def _inversion_enabled(manifest):
-    # Keep this identical to the engine's root_default_allow switch. A
-    # timeout is allowed to fail open only while the inverted gate is active.
-    section = manifest.get('gate_inversion', {'enabled': True})
-    return isinstance(section, dict) and section.get('enabled') is True
+    return _gate_inversion_enabled(manifest)
 
 
 def _floor_reason(event, manifest):
@@ -95,7 +93,7 @@ def defer(raw):
         return {'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
                 'decision': {'behavior': 'allow'}}}
     away, away_reason = _away_status(manifest)
-    if not away and away_reason != 'presence' and _present_refusal(manifest) == 'ask':
+    if not away and _present_refusal(manifest) == 'ask':
         return None
     try:
         item = _runtime._queue_upsert(event, 'engine_unavailable', away_reason, manifest)
@@ -148,7 +146,7 @@ def main():
         away, why = _away_status(manifest)
         budget = 6.0 + (_runtime._hold_seconds(manifest) if not away and why == 'presence' else 0)
         result = subprocess.run(['/usr/bin/python3',str(engine)],input=raw,text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=budget,check=False)
-        if result.returncode == 0 and not result.stdout.strip() and not away and why != 'presence' and _present_refusal(manifest) == 'ask':
+        if result.returncode == 0 and not result.stdout.strip() and not away and _present_refusal(manifest) == 'ask':
             return 0
         parsed = json.loads(result.stdout)
         hook = parsed['hookSpecificOutput']; decision = hook['decision']
