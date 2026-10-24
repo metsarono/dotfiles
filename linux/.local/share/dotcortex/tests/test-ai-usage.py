@@ -811,5 +811,45 @@ class NeuralWattAddendumTests(unittest.TestCase):
         self.assertNotIn("NEURALWATT_OFFERS_FEED = os.path.expanduser(", script)
 
 
+class AntigravityPoolTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ai_usage = load_ai_usage()
+
+    def test_antigravity_is_default_visible(self):
+        self.assertIn("antigravity", self.ai_usage.DEFAULT_PROVIDER_KEYS)
+        self.assertIn("antigravity", self.ai_usage.PROVIDER_DISPLAY_ORDER)
+
+    def test_consolidate_pools_collapses_into_three_shared_pools(self):
+        summary = {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {"bucketId": "gemini-weekly", "window": "weekly", "resetTime": "2026-10-31T03:00:02Z", "remainingFraction": 1.0},
+                        {"bucketId": "gemini-5h", "window": "5h", "resetTime": "2026-10-24T08:00:02Z", "remainingFraction": 1.0},
+                    ],
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        {"bucketId": "3p-weekly", "window": "weekly", "resetTime": "2026-10-31T03:00:02Z", "remainingFraction": 0.9},
+                        {"bucketId": "3p-5h", "window": "5h", "resetTime": "2026-10-24T08:00:02Z", "remainingFraction": 0.8},
+                    ],
+                },
+                {
+                    "displayName": "Gemini 4 Argon",
+                    "buckets": [
+                        {"bucketId": "gemini-argon-wtu-weekly", "window": "weekly", "resetTime": "2026-10-31T00:03:20Z", "remainingFraction": 0.77},
+                    ],
+                },
+            ]
+        }
+        pools, weekly_reset = self.ai_usage.consolidate_antigravity_pools(summary, None)
+        self.assertEqual([p["label"] for p in pools], ["Argon", "Flash", "Claude"])
+        self.assertEqual([p["percentage"] for p in pools], [77, 100, 80])
+        self.assertEqual(weekly_reset, "2026-10-31T00:03:20Z")
+
+
 if __name__ == "__main__":
     unittest.main()

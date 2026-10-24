@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import json
 import os
 import re
@@ -49,10 +50,19 @@ ANTIGRAVITY_BASE_DIR = Path.home() / ".antigravity-kit"
 ANTIGRAVITY_TOKENS_FILE = ANTIGRAVITY_BASE_DIR / "tokens.json"
 ANTIGRAVITY_ACTIVE_PROFILE = ANTIGRAVITY_BASE_DIR / "active"
 ANTIGRAVITY_TOKEN_URL = "https://oauth2.googleapis.com/token"
-ANTIGRAVITY_CLOUD_CODE_BASE_URL = "https://cloudcode-pa.googleapis.com"
+ANTIGRAVITY_CLOUD_CODE_BASE_URL = "https://daily-cloudcode-pa.googleapis.com"
+ANTIGRAVITY_CLOUD_CODE_FALLBACK_URL = "https://cloudcode-pa.googleapis.com"
 ANTIGRAVITY_QUOTA_API_URL = f"{ANTIGRAVITY_CLOUD_CODE_BASE_URL}/v1internal:fetchAvailableModels"
+ANTIGRAVITY_QUOTA_SUMMARY_URL = f"{ANTIGRAVITY_CLOUD_CODE_BASE_URL}/v1internal:retrieveUserQuotaSummary"
 ANTIGRAVITY_LOAD_CODE_ASSIST_URL = f"{ANTIGRAVITY_CLOUD_CODE_BASE_URL}/v1internal:loadCodeAssist"
-ANTIGRAVITY_USER_AGENT = "antigravity/1.11.3 Darwin/arm64"
+ANTIGRAVITY_USER_AGENT = (
+    "antigravity/cli/1.4.0 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)"
+)
+ANTIGRAVITY_PUBLIC_CLIENT_ID_B64 = (
+    "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlc"
+    "C5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ=="
+)
+ANTIGRAVITY_PUBLIC_CLIENT_SECRET_B64 = "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY="
 CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
 CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 # Native Codex usage endpoint — the same source codexbar reads, hit directly with the
@@ -225,7 +235,15 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 # `--providers antigravity`. 2026-10-09 final (Admiral): subscriptions first
 # (codex, claude, opencode-go, mistral), then the reserve tank (openrouter,
 # neuralwatt) with OpenRouter directly beneath Mistral.
-DEFAULT_PROVIDER_KEYS: tuple[str, ...] = ("codex", "claude", "opencode-go", "mistral", "openrouter", "neuralwatt")
+DEFAULT_PROVIDER_KEYS: tuple[str, ...] = (
+    "codex",
+    "claude",
+    "antigravity",
+    "opencode-go",
+    "mistral",
+    "openrouter",
+    "neuralwatt",
+)
 
 
 def eprint(*args: Any, **kwargs: Any) -> None:
@@ -1372,7 +1390,55 @@ def fetch_fuelcheck(spec: ProviderSpec, timeout_seconds: float) -> dict[str, Any
     }
 
 
+def _antigravity_pi_agent_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    for env_key in ("GEMMA_PI_AGENT_DIR", "PI_CODING_AGENT_DIR"):
+        raw = os.environ.get(env_key, "").strip()
+        if raw:
+            dirs.append(Path(raw).expanduser())
+    dirs.append(Path.home() / ".config" / "gemma-pi-telegram" / "pi-agent")
+    dirs.append(Path.home() / ".pi" / "agent")
+    return dirs
+
+
 def load_antigravity_token_store() -> dict[str, Any]:
+    for agent_dir in _antigravity_pi_agent_dirs():
+        auth_file = agent_dir / "auth.json"
+        if auth_file.exists():
+            try:
+                auth_data = json.loads(auth_file.read_text(encoding="utf-8"))
+                ag = auth_data.get("antigravity") if isinstance(auth_data, dict) else None
+                if isinstance(ag, dict) and isinstance(ag.get("refresh"), str) and ag["refresh"].strip():
+                    email = str(ag.get("email") or "pi-antigravity").strip()
+                    return {
+                        email: {
+                            "refreshToken": ag["refresh"].strip(),
+                            "projectId": ag.get("projectId"),
+                        }
+                    }
+            except (OSError, json.JSONDecodeError):
+                pass
+        accounts_file = agent_dir / "antigravity-accounts.json"
+        if accounts_file.exists():
+            try:
+                acc_data = json.loads(accounts_file.read_text(encoding="utf-8"))
+                accounts = acc_data.get("accounts") if isinstance(acc_data, dict) else None
+                if isinstance(accounts, dict):
+                    active_id = acc_data.get("activeAccountId")
+                    candidate = accounts.get(active_id) if isinstance(active_id, str) else None
+                    if not isinstance(candidate, dict) and accounts:
+                        candidate = next(iter(accounts.values()))
+                    if isinstance(candidate, dict) and isinstance(candidate.get("refresh"), str) and candidate["refresh"].strip():
+                        email = str(candidate.get("email") or active_id or "pi-antigravity").strip()
+                        return {
+                            email: {
+                                "refreshToken": candidate["refresh"].strip(),
+                                "projectId": candidate.get("projectId"),
+                            }
+                        }
+            except (OSError, json.JSONDecodeError):
+                pass
+
     if not ANTIGRAVITY_TOKENS_FILE.exists():
         return {}
 
@@ -1420,17 +1486,26 @@ def antigravity_refresh_token(store: dict[str, Any], email: str) -> str | None:
     return refresh_token
 
 
-def antigravity_client_credentials(exe: str) -> tuple[str | None, str | None]:
-    try:
-        source = Path(exe).read_text(encoding="utf-8")
-    except OSError:
-        return None, None
+def antigravity_client_credentials(exe: str | None = None) -> tuple[str | None, str | None]:
+    env_id = os.environ.get("ANTIGRAVITY_CLIENT_ID", "").strip()
+    env_secret = os.environ.get("ANTIGRAVITY_CLIENT_SECRET", "").strip()
+    if env_id and env_secret:
+        return env_id, env_secret
 
-    client_id_match = re.search(r'CLIENT_ID\s*=\s*"([^"]+)"', source)
-    client_secret_match = re.search(r'CLIENT_SECRET\s*=\s*"([^"]+)"', source)
-    client_id = client_id_match.group(1) if client_id_match else None
-    client_secret = client_secret_match.group(1) if client_secret_match else None
-    return client_id, client_secret
+    if exe:
+        try:
+            source = Path(exe).read_text(encoding="utf-8")
+            client_id_match = re.search(r'CLIENT_ID\s*=\s*"([^"]+)"', source)
+            client_secret_match = re.search(r'CLIENT_SECRET\s*=\s*"([^"]+)"', source)
+            if client_id_match and client_secret_match:
+                return client_id_match.group(1), client_secret_match.group(1)
+        except OSError:
+            pass
+
+    return (
+        base64.b64decode(ANTIGRAVITY_PUBLIC_CLIENT_ID_B64).decode("utf-8"),
+        base64.b64decode(ANTIGRAVITY_PUBLIC_CLIENT_SECRET_B64).decode("utf-8"),
+    )
 
 
 def antigravity_post_json(
@@ -1559,44 +1634,174 @@ def antigravity_refresh_access_token(
     )
 
 
+def _antigravity_cloudcode_post(
+    path: str,
+    access_token: str,
+    body: dict[str, Any],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": ANTIGRAVITY_USER_AGENT,
+    }
+    last_exc: Exception | None = None
+    for base in (ANTIGRAVITY_CLOUD_CODE_BASE_URL, ANTIGRAVITY_CLOUD_CODE_FALLBACK_URL):
+        try:
+            return antigravity_post_json(f"{base}{path}", body, timeout_seconds, headers=headers)
+        except (RuntimeError, urllib.error.URLError, OSError, ValueError) as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("No Antigravity endpoint available")
+
+
 def antigravity_fetch_project_id(access_token: str, timeout_seconds: float) -> dict[str, Any]:
-    body = {"metadata": {"ideType": "ANTIGRAVITY"}}
-    return antigravity_post_json(
-        ANTIGRAVITY_LOAD_CODE_ASSIST_URL,
-        body,
-        timeout_seconds,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": "antigravity/windows/amd64",
-        },
-    )
+    body = {
+        "metadata": {
+            "ideType": "ANTIGRAVITY",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI",
+        }
+    }
+    return _antigravity_cloudcode_post("/v1internal:loadCodeAssist", access_token, body, timeout_seconds)
+
+
+def antigravity_fetch_quota_summary(access_token: str, timeout_seconds: float) -> dict[str, Any]:
+    try:
+        return _antigravity_cloudcode_post("/v1internal:retrieveUserQuotaSummary", access_token, {}, timeout_seconds)
+    except (RuntimeError, urllib.error.URLError, OSError, ValueError):
+        return {}
 
 
 def antigravity_fetch_quota(access_token: str, project_id: str, timeout_seconds: float) -> dict[str, Any]:
     body = {"project": project_id or "bamboo-precept-lgxtn"}
-    return antigravity_post_json(
-        ANTIGRAVITY_QUOTA_API_URL,
-        body,
-        timeout_seconds,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": ANTIGRAVITY_USER_AGENT,
-        },
-    )
+    return _antigravity_cloudcode_post("/v1internal:fetchAvailableModels", access_token, body, timeout_seconds)
+
+
+ANTIGRAVITY_POOL_SPEC: tuple[tuple[str, str, int], ...] = (
+    ("argon", "Argon", 10080),
+    ("flash", "Flash", 300),
+    ("claude", "Claude", 300),
+)
+
+
+def _antigravity_pool_entry(
+    key: str,
+    label: str,
+    remaining_fraction: float,
+    window_minutes: int,
+    reset_time: str,
+) -> dict[str, Any]:
+    clamped = max(0.0, min(1.0, float(remaining_fraction)))
+    used_pct = round((1.0 - clamped) * 100.0, 1)
+    pct_left = int(round(clamped * 100.0))
+    return {
+        "key": key,
+        "name": label,
+        "label": label,
+        "usedPercent": used_pct,
+        "percentage": pct_left,
+        "windowMinutes": int(window_minutes),
+        "resetTime": reset_time,
+        "resetsAt": reset_time,
+    }
+
+
+def consolidate_antigravity_pools(
+    quota_summary: dict[str, Any] | None,
+    raw_models: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Collapse Antigravity's model catalog into its 3 shared quota pools:
+    Argon (Gemini 4 Argon), Flash (Gemini Flash/Pro), and Claude (Claude & GPT-OSS).
+    Returns (pools, weekly_reset_time).
+    """
+    by_key: dict[str, dict[str, Any]] = {}
+    weekly_reset = ""
+
+    groups = quota_summary.get("groups") if isinstance(quota_summary, dict) else None
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            gname = str(group.get("displayName") or "").lower()
+            buckets = [b for b in (group.get("buckets") or []) if isinstance(b, dict)]
+            if not buckets:
+                continue
+            bucket_ids = " ".join(str(b.get("bucketId") or "").lower() for b in buckets)
+            if "argon" in gname or "argon" in bucket_ids:
+                pool_key, pool_label, default_win = ("argon", "Argon", 10080)
+            elif "claude" in gname or "gpt" in gname or "3p" in bucket_ids:
+                pool_key, pool_label, default_win = ("claude", "Claude", 300)
+            elif "gemini" in gname or "gemini" in bucket_ids:
+                pool_key, pool_label, default_win = ("flash", "Flash", 300)
+            else:
+                continue
+
+            best_bucket: tuple[float, int, str] | None = None
+            for bucket in buckets:
+                rem = bucket.get("remainingFraction")
+                if not isinstance(rem, (int, float)) or isinstance(rem, bool):
+                    continue
+                rem_f = max(0.0, min(1.0, float(rem)))
+                win_str = str(bucket.get("window") or "").lower()
+                win_min = 10080 if "week" in win_str else (300 if "5h" in win_str or "hour" in win_str else default_win)
+                reset_str = str(bucket.get("resetTime") or "").strip()
+                if win_min == 10080 and reset_str and (pool_key == "argon" or not weekly_reset):
+                    weekly_reset = reset_str
+                # Pick the tighter (lower remainingFraction) bucket; on a tie,
+                # prefer the shorter window (5h) so the countdown shows the next
+                # active reset, matching fetchAvailableModels.
+                candidate = (round(rem_f, 6), win_min, reset_str)
+                if best_bucket is None or (candidate[0], candidate[1]) < (best_bucket[0], best_bucket[1]):
+                    best_bucket = candidate
+
+            if best_bucket is not None:
+                by_key[pool_key] = _antigravity_pool_entry(
+                    pool_key, pool_label, best_bucket[0], best_bucket[1], best_bucket[2]
+                )
+
+    if isinstance(raw_models, dict):
+        model_candidates: dict[str, tuple[float, int, str]] = {}
+        for name, info in raw_models.items():
+            if not isinstance(info, dict) or info.get("isInternal"):
+                continue
+            lower_name = str(name).lower()
+            if lower_name.startswith(("chat_", "tab_")):
+                continue
+            quota_info = info.get("quotaInfo")
+            if not isinstance(quota_info, dict):
+                continue
+            rem = quota_info.get("remainingFraction")
+            if not isinstance(rem, (int, float)) or isinstance(rem, bool):
+                continue
+            rem_f = max(0.0, min(1.0, float(rem)))
+            reset_str = str(quota_info.get("resetTime") or "").strip()
+            if "argon" in lower_name:
+                pool_key, win_min = "argon", 10080
+                if reset_str and not weekly_reset:
+                    weekly_reset = reset_str
+            elif "claude" in lower_name or "gpt" in lower_name:
+                pool_key, win_min = "claude", 300
+            elif "gemini" in lower_name:
+                pool_key, win_min = "flash", 300
+            else:
+                continue
+            prev = model_candidates.get(pool_key)
+            if prev is None or rem_f < prev[0]:
+                model_candidates[pool_key] = (rem_f, win_min, reset_str)
+
+        for pool_key, pool_label, default_win in ANTIGRAVITY_POOL_SPEC:
+            if pool_key not in by_key and pool_key in model_candidates:
+                rem_f, win_min, reset_str = model_candidates[pool_key]
+                by_key[pool_key] = _antigravity_pool_entry(
+                    pool_key, pool_label, rem_f, win_min, reset_str
+                )
+
+    pools = [by_key[key] for key, _, _ in ANTIGRAVITY_POOL_SPEC if key in by_key]
+    return pools, weekly_reset
 
 
 def fetch_antigravity_quota(spec: ProviderSpec, timeout_seconds: float) -> dict[str, Any]:
-    exe = shutil.which("antigravity-kit")
-    if not exe:
-        return {
-            "provider": spec.key,
-            "label": spec.label,
-            "state": "missing",
-            "source": "",
-            "summary": "antigravity-kit is not installed or not reachable.",
-            "raw": None,
-        }
-
     store = load_antigravity_token_store()
     email = antigravity_active_email(store)
     if not email:
@@ -1605,7 +1810,7 @@ def fetch_antigravity_quota(spec: ProviderSpec, timeout_seconds: float) -> dict[
             "label": spec.label,
             "state": "missing",
             "source": "tokens",
-            "summary": "No Antigravity account found in ~/.antigravity-kit/tokens.json.",
+            "summary": "No Antigravity account found in Pi auth.json or ~/.antigravity-kit/tokens.json.",
             "raw": None,
         }
 
@@ -1620,6 +1825,7 @@ def fetch_antigravity_quota(spec: ProviderSpec, timeout_seconds: float) -> dict[
             "raw": None,
         }
 
+    exe = shutil.which("antigravity-kit")
     client_id, client_secret = antigravity_client_credentials(exe)
     if not client_id or not client_secret:
         return {
@@ -1631,14 +1837,23 @@ def fetch_antigravity_quota(spec: ProviderSpec, timeout_seconds: float) -> dict[
             "raw": None,
         }
 
+    entry = store.get(email) if isinstance(store.get(email), dict) else {}
+    stored_project = entry.get("projectId") if isinstance(entry, dict) else None
+
     try:
         token_response = antigravity_refresh_access_token(refresh_token, client_id, client_secret, timeout_seconds)
         access_token = token_response["access_token"]
         user_info = antigravity_get_json("https://www.googleapis.com/oauth2/v2/userinfo", access_token, timeout_seconds)
         project_info = antigravity_fetch_project_id(access_token, timeout_seconds)
+        project_id = str(
+            project_info.get("cloudaicompanionProject")
+            or stored_project
+            or "bamboo-precept-lgxtn"
+        )
+        quota_summary = antigravity_fetch_quota_summary(access_token, timeout_seconds)
         quota_result = antigravity_fetch_quota(
             access_token,
-            str(project_info.get("cloudaicompanionProject") or "bamboo-precept-lgxtn"),
+            project_id,
             timeout_seconds,
         )
     except (RuntimeError, urllib.error.URLError, OSError, ValueError) as exc:
@@ -1646,7 +1861,7 @@ def fetch_antigravity_quota(spec: ProviderSpec, timeout_seconds: float) -> dict[
             "provider": spec.key,
             "label": spec.label,
             "state": "error",
-            "source": "local",
+            "source": "oauth",
             "summary": f"Antigravity fetch failed: {exc}",
             "raw": None,
         }
@@ -1655,42 +1870,32 @@ def fetch_antigravity_quota(spec: ProviderSpec, timeout_seconds: float) -> dict[
             "provider": spec.key,
             "label": spec.label,
             "state": "error",
-            "source": "local",
+            "source": "oauth",
             "summary": "Antigravity token refresh did not return an access token.",
             "raw": None,
         }
 
-    subscription_tier = project_info.get("paidTier", {}).get("id") if isinstance(project_info.get("paidTier"), dict) else None
-    if not subscription_tier and isinstance(project_info.get("currentTier"), dict):
-        subscription_tier = project_info["currentTier"].get("id")
+    paid_tier = project_info.get("paidTier") if isinstance(project_info.get("paidTier"), dict) else {}
+    current_tier = project_info.get("currentTier") if isinstance(project_info.get("currentTier"), dict) else {}
+    subscription_tier = paid_tier.get("id") or current_tier.get("id")
+    plan_name = paid_tier.get("name") or current_tier.get("name") or subscription_tier
 
-    models: list[dict[str, Any]] = []
-    raw_models = quota_result.get("models")
-    if isinstance(raw_models, dict):
-        for name, info in raw_models.items():
-            if not isinstance(info, dict):
-                continue
-            quota_info = info.get("quotaInfo")
-            if not isinstance(quota_info, dict):
-                continue
-            remaining_fraction = quota_info.get("remainingFraction")
-            if not isinstance(remaining_fraction, (int, float)):
-                continue
-            pct = int(round(max(0.0, min(1.0, float(remaining_fraction))) * 100))
-            if "gemini" in name.lower() or "claude" in name.lower():
-                models.append({
-                    "name": name,
-                    "percentage": pct,
-                    "resetTime": quota_info.get("resetTime") or "",
-                })
+    pools, weekly_reset = consolidate_antigravity_pools(
+        quota_summary,
+        quota_result.get("models") if isinstance(quota_result.get("models"), dict) else None,
+    )
 
     raw: dict[str, Any] = {
         "email": str(user_info.get("email") or email),
-        "method": "auth quota",
-        "models": sorted(models, key=lambda model: str(model.get("name", ""))),
+        "method": "oauth",
+        "pools": pools,
     }
+    if plan_name:
+        raw["plan"] = str(plan_name)
     if subscription_tier:
-        raw["subscriptionTier"] = subscription_tier
+        raw["tierId"] = str(subscription_tier)
+    if weekly_reset:
+        raw["weeklyResetTime"] = weekly_reset
     if quota_result.get("isForbidden"):
         raw["isForbidden"] = True
 
@@ -1699,17 +1904,22 @@ def fetch_antigravity_quota(spec: ProviderSpec, timeout_seconds: float) -> dict[
             "provider": spec.key,
             "label": spec.label,
             "state": "error",
-            "source": "local",
+            "source": "oauth",
             "summary": "Account forbidden (403).",
             "raw": raw,
         }
+
+    summary_parts = [f"{p['label']} {p['percentage']}% left" for p in pools]
+    if plan_name:
+        summary_parts.append(f"plan={plan_name}")
+    summary_text = "; ".join(summary_parts) if summary_parts else str(plan_name or user_info.get("email") or "antigravity")
 
     return {
         "provider": spec.key,
         "label": spec.label,
         "state": "ok",
-        "source": "local",
-        "summary": str(subscription_tier or user_info.get("email") or "antigravity-kit"),
+        "source": "oauth",
+        "summary": summary_text,
         "raw": raw,
     }
 
@@ -3113,13 +3323,16 @@ def provider_lines(item: dict[str, Any]) -> list[str]:
                     lines.append(f"  {title}: {value}")
 
         if item["provider"] == "antigravity":
-            email = raw.get("email")
-            method = raw.get("method")
-            if isinstance(email, str) and email:
-                lines.append(f"  Account: {email}")
-            if isinstance(method, str) and method:
-                lines.append(f"  Method: {method}")
-            model_lines = format_antigravity_models(raw, width=width)
+            pools = raw.get("pools")
+            if isinstance(pools, list) and pools:
+                for pool in pools:
+                    if not isinstance(pool, dict):
+                        continue
+                    line = format_compact_quota_line(str(pool.get("label") or pool.get("name") or "pool"), pool)
+                    if line:
+                        model_lines.append(line)
+            else:
+                model_lines = format_antigravity_models(raw, width=None)
             if model_lines:
                 lines.extend(model_lines)
 
@@ -3160,6 +3373,9 @@ def render_text(results: list[dict[str, Any]]) -> None:
                     auth_type = raw.get("auth_type")
                     if isinstance(auth_type, str) and auth_type:
                         extra = auth_type
+
+        if item["provider"] == "antigravity" and not extra and isinstance(raw, dict):
+            extra = str(raw.get("plan") or raw.get("subscriptionTier") or raw.get("tierId") or "")
 
         if item["provider"] not in {"antigravity", "openrouter"} and not extra and isinstance(raw, dict):
                 identity = nested_get(raw, "usage", "identity") or raw.get("identity") or {}
@@ -3295,23 +3511,35 @@ def render_text(results: list[dict[str, Any]]) -> None:
                 print_fitted_text(item["summary"], indent="  ", width=width)
 
         elif item["provider"] == "antigravity" and isinstance(raw, dict):
-            email = raw.get("email")
-            method = raw.get("method")
-            if isinstance(email, str) and email:
-                print(f"  {FGY}Account: {email}{R}")
-            if isinstance(method, str) and method:
-                print(f"  {FGY}Method: {method}{R}")
-            subscription = raw.get("subscriptionTier")
-            if isinstance(subscription, str) and subscription:
-                print(f"  {FGY}Subscription: {subscription}{R}")
-
-            model_lines = format_antigravity_models(raw, width=width)
-            if model_lines:
-                print(model_lines[0])
-                for line in model_lines[1:]:
-                    print(line)
+            pools = raw.get("pools")
+            if isinstance(pools, list) and pools:
+                for pool in pools:
+                    if not isinstance(pool, dict):
+                        continue
+                    line = format_compact_quota_line(
+                        str(pool.get("label") or pool.get("name") or "pool"),
+                        pool,
+                    )
+                    if line:
+                        print(line)
+                weekly_reset_at = raw.get("weeklyResetTime")
+                if not isinstance(weekly_reset_at, str) or not weekly_reset_at:
+                    for pool in pools:
+                        if isinstance(pool, dict) and pool.get("windowMinutes") == 10080:
+                            weekly_reset_at = pool.get("resetsAt") or pool.get("resetTime")
+                            break
+                if isinstance(weekly_reset_at, str) and weekly_reset_at:
+                    pace = format_window_left_line("wk pace", weekly_reset_at, 10080)
+                    if pace:
+                        print(pace)
             else:
-                print_fitted_text(item["summary"], indent="  ", width=width)
+                model_lines = format_antigravity_models(raw, width=width)
+                if model_lines:
+                    print(model_lines[0])
+                    for line in model_lines[1:]:
+                        print(line)
+                else:
+                    print_fitted_text(item["summary"], indent="  ", width=width)
 
         elif item["provider"] == "openrouter" and isinstance(raw, dict):
             usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else raw
@@ -3533,7 +3761,15 @@ def fetch_remote_results(remotes_file: Path, default_timeout: float) -> list[dic
 # Final panel order (2026-10-09, Admiral): subscriptions first — codex, claude,
 # opencode-go (back where it was), mistral last of them — then the reserve
 # tank: OpenRouter directly beneath Mistral, then NeuralWatt.
-PROVIDER_DISPLAY_ORDER = ("codex", "claude", "opencode-go", "mistral", "openrouter", "neuralwatt")
+PROVIDER_DISPLAY_ORDER = (
+    "codex",
+    "claude",
+    "antigravity",
+    "opencode-go",
+    "mistral",
+    "openrouter",
+    "neuralwatt",
+)
 
 
 def order_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
